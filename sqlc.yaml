@@ -1,0 +1,26 @@
+version: "2"
+sql:
+  - engine: sqlite
+    schema: db/sqlite/schema.sql
+    queries: db/sqlite/queries.sql
+    gen:
+      go:
+        package: sqlitedb
+        out: internal/store/sqlitedb
+        overrides:
+          - column: sessions.revoked_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: refresh_tokens.consumed_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+  - engine: postgresql
+    schema: db/postgres/schema.sql
+    queries: db/postgres/queries.sql
+    gen:
+      go:
+        package: postgresdb
+        out: internal/store/postgresdb
+        sql_package: database/sql

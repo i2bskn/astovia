@@ -1,0 +1,46 @@
+name: astovia-dev
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: astovia
+      POSTGRES_PASSWORD: development-only
+      POSTGRES_DB: astovia_test
+    ports:
+      - "127.0.0.1:55439:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U astovia -d astovia_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  go:
+    image: golang:1.26.10
+    working_dir: /src
+    volumes:
+      - .:/src
+      - go-mod:/go/pkg/mod
+      - go-build:/root/.cache/go-build
+    environment:
+      ASTOVIA_TEST_POSTGRES: postgres://astovia:development-only@postgres:5432/astovia_test?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  node:
+    image: node:22
+    working_dir: /src/web
+    environment:
+      CI: "true"
+    volumes:
+      - .:/src
+    command: sh -c 'corepack pnpm install --frozen-lockfile && corepack pnpm build'
+  sqlc:
+    image: sqlc/sqlc:1.31.1
+    working_dir: /src
+    volumes:
+      - .:/src
+    command: generate
+volumes:
+  go-mod:
+  go-build:

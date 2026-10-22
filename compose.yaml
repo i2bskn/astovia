@@ -1,0 +1,43 @@
+name: astovia-local
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    volumes:
+      - ./cmd:/src/cmd:ro
+      - ./internal:/src/internal:ro
+      - ./db:/src/db:ro
+      - ./go.mod:/src/go.mod:ro
+      - ./go.sum:/src/go.sum:ro
+      - ./.air.toml:/src/.air.toml:ro
+      - ./data:/app/data
+    environment:
+      ASTOVIA_ADDR: 0.0.0.0:8080
+      ASTOVIA_PUBLIC_URL: http://localhost:5173
+      ASTOVIA_DB_DRIVER: sqlite
+      ASTOVIA_DB_DSN: file:/app/data/astovia.db
+      ASTOVIA_JWT_SECRET: "${ASTOVIA_JWT_SECRET:-}"
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend-development
+    working_dir: /src/web
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    command: ["node", "node_modules/vite/bin/vite.js", "--host", "0.0.0.0", "--port", "5173", "--strictPort"]
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ./web/src:/src/web/src:ro
+      - ./web/index.html:/src/web/index.html:ro
+      - ./web/public:/src/web/public:ro
+      - ./web/vite.config.ts:/src/web/vite.config.ts:ro
+      - ./web/tsconfig.json:/src/web/tsconfig.json:ro
+    environment:
+      ASTOVIA_DEV_API_URL: http://app:8080
+      ASTOVIA_DEV_POLLING: "true"
+    depends_on:
+      - app

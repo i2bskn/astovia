@@ -1,0 +1,25 @@
+root = "."
+tmp_dir = ".air-tmp"
+
+[build]
+cmd = "CGO_ENABLED=0 go build -o /src/.air-tmp/astovia ./cmd/astovia"
+bin = "/src/.air-tmp/astovia"
+args_bin = ["serve"]
+include_dir = ["cmd", "internal", "db"]
+include_file = ["go.mod", "go.sum"]
+include_ext = ["go", "sql", "hcl"]
+exclude_regex = ["_test.go$"]
+exclude_dir = [".air-tmp", "web", "data", "bin", "work", "output", ".git"]
+exclude_unchanged = true
+poll = true
+poll_interval = 1000
+delay = 1000
+stop_on_error = true
+send_interrupt = true
+kill_delay = "1s"
+
+[log]
+time = true
+
+[misc]
+clean_on_exit = false
