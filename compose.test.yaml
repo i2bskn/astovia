@@ -35,6 +35,28 @@ services:
     volumes:
       - .:/src
     command: sh -c 'corepack pnpm install --frozen-lockfile && corepack pnpm build'
+  # Atlas CLI for schema generation and migration; the host needs no Atlas.
+  atlas:
+    image: arigaio/atlas:1.2.2
+    working_dir: /src
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    volumes:
+      - .:/src
+  # Disposable dev database used only by Atlas to normalize the PostgreSQL HCL.
+  # scripts/generate.sh recreates it on every run and removes it afterwards.
+  atlas-dev-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: atlas
+      POSTGRES_PASSWORD: development-only
+      POSTGRES_DB: atlas_dev
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas_dev"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
   sqlc:
     image: sqlc/sqlc:1.31.1
     working_dir: /src

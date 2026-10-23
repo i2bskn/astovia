@@ -136,3 +136,64 @@ test('a second 401 does not create a refresh loop', async () => {
   assert.equal(privateCalls, 2);
   assert.equal(auth.getSnapshot().status, 'anonymous');
 });
+
+test('login failures map status codes to messages', async () => {
+  for (const [status, check] of [
+    [401, (error) => assert.equal(error, 'ユーザー名またはパスワードを確認してください。')],
+    [429, (error) => assert.ok(error.startsWith('試行回数が上限に達しました'), error)],
+    [403, (error) => assert.ok(error.startsWith('接続先の設定を確認できませんでした'), error)],
+    [500, (error) => assert.ok(error.startsWith('サーバーに接続できませんでした'), error)],
+  ]) {
+    const { auth } = await harness(async () => json({ error: { code: 'x', message: 'x' } }, status));
+    await auth.login('test-user', 'test-password');
+    assert.equal(auth.getSnapshot().status, 'anonymous', `status ${status}`);
+    assert.equal(auth.getSnapshot().user, null);
+    check(auth.getSnapshot().error);
+  }
+});
+
+test('malformed login responses do not authenticate', async () => {
+  const { user: _omitted, ...withoutUser } = session;
+  for (const body of [{ ...session, expires_in: 0 }, withoutUser]) {
+    const calls = [];
+    const { auth } = await harness(async (path) => {
+      calls.push(path);
+      if (path === '/auth/login') return json(body);
+      return json(user);
+    });
+    await auth.login('test-user', 'test-password');
+    assert.notEqual(auth.getSnapshot().status, 'authenticated');
+    assert.equal(auth.getSnapshot().user, null);
+    assert.deepEqual(calls, ['/auth/login']);
+  }
+});
+
+test('session-changed from another tab triggers a refresh', async () => {
+  const calls = [];
+  const { auth, receive } = await harness(async (path) => {
+    calls.push(path);
+    if (path === '/auth/refresh') return json(session);
+    if (path === '/api/v1/me') return json(user);
+    return json({}, 404);
+  });
+  receive('session-changed');
+  await until(() => auth.getSnapshot().status === 'authenticated');
+  assert.equal(calls[0], '/auth/refresh');
+  assert.deepEqual(auth.getSnapshot().user, user);
+});
+
+test('request sends the access token as a Bearer header', async () => {
+  const headers = [];
+  const { auth, request } = await harness(async (path, init) => {
+    if (path === '/auth/login') return json(session);
+    headers.push([path, init.headers.Authorization]);
+    if (path === '/api/v1/me') return json(user);
+    return json({ ok: true });
+  });
+  await auth.login('test-user', 'test-password');
+  assert.deepEqual(await request('/api/v1/test'), { ok: true });
+  assert.deepEqual(headers, [
+    ['/api/v1/me', 'Bearer test-access-token'],
+    ['/api/v1/test', 'Bearer test-access-token'],
+  ]);
+});

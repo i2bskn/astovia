@@ -93,25 +93,25 @@ func (q *Queries) DisableUser(ctx context.Context, id string) error {
 	return err
 }
 
-const getAuthenticated = `-- name: GetAuthenticated :one
-SELECT u.id, u.username, u.password_hash, u.disabled, u.created_at FROM users u JOIN sessions s ON s.user_id=u.id
-WHERE u.id=$1 AND s.id=$2 AND u.disabled=0 AND s.revoked_at IS NULL AND s.expires_at>$3
+const getActiveSession = `-- name: GetActiveSession :one
+SELECT id, user_id, expires_at, revoked_at, created_at FROM sessions
+WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL AND expires_at > $3
 `
 
-type GetAuthenticatedParams struct {
-	ID        string
-	ID_2      string
-	ExpiresAt int64
+type GetActiveSessionParams struct {
+	ID     string
+	UserID string
+	Now    int64
 }
 
-func (q *Queries) GetAuthenticated(ctx context.Context, arg GetAuthenticatedParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, getAuthenticated, arg.ID, arg.ID_2, arg.ExpiresAt)
-	var i User
+func (q *Queries) GetActiveSession(ctx context.Context, arg GetActiveSessionParams) (Session, error) {
+	row := q.db.QueryRowContext(ctx, getActiveSession, arg.ID, arg.UserID, arg.Now)
+	var i Session
 	err := row.Scan(
 		&i.ID,
-		&i.Username,
-		&i.PasswordHash,
-		&i.Disabled,
+		&i.UserID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
 		&i.CreatedAt,
 	)
 	return i, err

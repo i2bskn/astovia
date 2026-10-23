@@ -8,49 +8,53 @@ import (
 
 type postgresQueries struct{ q *db.Queries }
 
-func (a postgresQueries) userName(c context.Context, n string) (User, error) {
-	u, e := a.q.GetUserByName(c, n)
-	return User(u), e
+var _ queries = postgresQueries{}
+
+func (q postgresQueries) userByName(ctx context.Context, name string) (User, error) {
+	user, err := q.q.GetUserByName(ctx, name)
+	return User(user), err
 }
-func (a postgresQueries) userID(c context.Context, n string) (User, error) {
-	u, e := a.q.GetUserByID(c, n)
-	return User(u), e
+func (q postgresQueries) userByID(ctx context.Context, id string) (User, error) {
+	user, err := q.q.GetUserByID(ctx, id)
+	return User(user), err
 }
-func (a postgresQueries) lockUser(c context.Context, n string) (User, error) {
-	u, e := a.q.LockUserByID(c, n)
-	return User(u), e
+func (q postgresQueries) lockUser(ctx context.Context, id string) (User, error) {
+	user, err := q.q.LockUserByID(ctx, id)
+	return User(user), err
 }
-func (a postgresQueries) authenticated(c context.Context, u, s string, now int64) (User, error) {
-	r, e := a.q.GetAuthenticated(c, db.GetAuthenticatedParams{ID: u, ID_2: s, ExpiresAt: now})
-	return User(r), e
+func (q postgresQueries) createUser(ctx context.Context, user User) error {
+	return q.q.CreateUser(ctx, db.CreateUserParams{ID: user.ID, Username: user.Username, PasswordHash: user.PasswordHash, CreatedAt: user.CreatedAt})
 }
-func (a postgresQueries) createUser(c context.Context, u User) error {
-	return a.q.CreateUser(c, db.CreateUserParams{ID: u.ID, Username: u.Username, PasswordHash: u.PasswordHash, CreatedAt: u.CreatedAt})
+func (q postgresQueries) resetPassword(ctx context.Context, id, hash string) error {
+	return q.q.ResetPassword(ctx, db.ResetPasswordParams{ID: id, PasswordHash: hash})
 }
-func (a postgresQueries) reset(c context.Context, id, h string) error {
-	return a.q.ResetPassword(c, db.ResetPasswordParams{ID: id, PasswordHash: h})
+func (q postgresQueries) disableUser(ctx context.Context, id string) error {
+	return q.q.DisableUser(ctx, id)
 }
-func (a postgresQueries) disable(c context.Context, id string) error { return a.q.DisableUser(c, id) }
-func (a postgresQueries) createSession(c context.Context, s Session) error {
-	return a.q.CreateSession(c, db.CreateSessionParams{ID: s.ID, UserID: s.UserID, ExpiresAt: s.ExpiresAt, CreatedAt: s.CreatedAt})
+func (q postgresQueries) createSession(ctx context.Context, session Session) error {
+	return q.q.CreateSession(ctx, db.CreateSessionParams{ID: session.ID, UserID: session.UserID, ExpiresAt: session.ExpiresAt, CreatedAt: session.CreatedAt})
 }
-func (a postgresQueries) session(c context.Context, id string) (Session, error) {
-	s, e := a.q.GetSession(c, id)
-	return Session(s), e
+func (q postgresQueries) sessionByID(ctx context.Context, id string) (Session, error) {
+	session, err := q.q.GetSession(ctx, id)
+	return Session(session), err
 }
-func (a postgresQueries) revoke(c context.Context, id string, n int64) error {
-	return a.q.RevokeSession(c, db.RevokeSessionParams{ID: id, RevokedAt: sql.NullInt64{Int64: n, Valid: true}})
+func (q postgresQueries) activeSession(ctx context.Context, id, userID string, now int64) (Session, error) {
+	session, err := q.q.GetActiveSession(ctx, db.GetActiveSessionParams{ID: id, UserID: userID, Now: now})
+	return Session(session), err
 }
-func (a postgresQueries) revokeUser(c context.Context, id string, n int64) error {
-	return a.q.RevokeUserSessions(c, db.RevokeUserSessionsParams{UserID: id, RevokedAt: sql.NullInt64{Int64: n, Valid: true}})
+func (q postgresQueries) revokeSession(ctx context.Context, id string, now int64) error {
+	return q.q.RevokeSession(ctx, db.RevokeSessionParams{ID: id, RevokedAt: sql.NullInt64{Int64: now, Valid: true}})
 }
-func (a postgresQueries) createRefresh(c context.Context, r Refresh) error {
-	return a.q.CreateRefresh(c, db.CreateRefreshParams{Hash: r.Hash, SessionID: r.SessionID, CreatedAt: r.CreatedAt})
+func (q postgresQueries) revokeUserSessions(ctx context.Context, userID string, now int64) error {
+	return q.q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: userID, RevokedAt: sql.NullInt64{Int64: now, Valid: true}})
 }
-func (a postgresQueries) refresh(c context.Context, h string) (Refresh, error) {
-	r, e := a.q.GetRefresh(c, h)
-	return Refresh(r), e
+func (q postgresQueries) createRefresh(ctx context.Context, refresh Refresh) error {
+	return q.q.CreateRefresh(ctx, db.CreateRefreshParams{Hash: refresh.Hash, SessionID: refresh.SessionID, CreatedAt: refresh.CreatedAt})
 }
-func (a postgresQueries) consume(c context.Context, h string, n int64) (int64, error) {
-	return a.q.ConsumeRefresh(c, db.ConsumeRefreshParams{Hash: h, ConsumedAt: sql.NullInt64{Int64: n, Valid: true}})
+func (q postgresQueries) refreshByHash(ctx context.Context, hash string) (Refresh, error) {
+	refresh, err := q.q.GetRefresh(ctx, hash)
+	return Refresh(refresh), err
+}
+func (q postgresQueries) consumeRefresh(ctx context.Context, hash string, now int64) (int64, error) {
+	return q.q.ConsumeRefresh(ctx, db.ConsumeRefreshParams{Hash: hash, ConsumedAt: sql.NullInt64{Int64: now, Valid: true}})
 }

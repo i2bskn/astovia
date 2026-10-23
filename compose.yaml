@@ -14,6 +14,10 @@ services:
       - ./go.sum:/src/go.sum:ro
       - ./.air.toml:/src/.air.toml:ro
       - ./data:/app/data
+      # Keeps GOCACHE (/tmp/go-build) across "docker compose run --rm".
+      # Mounted at /tmp so the volume inherits the image's world-writable
+      # /tmp permissions and LOCAL_UID can write to it.
+      - go-build-cache:/tmp
     environment:
       ASTOVIA_ADDR: 0.0.0.0:8080
       ASTOVIA_PUBLIC_URL: http://localhost:5173
@@ -41,3 +45,5 @@ services:
       ASTOVIA_DEV_POLLING: "true"
     depends_on:
       - app
+volumes:
+  go-build-cache:

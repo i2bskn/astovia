@@ -36,6 +36,8 @@ COPY --from=backend /out/astovia /astovia
 COPY --from=backend --chown=1000:1000 /out/data/ /app/data/
 WORKDIR /app
 USER 1000:1000
+# Listen on all interfaces inside the container; direct runs keep 127.0.0.1.
+ENV ASTOVIA_ADDR=0.0.0.0:8080
 EXPOSE 8080
 ENTRYPOINT ["/astovia"]
 CMD ["serve"]

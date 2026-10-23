@@ -18,7 +18,14 @@ import (
 
 const AccessLifetime = 10 * time.Minute
 const SessionLifetime = 7 * 24 * time.Hour
-const PasswordCost = 12
+
+// DefaultPasswordCost is the bcrypt cost used in production.
+const DefaultPasswordCost = 12
+
+// PasswordCost is the bcrypt cost used for new hashes. Only a test package's
+// TestMain may lower it; production code must leave it at DefaultPasswordCost.
+var PasswordCost = DefaultPasswordCost
+
 const audience = "astovia-browser"
 
 var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
@@ -68,12 +75,19 @@ type Service struct {
 	dummy  []byte
 	Now    func() time.Time
 }
+
+// Result is the outcome of a login or refresh. It is an internal type; HTTP
+// handlers copy the public fields into their own response type.
 type Result struct {
-	AccessToken string     `json:"access_token"`
-	ExpiresIn   int        `json:"expires_in"`
-	User        store.User `json:"user"`
-	Refresh     string     `json:"-"`
-	ExpiresAt   int64      `json:"-"`
+	AccessToken string
+	ExpiresIn   int
+	User        store.User
+	Refresh     string
+	// ExpiresAt is the session expiry (Unix seconds).
+	ExpiresAt int64
+	// MaxAge is the refresh cookie lifetime in seconds, computed from the
+	// same clock reading as ExpiresIn.
+	MaxAge int
 }
 
 func New(s *store.Store, secret []byte, issuer string) (*Service, error) {
@@ -108,12 +122,13 @@ func (s *Service) Login(ctx context.Context, name, password string) (Result, err
 	if e != nil {
 		return Result{}, e
 	}
-	now := s.Now().Unix()
-	sess := store.Session{ID: sid, UserID: u.ID, CreatedAt: now, ExpiresAt: now + int64(SessionLifetime/time.Second)}
-	if e = s.Store.Login(ctx, u, sess, store.Refresh{Hash: Hash(raw), SessionID: sid, CreatedAt: now}); e != nil {
+	now := s.Now()
+	unix := now.Unix()
+	sess := store.Session{ID: sid, UserID: u.ID, CreatedAt: unix, ExpiresAt: unix + int64(SessionLifetime/time.Second)}
+	if e = s.Store.Login(ctx, u, sess, store.Refresh{Hash: Hash(raw), SessionID: sid, CreatedAt: unix}); e != nil {
 		return Result{}, e
 	}
-	return s.result(u, sess, raw)
+	return s.result(u, sess, raw, now)
 }
 func (s *Service) Refresh(ctx context.Context, raw string) (Result, error) {
 	if !validToken(raw) {
@@ -123,11 +138,12 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Result, error) {
 	if e != nil {
 		return Result{}, e
 	}
-	u, sess, e := s.Store.Rotate(ctx, Hash(raw), Hash(next), s.Now().Unix())
+	now := s.Now()
+	u, sess, e := s.Store.Rotate(ctx, Hash(raw), Hash(next), now.Unix())
 	if e != nil {
 		return Result{}, e
 	}
-	return s.result(u, sess, next)
+	return s.result(u, sess, next, now)
 }
 func (s *Service) Logout(ctx context.Context, raw string) error {
 	if !validToken(raw) {
@@ -135,22 +151,30 @@ func (s *Service) Logout(ctx context.Context, raw string) error {
 	}
 	return s.Store.Logout(ctx, Hash(raw), s.Now().Unix())
 }
-func (s *Service) result(u store.User, sess store.Session, raw string) (Result, error) {
-	now := s.Now()
-	id, e := Random()
-	if e != nil {
-		return Result{}, e
-	}
+
+// result issues an access token. now must be the same clock reading that was
+// passed to the store, so that the store's ExpiresAt > now check also holds
+// here.
+func (s *Service) result(u store.User, sess store.Session, raw string, now time.Time) (Result, error) {
 	exp := now.Add(AccessLifetime)
 	if exp.Unix() > sess.ExpiresAt {
 		exp = time.Unix(sess.ExpiresAt, 0)
+	}
+	// Defensive: with the same now, Login and Rotate guarantee
+	// sess.ExpiresAt > now, so this branch is not normally reached.
+	if exp.Unix() <= now.Unix() {
+		return Result{}, store.ErrUnauthorized
+	}
+	id, e := Random()
+	if e != nil {
+		return Result{}, e
 	}
 	c := claims{Use: "access", SessionID: sess.ID, RegisteredClaims: jwt.RegisteredClaims{Issuer: s.issuer, Subject: u.ID, Audience: jwt.ClaimStrings{audience}, ExpiresAt: jwt.NewNumericDate(exp), IssuedAt: jwt.NewNumericDate(now), ID: id}}
 	token, e := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString(s.secret)
 	if e != nil {
 		return Result{}, e
 	}
-	return Result{AccessToken: token, ExpiresIn: int(exp.Unix() - now.Unix()), User: u, Refresh: raw, ExpiresAt: sess.ExpiresAt}, nil
+	return Result{AccessToken: token, ExpiresIn: int(exp.Unix() - now.Unix()), User: u, Refresh: raw, ExpiresAt: sess.ExpiresAt, MaxAge: int(sess.ExpiresAt - now.Unix())}, nil
 }
 func (s *Service) Authenticate(ctx context.Context, raw string) (store.User, error) {
 	if len(raw) > 4096 {

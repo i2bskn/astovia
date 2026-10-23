@@ -13,16 +13,18 @@ type dbtx interface {
 	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
 }
 
-func (s *Store) bind(d dbtx) queries {
+// bind returns the driver adapter for conn, which is either the pool or a
+// transaction started from it.
+func (s *Store) bind(conn dbtx) queries {
 	if s.driver == "postgres" {
 		q := postgresdb.New(s.db)
-		if tx, ok := d.(*sql.Tx); ok {
+		if tx, ok := conn.(*sql.Tx); ok {
 			q = q.WithTx(tx)
 		}
 		return postgresQueries{q}
 	}
 	q := sqlitedb.New(s.db)
-	if tx, ok := d.(*sql.Tx); ok {
+	if tx, ok := conn.(*sql.Tx); ok {
 		q = q.WithTx(tx)
 	}
 	return sqliteQueries{q}

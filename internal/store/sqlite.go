@@ -8,49 +8,53 @@ import (
 
 type sqliteQueries struct{ q *db.Queries }
 
-func (a sqliteQueries) userName(c context.Context, n string) (User, error) {
-	u, e := a.q.GetUserByName(c, n)
-	return User(u), e
+var _ queries = sqliteQueries{}
+
+func (q sqliteQueries) userByName(ctx context.Context, name string) (User, error) {
+	user, err := q.q.GetUserByName(ctx, name)
+	return User(user), err
 }
-func (a sqliteQueries) userID(c context.Context, n string) (User, error) {
-	u, e := a.q.GetUserByID(c, n)
-	return User(u), e
+func (q sqliteQueries) userByID(ctx context.Context, id string) (User, error) {
+	user, err := q.q.GetUserByID(ctx, id)
+	return User(user), err
 }
-func (a sqliteQueries) lockUser(c context.Context, n string) (User, error) {
-	u, e := a.q.LockUserByID(c, n)
-	return User(u), e
+func (q sqliteQueries) lockUser(ctx context.Context, id string) (User, error) {
+	user, err := q.q.LockUserByID(ctx, id)
+	return User(user), err
 }
-func (a sqliteQueries) authenticated(c context.Context, u, s string, now int64) (User, error) {
-	r, e := a.q.GetAuthenticated(c, db.GetAuthenticatedParams{ID: u, ID_2: s, ExpiresAt: now})
-	return User(r), e
+func (q sqliteQueries) createUser(ctx context.Context, user User) error {
+	return q.q.CreateUser(ctx, db.CreateUserParams{ID: user.ID, Username: user.Username, PasswordHash: user.PasswordHash, CreatedAt: user.CreatedAt})
 }
-func (a sqliteQueries) createUser(c context.Context, u User) error {
-	return a.q.CreateUser(c, db.CreateUserParams{ID: u.ID, Username: u.Username, PasswordHash: u.PasswordHash, CreatedAt: u.CreatedAt})
+func (q sqliteQueries) resetPassword(ctx context.Context, id, hash string) error {
+	return q.q.ResetPassword(ctx, db.ResetPasswordParams{ID: id, PasswordHash: hash})
 }
-func (a sqliteQueries) reset(c context.Context, id, h string) error {
-	return a.q.ResetPassword(c, db.ResetPasswordParams{ID: id, PasswordHash: h})
+func (q sqliteQueries) disableUser(ctx context.Context, id string) error {
+	return q.q.DisableUser(ctx, id)
 }
-func (a sqliteQueries) disable(c context.Context, id string) error { return a.q.DisableUser(c, id) }
-func (a sqliteQueries) createSession(c context.Context, s Session) error {
-	return a.q.CreateSession(c, db.CreateSessionParams{ID: s.ID, UserID: s.UserID, ExpiresAt: s.ExpiresAt, CreatedAt: s.CreatedAt})
+func (q sqliteQueries) createSession(ctx context.Context, session Session) error {
+	return q.q.CreateSession(ctx, db.CreateSessionParams{ID: session.ID, UserID: session.UserID, ExpiresAt: session.ExpiresAt, CreatedAt: session.CreatedAt})
 }
-func (a sqliteQueries) session(c context.Context, id string) (Session, error) {
-	s, e := a.q.GetSession(c, id)
-	return Session(s), e
+func (q sqliteQueries) sessionByID(ctx context.Context, id string) (Session, error) {
+	session, err := q.q.GetSession(ctx, id)
+	return Session(session), err
 }
-func (a sqliteQueries) revoke(c context.Context, id string, n int64) error {
-	return a.q.RevokeSession(c, db.RevokeSessionParams{ID: id, RevokedAt: sql.NullInt64{Int64: n, Valid: true}})
+func (q sqliteQueries) activeSession(ctx context.Context, id, userID string, now int64) (Session, error) {
+	session, err := q.q.GetActiveSession(ctx, db.GetActiveSessionParams{ID: id, UserID: userID, Now: now})
+	return Session(session), err
 }
-func (a sqliteQueries) revokeUser(c context.Context, id string, n int64) error {
-	return a.q.RevokeUserSessions(c, db.RevokeUserSessionsParams{UserID: id, RevokedAt: sql.NullInt64{Int64: n, Valid: true}})
+func (q sqliteQueries) revokeSession(ctx context.Context, id string, now int64) error {
+	return q.q.RevokeSession(ctx, db.RevokeSessionParams{ID: id, RevokedAt: sql.NullInt64{Int64: now, Valid: true}})
 }
-func (a sqliteQueries) createRefresh(c context.Context, r Refresh) error {
-	return a.q.CreateRefresh(c, db.CreateRefreshParams{Hash: r.Hash, SessionID: r.SessionID, CreatedAt: r.CreatedAt})
+func (q sqliteQueries) revokeUserSessions(ctx context.Context, userID string, now int64) error {
+	return q.q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: userID, RevokedAt: sql.NullInt64{Int64: now, Valid: true}})
 }
-func (a sqliteQueries) refresh(c context.Context, h string) (Refresh, error) {
-	r, e := a.q.GetRefresh(c, h)
-	return Refresh(r), e
+func (q sqliteQueries) createRefresh(ctx context.Context, refresh Refresh) error {
+	return q.q.CreateRefresh(ctx, db.CreateRefreshParams{Hash: refresh.Hash, SessionID: refresh.SessionID, CreatedAt: refresh.CreatedAt})
 }
-func (a sqliteQueries) consume(c context.Context, h string, n int64) (int64, error) {
-	return a.q.ConsumeRefresh(c, db.ConsumeRefreshParams{Hash: h, ConsumedAt: sql.NullInt64{Int64: n, Valid: true}})
+func (q sqliteQueries) refreshByHash(ctx context.Context, hash string) (Refresh, error) {
+	refresh, err := q.q.GetRefresh(ctx, hash)
+	return Refresh(refresh), err
+}
+func (q sqliteQueries) consumeRefresh(ctx context.Context, hash string, now int64) (int64, error) {
+	return q.q.ConsumeRefresh(ctx, db.ConsumeRefreshParams{Hash: hash, ConsumedAt: sql.NullInt64{Int64: now, Valid: true}})
 }

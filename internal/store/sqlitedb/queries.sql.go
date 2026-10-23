@@ -93,32 +93,32 @@ func (q *Queries) DisableUser(ctx context.Context, id string) error {
 	return err
 }
 
-const getAuthenticated = `-- name: GetAuthenticated :one
-SELECT u.id, u.username, u.password_hash, u.disabled, u.created_at FROM users u JOIN sessions s ON s.user_id=u.id
-WHERE u.id=? AND s.id=? AND u.disabled=0 AND s.revoked_at IS NULL AND s.expires_at>?
+const getActiveSession = `-- name: GetActiveSession :one
+SELECT id, user_id, expires_at, revoked_at, created_at FROM sessions
+WHERE id = ?1 AND user_id = ?2 AND revoked_at IS NULL AND expires_at > ?3
 `
 
-type GetAuthenticatedParams struct {
-	ID        string
-	ID_2      string
-	ExpiresAt int64
+type GetActiveSessionParams struct {
+	ID     string
+	UserID string
+	Now    int64
 }
 
-func (q *Queries) GetAuthenticated(ctx context.Context, arg GetAuthenticatedParams) (User, error) {
-	row := q.db.QueryRowContext(ctx, getAuthenticated, arg.ID, arg.ID_2, arg.ExpiresAt)
-	var i User
+func (q *Queries) GetActiveSession(ctx context.Context, arg GetActiveSessionParams) (Session, error) {
+	row := q.db.QueryRowContext(ctx, getActiveSession, arg.ID, arg.UserID, arg.Now)
+	var i Session
 	err := row.Scan(
 		&i.ID,
-		&i.Username,
-		&i.PasswordHash,
-		&i.Disabled,
+		&i.UserID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
 const getRefresh = `-- name: GetRefresh :one
-SELECT hash, session_id, consumed_at, created_at FROM refresh_tokens WHERE hash = ?
+SELECT hash, session_id, consumed_at, created_at FROM refresh_tokens WHERE hash = ?1
 `
 
 func (q *Queries) GetRefresh(ctx context.Context, hash string) (RefreshToken, error) {
@@ -134,7 +134,7 @@ func (q *Queries) GetRefresh(ctx context.Context, hash string) (RefreshToken, er
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, user_id, expires_at, revoked_at, created_at FROM sessions WHERE id = ?
+SELECT id, user_id, expires_at, revoked_at, created_at FROM sessions WHERE id = ?1
 `
 
 func (q *Queries) GetSession(ctx context.Context, id string) (Session, error) {
@@ -151,7 +151,7 @@ func (q *Queries) GetSession(ctx context.Context, id string) (Session, error) {
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, username, password_hash, disabled, created_at FROM users WHERE id = ?
+SELECT id, username, password_hash, disabled, created_at FROM users WHERE id = ?1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -168,7 +168,7 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 }
 
 const getUserByName = `-- name: GetUserByName :one
-SELECT id, username, password_hash, disabled, created_at FROM users WHERE username = ?
+SELECT id, username, password_hash, disabled, created_at FROM users WHERE username = ?1
 `
 
 func (q *Queries) GetUserByName(ctx context.Context, username string) (User, error) {
@@ -185,7 +185,7 @@ func (q *Queries) GetUserByName(ctx context.Context, username string) (User, err
 }
 
 const lockUserByID = `-- name: LockUserByID :one
-SELECT id, username, password_hash, disabled, created_at FROM users WHERE id = ?
+SELECT id, username, password_hash, disabled, created_at FROM users WHERE id = ?1
 `
 
 func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {

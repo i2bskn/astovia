@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/i2bskn/astovia/internal/auth"
@@ -9,104 +10,153 @@ import (
 	"github.com/i2bskn/astovia/internal/store"
 	"io"
 	"io/fs"
+	"log"
 	"mime"
-	"net"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 const CookieName = "astovia_refresh"
 
 type Server struct {
-	cfg      config.Config
-	auth     *auth.Service
-	assets   fs.FS
-	mu       sync.Mutex
-	attempts map[string]bucket
-}
-type bucket struct {
-	start time.Time
-	count int
+	cfg     config.Config
+	auth    *auth.Service
+	assets  fs.FS
+	limiter *loginLimiter
 }
 
-func New(c config.Config, a *auth.Service, assets fs.FS) http.Handler {
-	s := &Server{cfg: c, auth: a, assets: assets, attempts: make(map[string]bucket)}
-	return s
+// userResponse is the public representation of a user.
+type userResponse struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
 }
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Referrer-Policy", "same-origin")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
-	if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") {
-		w.Header().Set("Cache-Control", "no-store")
-	}
-	switch r.URL.Path {
-	case "/":
-		if !method(w, r, "GET") {
-			return
-		}
+
+// authResponse is returned by login and refresh.
+type authResponse struct {
+	AccessToken string       `json:"access_token"`
+	ExpiresIn   int          `json:"expires_in"`
+	User        userResponse `json:"user"`
+}
+
+func toUserResponse(u store.User) userResponse {
+	return userResponse{ID: u.ID, Username: u.Username}
+}
+
+// New returns the application handler.
+func New(c config.Config, a *auth.Service, assets fs.FS) http.Handler {
+	return newServer(c, a, assets).handler()
+}
+
+// newServer builds a Server without wrapping it, so tests in this package can
+// adjust the limiter before calling handler.
+func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
+	return &Server{cfg: c, auth: a, assets: assets, limiter: newLoginLimiter()}
+}
+
+// handler returns the routes wrapped with the common response headers.
+//
+// Patterns carry no method so that method mismatches go through allow and
+// produce the JSON 405 response, and the "/" catch-all produces a JSON 404
+// instead of the ServeMux text responses.
+func (s *Server) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/{$}", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
-	case "/healthz":
-		if !method(w, r, "GET") {
-			return
-		}
+	})))
+	mux.Handle("/healthz", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
-	case "/auth/login", "/auth/refresh", "/auth/logout":
-		if !method(w, r, "POST") {
+	})))
+	mux.Handle("/auth/login", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogin))))
+	mux.Handle("/auth/refresh", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleRefresh))))
+	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))
+	// Every /api/v1/* route must be wrapped with requireUser.
+	mux.Handle("/api/v1/me", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleMe))))
+	mux.Handle("/admin", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
+	})))
+	mux.Handle("/admin/", allow(http.MethodGet, http.HandlerFunc(s.static)))
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		fail(w, 404, "not_found", "Not found.")
+	})
+	return secureHeaders(mux)
+}
+
+func secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// allow rejects requests whose method is not method with a JSON 405.
+func allow(method string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			w.Header().Set("Allow", method)
+			fail(w, 405, "method_not_allowed", "Method not allowed.")
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// browserJSON requires the configured Origin and a JSON content type.
+func (s *Server) browserJSON(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Origin") != s.cfg.PublicURL {
 			fail(w, 403, "origin_rejected", "Request origin is not allowed.")
 			return
 		}
-		mt, _, e := mime.ParseMediaType(r.Header.Get("Content-Type"))
-		if e != nil || mt != "application/json" {
+		mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mt != "application/json" {
 			fail(w, 415, "unsupported_media_type", "Use application/json.")
 			return
 		}
-		s.authentication(w, r)
-	case "/api/v1/me":
-		if !method(w, r, "GET") {
-			return
-		}
-		v := r.Header.Get("Authorization")
-		if !strings.HasPrefix(v, "Bearer ") {
-			s.authError(w, store.ErrUnauthorized)
-			return
-		}
-		u, e := s.auth.Authenticate(r.Context(), strings.TrimPrefix(v, "Bearer "))
-		if e != nil {
-			s.authError(w, e)
-			return
-		}
-		writeJSON(w, 200, u)
-	case "/admin":
-		if !method(w, r, "GET") {
-			return
-		}
-		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
-	default:
-		if strings.HasPrefix(r.URL.Path, "/admin/") {
-			if !method(w, r, "GET") {
-				return
-			}
-			s.static(w, r)
-			return
-		}
-		fail(w, 404, "not_found", "Not found.")
-	}
+		next.ServeHTTP(w, r)
+	})
 }
-func method(w http.ResponseWriter, r *http.Request, want string) bool {
-	if r.Method == want {
-		return true
+
+type userKey struct{}
+
+// requireUser authenticates the Bearer access token and stores the user in
+// the request context for userFrom.
+func (s *Server) requireUser(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		v := r.Header.Get("Authorization")
+		token := strings.TrimPrefix(v, "Bearer ")
+		if !strings.HasPrefix(v, "Bearer ") || token == "" {
+			s.authError(w, r, store.ErrUnauthorized)
+			return
+		}
+		u, err := s.auth.Authenticate(r.Context(), token)
+		if err != nil {
+			s.authError(w, r, err)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, u)))
+	})
+}
+
+func userFrom(ctx context.Context) (store.User, bool) {
+	u, ok := ctx.Value(userKey{}).(store.User)
+	return u, ok
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	u, ok := userFrom(r.Context())
+	if !ok {
+		s.authError(w, r, store.ErrUnauthorized)
+		return
 	}
-	w.Header().Set("Allow", want)
-	fail(w, 405, "method_not_allowed", "Method not allowed.")
-	return false
+	writeJSON(w, 200, toUserResponse(u))
 }
 func decode(w http.ResponseWriter, r *http.Request, out any) bool {
 	body, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
@@ -137,100 +187,77 @@ func decode(w http.ResponseWriter, r *http.Request, out any) bool {
 	}
 	return true
 }
-func (s *Server) authentication(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/auth/login" {
-		if !s.allowed(r.RemoteAddr) {
-			w.Header().Set("Retry-After", "60")
-			fail(w, 429, "rate_limited", "Too many attempts. Try again later.")
-			return
-		}
-		var in struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		}
-		if !decode(w, r, &in) {
-			return
-		}
-		if len(in.Username) > 256 || len(in.Password) > 72 {
-			fail(w, 400, "invalid_request", "Credentials exceed the supported length.")
-			return
-		}
-		result, e := s.auth.Login(r.Context(), in.Username, in.Password)
-		if e != nil {
-			s.authError(w, e)
-			return
-		}
-		s.cookie(w, result.Refresh, result.ExpiresAt, false)
-		writeJSON(w, 200, result)
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.limiter.allow(r.RemoteAddr) {
+		w.Header().Set("Retry-After", "60")
+		fail(w, 429, "rate_limited", "Too many attempts. Try again later.")
 		return
 	}
+	var in struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if len(in.Username) > 256 || len(in.Password) > 72 {
+		fail(w, 400, "invalid_request", "Credentials exceed the supported length.")
+		return
+	}
+	result, err := s.auth.Login(r.Context(), in.Username, in.Password)
+	if err != nil {
+		s.authError(w, r, err)
+		return
+	}
+	s.writeAuthResult(w, result)
+}
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var empty struct{}
 	if !decode(w, r, &empty) {
 		return
 	}
-	raw := ""
-	if c, e := r.Cookie(CookieName); e == nil {
-		raw = c.Value
-	}
-	if r.URL.Path == "/auth/logout" {
-		if e := s.auth.Logout(r.Context(), raw); e != nil {
-			s.authError(w, e)
-			return
-		}
-		s.cookie(w, "", 0, true)
-		w.WriteHeader(204)
+	result, err := s.auth.Refresh(r.Context(), refreshCookie(r))
+	if err != nil {
+		s.authError(w, r, err)
 		return
 	}
-	result, e := s.auth.Refresh(r.Context(), raw)
-	if e != nil {
-		s.authError(w, e)
+	s.writeAuthResult(w, result)
+}
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	var empty struct{}
+	if !decode(w, r, &empty) {
 		return
 	}
-	s.cookie(w, result.Refresh, result.ExpiresAt, false)
-	writeJSON(w, 200, result)
-}
-func (s *Server) cookie(w http.ResponseWriter, v string, expires int64, clear bool) {
-	c := &http.Cookie{Name: CookieName, Value: v, Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(expires, 0)}
-	if clear {
-		c.MaxAge = -1
-	} else {
-		c.MaxAge = int(expires - s.auth.Now().Unix())
+	if err := s.auth.Logout(r.Context(), refreshCookie(r)); err != nil {
+		s.authError(w, r, err)
+		return
 	}
-	http.SetCookie(w, c)
+	s.clearCookie(w)
+	w.WriteHeader(204)
 }
-func (s *Server) authError(w http.ResponseWriter, e error) {
-	if errors.Is(e, store.ErrUnauthorized) {
+func refreshCookie(r *http.Request) string {
+	if c, err := r.Cookie(CookieName); err == nil {
+		return c.Value
+	}
+	return ""
+}
+func (s *Server) writeAuthResult(w http.ResponseWriter, result auth.Result) {
+	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: result.Refresh, Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(result.ExpiresAt, 0), MaxAge: result.MaxAge})
+	writeJSON(w, 200, authResponse{AccessToken: result.AccessToken, ExpiresIn: result.ExpiresIn, User: toUserResponse(result.User)})
+}
+func (s *Server) clearCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(0, 0), MaxAge: -1})
+}
+
+// authError writes the authentication failure response. Errors other than
+// ErrUnauthorized are logged without tokens, passwords or cookie values.
+func (s *Server) authError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrUnauthorized) {
 		fail(w, 401, "unauthorized", "Authentication is required or credentials are invalid.")
-	} else {
-		fail(w, 503, "unavailable", "Authentication is temporarily unavailable. Try again.")
+		return
 	}
-}
-func (s *Server) allowed(remote string) bool {
-	host, _, e := net.SplitHostPort(remote)
-	if e != nil {
-		host = remote
-	}
-	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for k, b := range s.attempts {
-		if now.Sub(b.start) >= time.Minute {
-			delete(s.attempts, k)
-		}
-	}
-	b, ok := s.attempts[host]
-	if !ok {
-		if len(s.attempts) >= 4096 {
-			return false
-		}
-		b = bucket{start: now}
-	}
-	if b.count >= 10 {
-		return false
-	}
-	b.count++
-	s.attempts[host] = b
-	return true
+	log.Printf("auth: %s %s: %v", r.Method, r.URL.Path, err)
+	fail(w, 503, "unavailable", "Authentication is temporarily unavailable. Try again.")
 }
 func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/admin/")

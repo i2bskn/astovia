@@ -8,16 +8,45 @@ import (
 	"github.com/i2bskn/astovia/internal/config"
 	"github.com/i2bskn/astovia/internal/store"
 	"github.com/i2bskn/astovia/internal/testutil"
+	"golang.org/x/crypto/bcrypt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 )
 
+func TestMain(m *testing.M) {
+	auth.PasswordCost = bcrypt.MinCost
+	os.Exit(m.Run())
+}
+
+func jsonKeys(t *testing.T, raw []byte) (map[string]json.RawMessage, []string) {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return m, keys
+}
+
 func TestHTTP(t *testing.T) {
-	s, _ := testutil.Database(t, "sqlite")
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) { testHTTP(t, driver) })
+	}
+}
+
+func testHTTP(t *testing.T, driver string) {
+	s, _ := testutil.Database(t, driver)
 	hash, e := auth.Password("correct-password-123")
 	if e != nil {
 		t.Fatal(e)
@@ -61,9 +90,17 @@ func TestHTTP(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	var result auth.Result
+	var result authResponse
 	if e = json.Unmarshal(w.Body.Bytes(), &result); e != nil {
 		t.Fatal(e)
+	}
+	// The response keys are part of the browser contract (web/src/auth.ts).
+	body, keys := jsonKeys(t, w.Body.Bytes())
+	if !reflect.DeepEqual(keys, []string{"access_token", "expires_in", "user"}) {
+		t.Fatalf("login keys: %v", keys)
+	}
+	if _, keys = jsonKeys(t, body["user"]); !reflect.DeepEqual(keys, []string{"id", "username"}) {
+		t.Fatalf("login user keys: %v", keys)
 	}
 	if strings.Contains(w.Body.String(), hash) || strings.Contains(w.Body.String(), "password_hash") {
 		t.Fatal("private hash serialized")
@@ -80,6 +117,9 @@ func TestHTTP(t *testing.T) {
 	w = request("GET", "/api/v1/me", "", "", "", "", result.AccessToken)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "alice-id") || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal(w.Code, w.Body.String())
+	}
+	if _, keys = jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"id", "username"}) {
+		t.Fatalf("me keys: %v", keys)
 	}
 	w = request("POST", "/auth/refresh", "{}", "https://astovia.test", "application/json", cookie, "")
 	if w.Code != 200 {
@@ -133,19 +173,86 @@ func TestHTTP(t *testing.T) {
 	}
 }
 func TestBucketBound(t *testing.T) {
-	s := &Server{attempts: make(map[string]bucket)}
-	for i := 0; i < 4096; i++ {
-		s.attempts[string(rune(i))] = bucket{start: time.Now()}
+	l := newLoginLimiter()
+	now := time.Now()
+	l.now = func() time.Time { return now }
+	for i := 0; i < l.capacity; i++ {
+		l.entries[string(rune(i))] = bucket{start: now, count: l.limit}
 	}
-	if s.allowed("new:1") {
-		t.Fatal("unbounded peers")
+	// A full table of limited peers evicts the oldest entry rather than
+	// rejecting every new peer.
+	if !l.allow("new:1") {
+		t.Fatal("full table rejected a new peer")
 	}
-	for k, v := range s.attempts {
-		v.start = time.Now().Add(-2 * time.Minute)
-		s.attempts[k] = v
+	if len(l.entries) != l.capacity {
+		t.Fatalf("table grew past capacity: %d", len(l.entries))
 	}
-	if !s.allowed("new:1") {
+	now = now.Add(2 * time.Minute)
+	if !l.allow("new:2") {
 		t.Fatal("expired entries not reclaimed")
+	}
+	if len(l.entries) != 1 {
+		t.Fatalf("expired entries kept: %d", len(l.entries))
+	}
+}
+
+// Non-clean paths are redirected to the clean path by ServeMux (307 with the
+// pinned Go toolchain) and escaped slashes never match a route.
+func TestServeMuxPathHandling(t *testing.T) {
+	handler := New(config.Config{PublicURL: "https://astovia.test"}, nil, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}})
+	for _, tc := range []struct {
+		method, path string
+		status       int
+	}{
+		{"POST", "/auth//login", http.StatusTemporaryRedirect},
+		{"GET", "/admin/../api/v1/me", http.StatusTemporaryRedirect},
+		{"GET", "/api%2Fv1%2Fme", http.StatusNotFound},
+		{"POST", "/auth%2Flogin", http.StatusNotFound},
+	} {
+		r := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
+		r.Header.Set("Origin", "https://astovia.test")
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("%s %s: got %d %s", tc.method, tc.path, w.Code, w.Body.String())
+		}
+		if tc.status == http.StatusNotFound {
+			var body struct {
+				Error struct{ Code string } `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Error.Code != "not_found" {
+				t.Fatalf("%s %s: not a JSON 404: %s", tc.method, tc.path, w.Body.String())
+			}
+		}
+	}
+}
+
+func TestRejectedLoginDoesNotConsumeRateLimit(t *testing.T) {
+	s, _ := testutil.Database(t, "sqlite")
+	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{})
+	request := func(origin, ct string) int {
+		r := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"username":"alice","password":"wrong-password-1"}`))
+		r.Header.Set("Origin", origin)
+		r.Header.Set("Content-Type", ct)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w.Code
+	}
+	for i := 0; i < 20; i++ {
+		if code := request("https://evil.test", "application/json"); code != http.StatusForbidden {
+			t.Fatalf("foreign origin: %d", code)
+		}
+		if code := request("https://astovia.test", "text/plain"); code != http.StatusUnsupportedMediaType {
+			t.Fatalf("wrong content type: %d", code)
+		}
+	}
+	if code := request("https://astovia.test", "application/json"); code != http.StatusUnauthorized {
+		t.Fatalf("rejected requests consumed attempts: %d", code)
 	}
 }
 
@@ -193,7 +300,7 @@ func TestCanonicalPublicURLAuthentication(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("canonical login: %d %s", w.Code, w.Body.String())
 	}
-	var result auth.Result
+	var result authResponse
 	if err = json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
@@ -222,5 +329,151 @@ func TestCanonicalPublicURLAuthentication(t *testing.T) {
 	w = request("POST", "/auth/logout", "{}", "https://example.com", cookies[0], "")
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("canonical logout: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// errorCode returns error.code from a JSON error response, or "" when the
+// body is not one.
+func errorCode(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		return ""
+	}
+	return body.Error.Code
+}
+
+// serve sends r to h and checks the headers every response must carry.
+func serve(t *testing.T, h http.Handler, r *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if !strings.Contains(w.Header().Get("Content-Security-Policy"), "default-src 'self'") || w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Referrer-Policy") != "same-origin" {
+		t.Fatalf("%s %s: security headers missing: %v", r.Method, r.URL.Path, w.Header())
+	}
+	if (strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/")) && w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("%s %s: Cache-Control=%q", r.Method, r.URL.Path, w.Header().Get("Cache-Control"))
+	}
+	return w
+}
+
+func TestAuthEndpointInputs(t *testing.T) {
+	s, _ := testutil.Database(t, "sqlite")
+	hash, err := auth.Password("correct-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Username: "alice", PasswordHash: hash}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const origin = "https://astovia.test"
+	type tc struct {
+		name, method, origin, ct, body string
+		status                         int
+		code                           string
+	}
+	common := func(okBody string) []tc {
+		return []tc{
+			{"origin mismatch", "POST", "https://evil.test", "application/json", okBody, 403, "origin_rejected"},
+			{"content type mismatch", "POST", origin, "text/plain", okBody, 415, "unsupported_media_type"},
+			{"body over 4096 bytes", "POST", origin, "application/json", `{"x":"` + strings.Repeat("x", 4096) + `"}`, 413, "body_too_large"},
+			{"two objects", "POST", origin, "application/json", "{}{}", 400, "invalid_request"},
+			{"unknown field", "POST", origin, "application/json", `{"unknown":1}`, 400, "invalid_request"},
+			{"non-object", "POST", origin, "application/json", `["x"]`, 400, "invalid_request"},
+			{"GET", "GET", origin, "application/json", "", 405, "method_not_allowed"},
+		}
+	}
+	cases := map[string][]tc{
+		"/auth/login": append(common(`{"username":"alice","password":"wrong-password-1"}`),
+			tc{"charset parameter", "POST", origin, "application/json; charset=utf-8", `{"username":"alice","password":"wrong-password-1"}`, 401, "unauthorized"},
+			tc{"username of 256 bytes", "POST", origin, "application/json", `{"username":"` + strings.Repeat("a", 256) + `","password":"wrong-password-1"}`, 401, "unauthorized"},
+			tc{"username over 256 bytes", "POST", origin, "application/json", `{"username":"` + strings.Repeat("a", 257) + `","password":"wrong-password-1"}`, 400, "invalid_request"},
+			tc{"password of 72 bytes", "POST", origin, "application/json", `{"username":"alice","password":"` + strings.Repeat("p", 72) + `"}`, 401, "unauthorized"},
+			tc{"password over 72 bytes", "POST", origin, "application/json", `{"username":"alice","password":"` + strings.Repeat("p", 73) + `"}`, 400, "invalid_request"},
+		),
+		"/auth/refresh": append(common("{}"),
+			tc{"charset parameter without cookie", "POST", origin, "application/json; charset=utf-8", "{}", 401, "unauthorized"},
+		),
+		"/auth/logout": append(common("{}"),
+			tc{"charset parameter without cookie", "POST", origin, "application/json; charset=utf-8", "{}", 204, ""},
+		),
+	}
+	for path, list := range cases {
+		for _, c := range list {
+			t.Run(path+"/"+c.name, func(t *testing.T) {
+				// A new handler per case keeps rate limiting state separate.
+				h := New(config.Config{PublicURL: origin, Secure: true}, a, fstest.MapFS{})
+				r := httptest.NewRequest(c.method, path, strings.NewReader(c.body))
+				r.Header.Set("Origin", c.origin)
+				r.Header.Set("Content-Type", c.ct)
+				w := serve(t, h, r)
+				if w.Code != c.status || errorCode(t, w) != c.code {
+					t.Fatalf("got %d %q, want %d %q: %s", w.Code, errorCode(t, w), c.status, c.code, w.Body.String())
+				}
+				if c.status == 405 && w.Header().Get("Allow") != "POST" {
+					t.Fatalf("Allow=%q", w.Header().Get("Allow"))
+				}
+				if c.status != 204 && len(w.Result().Cookies()) != 0 {
+					t.Fatal("failure modified cookie")
+				}
+			})
+		}
+	}
+}
+
+func TestRedirectsAndBearer(t *testing.T) {
+	s, _ := testutil.Database(t, "sqlite")
+	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}})
+	for path, status := range map[string]int{"/": http.StatusFound, "/admin": http.StatusMovedPermanently} {
+		w := serve(t, h, httptest.NewRequest("GET", path, nil))
+		if w.Code != status || w.Header().Get("Location") != "/admin/" {
+			t.Fatalf("%s: %d Location=%q", path, w.Code, w.Header().Get("Location"))
+		}
+	}
+	for _, v := range []string{"", "Token abc", "bearer abc", "Bearer", "Bearer ", "Basic YWxpY2U6cHc="} {
+		r := httptest.NewRequest("GET", "/api/v1/me", nil)
+		if v != "" {
+			r.Header.Set("Authorization", v)
+		}
+		w := serve(t, h, r)
+		if w.Code != 401 || errorCode(t, w) != "unauthorized" {
+			t.Fatalf("Authorization %q: %d %s", v, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestStaticAssets(t *testing.T) {
+	assets := fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}, "assets/app.js": {Data: []byte("void 0")}}
+	h := New(config.Config{PublicURL: "https://astovia.test"}, nil, assets)
+	w := serve(t, h, httptest.NewRequest("GET", "/admin/assets/app.js", nil))
+	if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Type"), "javascript") || !strings.Contains(w.Header().Get("Cache-Control"), "immutable") || w.Body.String() != "void 0" {
+		t.Fatalf("app.js: %d %v", w.Code, w.Header())
+	}
+	for _, path := range []string{"/admin/", "/admin/some/route"} {
+		w = serve(t, h, httptest.NewRequest("GET", path, nil))
+		if w.Code != 200 || w.Body.String() != "<html>Astovia</html>" || w.Header().Get("Cache-Control") != "no-store" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {
+			t.Fatalf("%s: %d %v %s", path, w.Code, w.Header(), w.Body.String())
+		}
+	}
+	w = serve(t, h, httptest.NewRequest("GET", "/admin/missing.js", nil))
+	if w.Code != 404 || errorCode(t, w) != "not_found" {
+		t.Fatalf("missing.js: %d %s", w.Code, w.Body.String())
+	}
+	h = New(config.Config{PublicURL: "https://astovia.test"}, nil, fstest.MapFS{"assets/app.js": {Data: []byte("void 0")}})
+	w = serve(t, h, httptest.NewRequest("GET", "/admin/", nil))
+	if w.Code != 404 || errorCode(t, w) != "not_found" {
+		t.Fatalf("missing index.html: %d %s", w.Code, w.Body.String())
 	}
 }

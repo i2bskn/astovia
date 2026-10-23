@@ -46,7 +46,7 @@ func run(args []string) error {
 		return e
 	}
 	if users {
-		return account(ctx, s, args[1:])
+		return account(ctx, s, args[1:], os.Stdin)
 	}
 	assets, e := web.Assets()
 	if e != nil {
@@ -74,7 +74,7 @@ func run(args []string) error {
 		return srv.Shutdown(shutdown)
 	}
 }
-func account(ctx context.Context, s *store.Store, args []string) error {
+func account(ctx context.Context, s *store.Store, args []string, in io.Reader) error {
 	if len(args) < 1 {
 		return errors.New("users command requires create, reset-password, or disable")
 	}
@@ -97,7 +97,7 @@ func account(ctx context.Context, s *store.Store, args []string) error {
 	}
 	hash := ""
 	if op != "disable" {
-		p, e := readPassword(*stdin)
+		p, e := readPassword(in, *stdin)
 		if e != nil {
 			return e
 		}
@@ -132,13 +132,37 @@ func account(ctx context.Context, s *store.Store, args []string) error {
 	fmt.Println("User operation completed.")
 	return nil
 }
-func readPassword(stdin bool) (string, error) {
-	if stdin {
-		b, e := io.ReadAll(io.LimitReader(os.Stdin, 75))
+
+// maxPasswordInput is the longest accepted --password-stdin input, including
+// one trailing line break.
+const maxPasswordInput = 75
+
+// readPassword reads the password from in when fromStdin is set. The input
+// must be a single line: one trailing \r\n, \n or \r is removed, and any other
+// line break or input longer than maxPasswordInput bytes is rejected.
+// Otherwise it prompts on the terminal attached to os.Stdin.
+func readPassword(in io.Reader, fromStdin bool) (string, error) {
+	if fromStdin {
+		b, e := io.ReadAll(io.LimitReader(in, maxPasswordInput+1))
 		if e != nil {
 			return "", errors.New("could not read password")
 		}
-		return strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r"), nil
+		if len(b) > maxPasswordInput {
+			return "", errors.New("password input is too long")
+		}
+		p := string(b)
+		switch {
+		case strings.HasSuffix(p, "\r\n"):
+			p = strings.TrimSuffix(p, "\r\n")
+		case strings.HasSuffix(p, "\n"):
+			p = strings.TrimSuffix(p, "\n")
+		case strings.HasSuffix(p, "\r"):
+			p = strings.TrimSuffix(p, "\r")
+		}
+		if strings.ContainsAny(p, "\r\n") {
+			return "", errors.New("password must be a single line")
+		}
+		return p, nil
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return "", errors.New("use --password-stdin for noninteractive input")
