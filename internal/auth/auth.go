@@ -11,6 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2bskn/astovia/internal/store"
 	"golang.org/x/crypto/bcrypt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -78,6 +79,25 @@ func validToken(v string) bool {
 	}
 	b, e := base64.RawURLEncoding.DecodeString(v)
 	return e == nil && len(b) == 32
+}
+
+// apiTokenPrefix marks API tokens so that they can be told apart from access
+// JWTs without parsing.
+const apiTokenPrefix = "ast_"
+
+// NewAPIToken returns a new API token and the hash stored for it.
+func NewAPIToken() (raw, hash string, err error) {
+	r, err := Random()
+	if err != nil {
+		return "", "", err
+	}
+	raw = apiTokenPrefix + r
+	return raw, Hash(raw), nil
+}
+
+// IsAPIToken reports whether v has the form of a token from NewAPIToken.
+func IsAPIToken(v string) bool {
+	return len(v) == len(apiTokenPrefix)+43 && strings.HasPrefix(v, apiTokenPrefix) && validToken(v[len(apiTokenPrefix):])
 }
 
 type claims struct {
@@ -194,13 +214,40 @@ func (s *Service) result(u store.User, sess store.Session, raw string, now time.
 	return Result{AccessToken: token, ExpiresIn: int(exp.Unix() - now.Unix()), User: u, Refresh: raw, ExpiresAt: sess.ExpiresAt, MaxAge: int(sess.ExpiresAt - now.Unix())}, nil
 }
 func (s *Service) Authenticate(ctx context.Context, raw string) (store.User, error) {
+	u, _, err := s.AuthenticateSession(ctx, raw)
+	return u, err
+}
+
+// AuthenticateSession validates an access JWT and returns its user together
+// with the verified session ID (the sid claim).
+func (s *Service) AuthenticateSession(ctx context.Context, raw string) (store.User, string, error) {
 	if len(raw) > 4096 {
-		return store.User{}, store.ErrUnauthorized
+		return store.User{}, "", store.ErrUnauthorized
 	}
 	c := new(claims)
 	t, e := jwt.ParseWithClaims(raw, c, func(_ *jwt.Token) (any, error) { return s.secret, nil }, jwt.WithValidMethods([]string{"HS256"}), jwt.WithIssuer(s.issuer), jwt.WithAudience(audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithTimeFunc(s.Now))
 	if e != nil || !t.Valid || c.Use != "access" || c.Subject == "" || c.SessionID == "" || c.ID == "" || c.IssuedAt == nil {
+		return store.User{}, "", store.ErrUnauthorized
+	}
+	u, e := s.Store.Authenticated(ctx, c.Subject, c.SessionID, s.Now().Unix())
+	if e != nil {
+		return store.User{}, "", e
+	}
+	return u, c.SessionID, nil
+}
+
+// AuthenticateAPIToken returns the user of an API token. A failure to record
+// the time of use is logged and does not fail authentication.
+func (s *Service) AuthenticateAPIToken(ctx context.Context, raw string) (store.User, error) {
+	if !IsAPIToken(raw) {
 		return store.User{}, store.ErrUnauthorized
 	}
-	return s.Store.Authenticated(ctx, c.Subject, c.SessionID, s.Now().Unix())
+	u, touchErr, err := s.Store.AuthenticateAPIToken(ctx, Hash(raw), s.Now().Unix())
+	if err != nil {
+		return store.User{}, err
+	}
+	if touchErr != nil {
+		log.Printf("api token: touch user=%s: %v", u.ID, touchErr)
+	}
+	return u, nil
 }

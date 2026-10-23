@@ -21,6 +21,15 @@ type ActionItem struct {
 	UpdatedAt int64
 }
 
+type ApiToken struct {
+	ID         string
+	UserID     string
+	Name       string
+	TokenHash  string
+	CreatedAt  int64
+	LastUsedAt sql.NullInt64
+}
+
 type RefreshToken struct {
 	Hash       string
 	SessionID  string

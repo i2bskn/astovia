@@ -199,6 +199,8 @@ export async function request<T>(path: `/api/v1/${string}`, init?: RequestInit):
     if (response.status === 401) anonymous();
     throw new APIError(response.status);
   }
+  // 204 No Content has no body to parse.
+  if (response.status === 204) return undefined as T;
   return await response.json() as T;
 }
 

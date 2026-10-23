@@ -147,3 +147,44 @@ table "action_items" {
     columns = [column.user_id, column.status, column.created_at, column.id]
   }
 }
+table "api_tokens" {
+  schema = schema.main
+  column "id" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "name" {
+    type = text
+    null = false
+  }
+  column "token_hash" {
+    type = text
+    null = false
+  }
+  column "created_at" {
+    type = integer
+    null = false
+  }
+  column "last_used_at" {
+    type = integer
+    null = true
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "api_tokens_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "api_tokens_token_hash_key" {
+    unique = true
+    columns = [column.token_hash]
+  }
+  index "api_tokens_user_created_idx" {
+    columns = [column.user_id, column.created_at, column.id]
+  }
+}

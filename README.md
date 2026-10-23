@@ -1,6 +1,6 @@
 # Astovia
 
-Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在は、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存と、本人の対応事項の作成・一覧・状態変更（管理画面とREST API）を実装しています。MCP、APIトークン、外部サービス連携、AI抽出は**まだ実装していません**。
+Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在は、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存と、本人の対応事項の作成・一覧・状態変更（管理画面とREST API）、APIトークン、APIトークンで認証するMCPエンドポイントを実装しています。MCPのOAuth、外部サービス連携、AI抽出は**まだ実装していません**。
 
 ## Dockerでローカル開発する
 
@@ -26,7 +26,7 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は「PostgreSQLを使用する」の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブルやAPIトークンの`api_tokens`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -54,7 +54,7 @@ make up
 make logs
 ```
 
-[http://localhost:5173/admin/](http://localhost:5173/admin/)を開いてログインしてください。ホストへ公開するのはViteの`127.0.0.1:5173`だけです。Goはコンテナ内の`0.0.0.0:8080`で待ち受け、Viteが`/auth`・`/api`・`/healthz`を転送します。ブラウザからのOriginは変更せず、Go側の公開URLも`http://localhost:5173`にそろえます。`localhost`と`127.0.0.1`は異なるOriginのため、ブラウザでは`localhost`を使用してください。
+[http://localhost:5173/admin/](http://localhost:5173/admin/)を開いてログインしてください。ホストへ公開するのはViteの`127.0.0.1:5173`だけです。Goはコンテナ内の`0.0.0.0:8080`で待ち受け、Viteが`/auth`・`/api`・`/healthz`・`/mcp`を転送します。ブラウザからのOriginは変更せず、Go側の公開URLも`http://localhost:5173`にそろえます。`localhost`と`127.0.0.1`は異なるOriginのため、ブラウザでは`localhost`を使用してください。
 
 停止する場合は次を実行します。コンテナは削除せずに停止します（`docker compose stop`）。
 
@@ -152,7 +152,7 @@ make user-disable USER_EMAIL=alice@example.com
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させます。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンをすべて削除します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## 認証と運用上の制約
 
@@ -166,6 +166,36 @@ make user-disable USER_EMAIL=alice@example.com
 - ホスト名はASCIIのDNS名か明示的なIPアドレスを使用します。国際化ドメイン名はpunycodeで指定してください。数値ホストの省略表記、スコープ付きIPv6、IPv4を埋め込んだIPv6は拒否します。DNS名の大文字・小文字、標準ポート、ポートの数値表記、IPv6の表記は設定読込時に正規化し、Origin検証とJWT issuerで共用します。以前の正規化されていないissuerで発行したトークンは再ログインが必要です。正規化済みの設定には影響しません。
 
 `/admin/`という名前によって、役割管理、共有Inbox、他ユーザーの非公開情報へのアクセス権が付くことはありません。この初期実装には本番デプロイの設定を含みません。
+
+## APIトークン
+
+APIトークンは、AIクライアントや外部プログラムが本人の対応事項を操作するための長期間有効なBearerトークンです。
+
+- 管理画面の「API トークン」で名前（1〜100文字）を付けて発行します。トークン（`ast_`で始まる47文字）は発行した直後に一度だけ表示し、再表示できません。DBには検証用のハッシュだけを保存します。
+- 1ユーザーあたり50件まで発行できます。有効期限はなく、管理画面で削除すると即座に失効します。一覧には名前、作成日時、最終使用日時（1分単位で記録）を表示します。
+- パスワード再設定とユーザー無効化を行うと、そのユーザーのAPIトークンはすべて削除されます。
+- 使える範囲は`/mcp`と`/api/v1/action-items*`だけです。`/api/v1/me`とトークン管理（`/api/v1/api-tokens*`）はAPIトークンでは呼べず、管理画面のログイン（Access JWT）が必要です。発行時はログイン中のセッションが有効かをDB上で再確認します。
+
+## MCP
+
+`/mcp`はMCPのStreamable HTTPエンドポイントです。ステートレスで、`POST`だけを受け付けます（`GET`／`DELETE`は405。SSEストリームとセッションは提供しません）。認証は`Authorization: Bearer <APIトークン>`で、Access JWTは受け付けません。認証できない場合は401と`WWW-Authenticate: Bearer`を返します。トークンを送ったうえで無効だった場合は`WWW-Authenticate: Bearer error="invalid_token"`です。
+
+提供するツールは次の4つです。操作対象は常にトークンの持ち主の対応事項で、入力の検証とエラーの内容はREST APIと同じです。検証エラーや存在しない項目は、ツール結果のエラー（`isError`、本文は`<code>: <message>`）として返します。
+
+| ツール | 内容 |
+| --- | --- |
+| `action_items_create` | 対応事項を作成する。引数はRESTの作成本文と同じ |
+| `action_items_list` | 一覧を返す。引数は`status`、`limit`（1〜100、既定50）、`cursor`（いずれも省略可） |
+| `action_items_get` | `id`で1件返す |
+| `action_items_update` | `id`と、RESTの更新本文と同じキー（`version`を含む）で更新する |
+
+Claude Codeでは次のように接続します。開発環境（Docker）では`http://localhost:5173/mcp`、本番では`ASTOVIA_PUBLIC_URL`に`/mcp`を付けたURLを指定します。管理画面でトークンを発行すると、トークンを埋め込んだ接続例を表示します。
+
+```sh
+claude mcp add --transport http astovia http://localhost:5173/mcp --header "Authorization: Bearer ast_..."
+```
+
+ブラウザ以外のMCPクライアントは`Origin`ヘッダーを送らないため、そのまま受け付けます。`Origin`ヘッダーがある場合は、`ASTOVIA_PUBLIC_URL`と完全一致しない限り403で拒否します（DNSリバインディング対策）。`/mcp`はCookieを使わないため、トークンを持たないWebページからは認証を通りません。MCPのOAuth（認可サーバー、クライアント登録）には未対応で、今後追加する予定です。
 
 ## URLと応答
 
@@ -182,10 +212,14 @@ make user-disable USER_EMAIL=alice@example.com
 | `POST /api/v1/action-items` | 対応事項を作成し201と`Location`を返す。本文は`{content, status?, note?, due_at?, refs?}` |
 | `GET /api/v1/action-items/{id}` | 本人の対応事項を1件返す |
 | `PATCH /api/v1/action-items/{id}` | 指定したキーだけを更新する。`note`／`due_at`は`null`で消去。`version`を付けると一致しない場合に409 |
+| `GET /api/v1/api-tokens` | 本人のAPIトークンの一覧`{items: [{id, name, created_at, last_used_at}]}`。トークン本体は含まない。Access JWTが必要 |
+| `POST /api/v1/api-tokens` | APIトークンを発行し201を返す。本文は`{name}`（4KiB以内）。応答の`token`は一度だけ返す。50件に達していると409。Access JWTが必要 |
+| `DELETE /api/v1/api-tokens/{id}` | APIトークンを削除し204を返す。他のユーザーのトークンと存在しないトークンは404。Access JWTが必要 |
+| `POST /mcp` | MCP（Streamable HTTP、ステートレス）。APIトークンが必要 |
 
 LoginとRefreshは`{access_token, expires_in, user: {id, email}}`を返します。
 
-対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at}`で、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。エラーは`{error: {code, message}}`です。認証・非公開APIの応答には`Cache-Control: no-store`を付けます。存在しないAPI・MCP・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
+対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at}`で、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。エラーは`{error: {code, message}}`です。認証・非公開API・MCPの応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
 
 ## コード生成と検証
 

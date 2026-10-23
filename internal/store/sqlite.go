@@ -89,3 +89,33 @@ func (q sqliteQueries) listActionItems(ctx context.Context, userID, status strin
 func (q sqliteQueries) updateActionItem(ctx context.Context, item ActionItem, currentVersion int64) (int64, error) {
 	return q.q.UpdateActionItem(ctx, db.UpdateActionItemParams{Content: item.Content, Status: item.Status, Note: item.Note, DueAt: item.DueAt, Refs: item.Refs, NewVersion: item.Version, UpdatedAt: item.UpdatedAt, ID: item.ID, UserID: item.UserID, CurrentVersion: currentVersion})
 }
+func (q sqliteQueries) createAPIToken(ctx context.Context, token APIToken, hash string) error {
+	return q.q.CreateAPIToken(ctx, db.CreateAPITokenParams{ID: token.ID, UserID: token.UserID, Name: token.Name, TokenHash: hash, CreatedAt: token.CreatedAt})
+}
+func (q sqliteQueries) countAPITokens(ctx context.Context, userID string) (int64, error) {
+	return q.q.CountAPITokens(ctx, userID)
+}
+func (q sqliteQueries) listAPITokens(ctx context.Context, userID string) ([]APIToken, error) {
+	rows, err := q.q.ListAPITokens(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	tokens := make([]APIToken, 0, len(rows))
+	for _, row := range rows {
+		tokens = append(tokens, APIToken{ID: row.ID, UserID: row.UserID, Name: row.Name, CreatedAt: row.CreatedAt, LastUsedAt: row.LastUsedAt})
+	}
+	return tokens, nil
+}
+func (q sqliteQueries) apiTokenByHash(ctx context.Context, hash string) (APIToken, error) {
+	row, err := q.q.GetAPITokenByHash(ctx, hash)
+	return APIToken{ID: row.ID, UserID: row.UserID, LastUsedAt: row.LastUsedAt}, err
+}
+func (q sqliteQueries) deleteAPIToken(ctx context.Context, userID, id string) (int64, error) {
+	return q.q.DeleteAPIToken(ctx, db.DeleteAPITokenParams{ID: id, UserID: userID})
+}
+func (q sqliteQueries) touchAPIToken(ctx context.Context, id string, now, before int64) error {
+	return q.q.TouchAPIToken(ctx, db.TouchAPITokenParams{LastUsedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id, TouchedBefore: sql.NullInt64{Int64: before, Valid: true}})
+}
+func (q sqliteQueries) deleteUserAPITokens(ctx context.Context, userID string) error {
+	return q.q.DeleteUserAPITokens(ctx, userID)
+}

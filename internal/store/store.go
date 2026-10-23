@@ -17,6 +17,11 @@ var ErrConflict = errors.New("email already exists")
 var ErrNotFound = errors.New("user not found")
 var ErrItemNotFound = errors.New("action item not found")
 var ErrVersionConflict = errors.New("action item was updated by another request")
+var ErrTokenNotFound = errors.New("API token not found")
+var ErrTooManyTokens = errors.New("too many API tokens")
+
+// MaxAPITokens is the number of API tokens a user can hold at once.
+const MaxAPITokens = 50
 
 // User, Session and Refresh are storage types. They are not serialized
 // directly; HTTP handlers define their own response types.
@@ -46,6 +51,15 @@ type ActionItem struct {
 	Version                     int64
 	CreatedAt                   int64
 	UpdatedAt                   int64
+}
+
+// APIToken is a long-lived bearer token. Only the SHA-256 hash of the secret
+// is stored, and it is passed separately when the token is created so that it
+// is never read back.
+type APIToken struct {
+	ID, UserID, Name string
+	CreatedAt        int64
+	LastUsedAt       sql.NullInt64
 }
 
 // ActionItemCursor is the position after which ListActionItems continues,
@@ -78,6 +92,13 @@ type queries interface {
 	lockActionItem(ctx context.Context, userID, id string) (ActionItem, error)
 	listActionItems(ctx context.Context, userID, status string, after ActionItemCursor, limit int) ([]ActionItem, error)
 	updateActionItem(ctx context.Context, item ActionItem, currentVersion int64) (int64, error)
+	createAPIToken(ctx context.Context, token APIToken, hash string) error
+	countAPITokens(ctx context.Context, userID string) (int64, error)
+	listAPITokens(ctx context.Context, userID string) ([]APIToken, error)
+	apiTokenByHash(ctx context.Context, hash string) (APIToken, error)
+	deleteAPIToken(ctx context.Context, userID, id string) (int64, error)
+	touchAPIToken(ctx context.Context, id string, now, before int64) error
+	deleteUserAPITokens(ctx context.Context, userID string) error
 }
 type Store struct {
 	db     *sql.DB
@@ -117,7 +138,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at FROM action_items LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -173,7 +194,12 @@ func (s *Store) ChangeUser(ctx context.Context, email, hash string, disable bool
 		if e != nil {
 			return e
 		}
-		return q.revokeUserSessions(ctx, u.ID, now)
+		if e = q.revokeUserSessions(ctx, u.ID, now); e != nil {
+			return e
+		}
+		// API tokens have no expiry, so a token issued from a stolen access
+		// token must not survive the password reset that recovers the account.
+		return q.deleteUserAPITokens(ctx, u.ID)
 	})
 }
 func (s *Store) Login(ctx context.Context, verified User, session Session, refresh Refresh) error {
@@ -353,4 +379,84 @@ func (s *Store) UpdateActionItem(ctx context.Context, userID, id string, fn func
 		return ActionItem{}, err
 	}
 	return updated, nil
+}
+
+// CreateAPIToken stores a new token for t.UserID whose secret hashes to hash.
+// The access token that requested it must belong to sessionID, which is
+// checked again here: the HTTP layer verified the session outside this
+// transaction, so a password reset may have revoked it in between.
+func (s *Store) CreateAPIToken(ctx context.Context, t APIToken, hash, sessionID string, now int64) error {
+	return s.transaction(ctx, func(q queries) error {
+		// Lock the user row before re-reading the session. This serializes
+		// with ChangeUser, which revokes sessions and deletes tokens on a
+		// password reset or disable; do not change this order.
+		u, e := q.lockUser(ctx, t.UserID)
+		if errors.Is(e, sql.ErrNoRows) {
+			return ErrUnauthorized
+		}
+		if e != nil {
+			return e
+		}
+		if u.Disabled != 0 {
+			return ErrUnauthorized
+		}
+		if _, e = q.activeSession(ctx, sessionID, t.UserID, now); e != nil {
+			if errors.Is(e, sql.ErrNoRows) {
+				return ErrUnauthorized
+			}
+			return e
+		}
+		n, e := q.countAPITokens(ctx, t.UserID)
+		if e != nil {
+			return e
+		}
+		if n >= MaxAPITokens {
+			return ErrTooManyTokens
+		}
+		return q.createAPIToken(ctx, t, hash)
+	})
+}
+
+// ListAPITokens returns the user's tokens, newest first. It never returns nil.
+func (s *Store) ListAPITokens(ctx context.Context, userID string) ([]APIToken, error) {
+	return s.q.listAPITokens(ctx, userID)
+}
+
+// DeleteAPIToken deletes the user's token, or returns ErrTokenNotFound when
+// it does not exist or belongs to another user.
+func (s *Store) DeleteAPIToken(ctx context.Context, userID, id string) error {
+	n, err := s.q.deleteAPIToken(ctx, userID, id)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrTokenNotFound
+	}
+	return nil
+}
+
+// AuthenticateAPIToken returns the enabled user owning the token whose secret
+// hashes to hash, or ErrUnauthorized. It also records the time of use, at
+// most once a minute. A failure to record it does not fail authentication;
+// it is returned as touchErr for the caller to log. Database errors are
+// returned as err unchanged.
+func (s *Store) AuthenticateAPIToken(ctx context.Context, hash string, now int64) (u User, touchErr error, err error) {
+	t, err := s.q.apiTokenByHash(ctx, hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, nil, ErrUnauthorized
+	}
+	if err != nil {
+		return User{}, nil, err
+	}
+	u, err = s.q.userByID(ctx, t.UserID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, nil, ErrUnauthorized
+	}
+	if err != nil {
+		return User{}, nil, err
+	}
+	if u.Disabled != 0 {
+		return User{}, nil, ErrUnauthorized
+	}
+	return u, s.q.touchAPIToken(ctx, t.ID, now, now-60), nil
 }

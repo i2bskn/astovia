@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -219,30 +220,46 @@ func parseRefs(raw json.RawMessage) (string, string) {
 	return string(b), ""
 }
 
-// apiError writes the response for a store error. Unexpected errors are
-// logged without request bodies or tokens.
-func (s *Server) apiError(w http.ResponseWriter, r *http.Request, err error) {
+// opError is the failure of an action item operation. REST writes it as a
+// JSON error response and MCP as a tool result with isError set.
+type opError struct {
+	status        int
+	code, message string
+}
+
+func invalidRequest(message string) *opError {
+	return &opError{status: 400, code: "invalid_request", message: message}
+}
+
+var errActionItemNotFound = &opError{status: 404, code: "not_found", message: "Action item not found."}
+
+// failOp writes e as a JSON error response.
+func failOp(w http.ResponseWriter, e *opError) {
+	fail(w, e.status, e.code, e.message)
+}
+
+// storeError converts an error from the store (or from building a response)
+// to an opError. Unexpected errors are logged here, and only here, without
+// request bodies or tokens.
+func storeError(op, userID string, err error) *opError {
 	switch {
 	case errors.Is(err, store.ErrItemNotFound):
-		fail(w, 404, "not_found", "Action item not found.")
+		return errActionItemNotFound
 	case errors.Is(err, store.ErrVersionConflict):
-		fail(w, 409, "conflict", "The action item was updated by another request.")
+		return &opError{status: 409, code: "conflict", message: "The action item was updated by another request."}
 	default:
-		log.Printf("api: %s %s: %v", r.Method, r.URL.Path, err)
-		fail(w, 503, "unavailable", "The service is temporarily unavailable. Try again.")
+		log.Printf("action items: %s user=%s: %v", op, userID, err)
+		return &opError{status: 503, code: "unavailable", message: "The service is temporarily unavailable. Try again."}
 	}
 }
 
-func (s *Server) writeActionItem(w http.ResponseWriter, r *http.Request, status int, item store.ActionItem) {
+// itemResponse converts a stored item, reporting a failure as storeError does.
+func itemResponse(op, userID string, item store.ActionItem) (actionItemResponse, *opError) {
 	out, err := toActionItemResponse(item)
 	if err != nil {
-		s.apiError(w, r, err)
-		return
+		return actionItemResponse{}, storeError(op, userID, err)
 	}
-	if status == 201 {
-		w.Header().Set("Location", "/api/v1/action-items/"+item.ID)
-	}
-	writeJSON(w, status, out)
+	return out, nil
 }
 
 func encodeCursor(item store.ActionItem) string {
@@ -262,6 +279,117 @@ func decodeCursor(v string) (*store.ActionItemCursor, bool) {
 		return nil, false
 	}
 	return &store.ActionItemCursor{CreatedAt: n, ID: id}, true
+}
+
+const (
+	statusMessage = "status must be open, done or dismissed."
+	limitMessage  = "limit must be an integer from 1 to 100."
+	cursorMessage = "cursor is invalid."
+)
+
+// listActionItems lists the user's items. An empty status lists every status
+// and an empty cursor starts from the newest item; callers reject empty values
+// given explicitly before calling.
+func (s *Server) listActionItems(ctx context.Context, userID, status string, limit int, cursor string) (actionItemListResponse, *opError) {
+	if status != "" && !validStatus(status) {
+		return actionItemListResponse{}, invalidRequest(statusMessage)
+	}
+	if limit < 1 || limit > 100 {
+		return actionItemListResponse{}, invalidRequest(limitMessage)
+	}
+	var after *store.ActionItemCursor
+	if cursor != "" {
+		var ok bool
+		if after, ok = decodeCursor(cursor); !ok {
+			return actionItemListResponse{}, invalidRequest(cursorMessage)
+		}
+	}
+	items, err := s.auth.Store.ListActionItems(ctx, userID, status, after, limit+1)
+	if err != nil {
+		return actionItemListResponse{}, storeError("list", userID, err)
+	}
+	out := actionItemListResponse{Items: []actionItemResponse{}}
+	if len(items) > limit {
+		items = items[:limit]
+		next := encodeCursor(items[limit-1])
+		out.NextCursor = &next
+	}
+	for _, item := range items {
+		v, e := itemResponse("list", userID, item)
+		if e != nil {
+			return actionItemListResponse{}, e
+		}
+		out.Items = append(out.Items, v)
+	}
+	return out, nil
+}
+
+// createActionItem validates body and stores a new item for the user.
+func (s *Server) createActionItem(ctx context.Context, userID string, body actionItemFields) (actionItemResponse, *opError) {
+	if body.Content == nil {
+		return actionItemResponse{}, invalidRequest("content is required.")
+	}
+	apply, _, msg := body.parse()
+	if msg != "" {
+		return actionItemResponse{}, invalidRequest(msg)
+	}
+	id, err := auth.Random()
+	if err != nil {
+		return actionItemResponse{}, storeError("create", userID, err)
+	}
+	now := s.auth.Now().Unix()
+	item := store.ActionItem{ID: id, UserID: userID, Status: "open", Refs: "[]", Version: 1, CreatedAt: now, UpdatedAt: now}
+	apply(&item)
+	if err = s.auth.Store.CreateActionItem(ctx, item); err != nil {
+		return actionItemResponse{}, storeError("create", userID, err)
+	}
+	return itemResponse("create", userID, item)
+}
+
+// getActionItem returns the user's item. A malformed ID is reported as not
+// found, the same as another user's item.
+func (s *Server) getActionItem(ctx context.Context, userID, id string) (actionItemResponse, *opError) {
+	if !itemIDPattern.MatchString(id) {
+		return actionItemResponse{}, errActionItemNotFound
+	}
+	item, err := s.auth.Store.ActionItem(ctx, userID, id)
+	if err != nil {
+		return actionItemResponse{}, storeError("get", userID, err)
+	}
+	return itemResponse("get", userID, item)
+}
+
+// updateActionItem validates body and applies it to the user's item.
+func (s *Server) updateActionItem(ctx context.Context, userID, id string, body actionItemPatch) (actionItemResponse, *opError) {
+	if !itemIDPattern.MatchString(id) {
+		return actionItemResponse{}, errActionItemNotFound
+	}
+	var version int64
+	if body.Version != nil {
+		if isNull(body.Version) || !decodeValue(body.Version, &version) || version < 1 {
+			return actionItemResponse{}, invalidRequest("version must be a positive integer.")
+		}
+	}
+	apply, n, msg := body.parse()
+	if msg != "" {
+		return actionItemResponse{}, invalidRequest(msg)
+	}
+	if n == 0 {
+		return actionItemResponse{}, invalidRequest("At least one of content, status, note, due_at or refs is required.")
+	}
+	now := s.auth.Now().Unix()
+	item, err := s.auth.Store.UpdateActionItem(ctx, userID, id, func(item *store.ActionItem) error {
+		if body.Version != nil && item.Version != version {
+			return store.ErrVersionConflict
+		}
+		apply(item)
+		item.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return actionItemResponse{}, storeError("update", userID, err)
+	}
+	return itemResponse("update", userID, item)
 }
 
 func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +412,7 @@ func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
 	status := ""
 	if v, ok := q["status"]; ok {
 		if !validStatus(v[0]) {
-			fail(w, 400, "invalid_request", "status must be open, done or dismissed.")
+			fail(w, 400, "invalid_request", statusMessage)
 			return
 		}
 		status = v[0]
@@ -293,36 +421,23 @@ func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
 	if v, ok := q["limit"]; ok {
 		n, err := strconv.Atoi(v[0])
 		if !limitPattern.MatchString(v[0]) || err != nil || n > 100 {
-			fail(w, 400, "invalid_request", "limit must be an integer from 1 to 100.")
+			fail(w, 400, "invalid_request", limitMessage)
 			return
 		}
 		limit = n
 	}
-	var after *store.ActionItemCursor
+	cursor := ""
 	if v, ok := q["cursor"]; ok {
-		if after, ok = decodeCursor(v[0]); !ok {
-			fail(w, 400, "invalid_request", "cursor is invalid.")
+		if v[0] == "" {
+			fail(w, 400, "invalid_request", cursorMessage)
 			return
 		}
+		cursor = v[0]
 	}
-	items, err := s.auth.Store.ListActionItems(r.Context(), u.ID, status, after, limit+1)
-	if err != nil {
-		s.apiError(w, r, err)
+	out, e := s.listActionItems(r.Context(), u.ID, status, limit, cursor)
+	if e != nil {
+		failOp(w, e)
 		return
-	}
-	out := actionItemListResponse{Items: []actionItemResponse{}}
-	if len(items) > limit {
-		items = items[:limit]
-		next := encodeCursor(items[limit-1])
-		out.NextCursor = &next
-	}
-	for _, item := range items {
-		v, err := toActionItemResponse(item)
-		if err != nil {
-			s.apiError(w, r, err)
-			return
-		}
-		out.Items = append(out.Items, v)
 	}
 	writeJSON(w, 200, out)
 }
@@ -337,28 +452,13 @@ func (s *Server) handleCreateActionItem(w http.ResponseWriter, r *http.Request) 
 	if !decode(w, r, &in, actionItemBodyLimit) {
 		return
 	}
-	if in.Content == nil {
-		fail(w, 400, "invalid_request", "content is required.")
+	out, e := s.createActionItem(r.Context(), u.ID, in)
+	if e != nil {
+		failOp(w, e)
 		return
 	}
-	apply, _, msg := in.parse()
-	if msg != "" {
-		fail(w, 400, "invalid_request", msg)
-		return
-	}
-	id, err := auth.Random()
-	if err != nil {
-		s.apiError(w, r, err)
-		return
-	}
-	now := s.auth.Now().Unix()
-	item := store.ActionItem{ID: id, UserID: u.ID, Status: "open", Refs: "[]", Version: 1, CreatedAt: now, UpdatedAt: now}
-	apply(&item)
-	if err = s.auth.Store.CreateActionItem(r.Context(), item); err != nil {
-		s.apiError(w, r, err)
-		return
-	}
-	s.writeActionItem(w, r, 201, item)
+	w.Header().Set("Location", "/api/v1/action-items/"+out.ID)
+	writeJSON(w, 201, out)
 }
 
 func (s *Server) handleGetActionItem(w http.ResponseWriter, r *http.Request) {
@@ -367,17 +467,12 @@ func (s *Server) handleGetActionItem(w http.ResponseWriter, r *http.Request) {
 		s.authError(w, r, store.ErrUnauthorized)
 		return
 	}
-	id := r.PathValue("id")
-	if !itemIDPattern.MatchString(id) {
-		s.apiError(w, r, store.ErrItemNotFound)
+	out, e := s.getActionItem(r.Context(), u.ID, r.PathValue("id"))
+	if e != nil {
+		failOp(w, e)
 		return
 	}
-	item, err := s.auth.Store.ActionItem(r.Context(), u.ID, id)
-	if err != nil {
-		s.apiError(w, r, err)
-		return
-	}
-	s.writeActionItem(w, r, 200, item)
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) handleUpdateActionItem(w http.ResponseWriter, r *http.Request) {
@@ -387,42 +482,20 @@ func (s *Server) handleUpdateActionItem(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := r.PathValue("id")
+	// A malformed ID is answered before the body is read, as before the
+	// operation was shared with MCP.
 	if !itemIDPattern.MatchString(id) {
-		s.apiError(w, r, store.ErrItemNotFound)
+		failOp(w, errActionItemNotFound)
 		return
 	}
 	var in actionItemPatch
 	if !decode(w, r, &in, actionItemBodyLimit) {
 		return
 	}
-	var version int64
-	if in.Version != nil {
-		if isNull(in.Version) || !decodeValue(in.Version, &version) || version < 1 {
-			fail(w, 400, "invalid_request", "version must be a positive integer.")
-			return
-		}
-	}
-	apply, n, msg := in.parse()
-	if msg != "" {
-		fail(w, 400, "invalid_request", msg)
+	out, e := s.updateActionItem(r.Context(), u.ID, id, in)
+	if e != nil {
+		failOp(w, e)
 		return
 	}
-	if n == 0 {
-		fail(w, 400, "invalid_request", "At least one of content, status, note, due_at or refs is required.")
-		return
-	}
-	now := s.auth.Now().Unix()
-	item, err := s.auth.Store.UpdateActionItem(r.Context(), u.ID, id, func(item *store.ActionItem) error {
-		if in.Version != nil && item.Version != version {
-			return store.ErrVersionConflict
-		}
-		apply(item)
-		item.UpdatedAt = now
-		return nil
-	})
-	if err != nil {
-		s.apiError(w, r, err)
-		return
-	}
-	s.writeActionItem(w, r, 200, item)
+	writeJSON(w, 200, out)
 }

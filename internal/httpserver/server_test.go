@@ -136,7 +136,7 @@ func testHTTP(t *testing.T, driver string) {
 	if w.Code != 401 {
 		t.Fatal("logout did not revoke access")
 	}
-	for _, p := range []string{"/api/nope", "/mcp", "/integrations/nope", "/admin/assets/missing.js", "/admin/missing.css"} {
+	for _, p := range []string{"/api/nope", "/integrations/nope", "/admin/assets/missing.js", "/admin/missing.css"} {
 		w = request("GET", p, "", "", "", "", "")
 		if w.Code != 404 || strings.Contains(w.Body.String(), "<html>") {
 			t.Fatalf("fallback escaped: %s %d", p, w.Code)

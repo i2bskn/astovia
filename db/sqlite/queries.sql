@@ -47,3 +47,20 @@ ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
 -- name: UpdateActionItem :execrows
 UPDATE action_items SET content = sqlc.arg(content), status = sqlc.arg(status), note = sqlc.arg(note), due_at = sqlc.arg(due_at), refs = sqlc.arg(refs), version = sqlc.arg(new_version), updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND version = sqlc.arg(current_version);
+-- name: CreateAPIToken :exec
+INSERT INTO api_tokens (id,user_id,name,token_hash,created_at,last_used_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(name),sqlc.arg(token_hash),sqlc.arg(created_at),NULL);
+-- name: CountAPITokens :one
+SELECT COUNT(*) FROM api_tokens WHERE user_id = sqlc.arg(user_id);
+-- name: ListAPITokens :many
+SELECT id, user_id, name, created_at, last_used_at FROM api_tokens
+WHERE user_id = sqlc.arg(user_id) ORDER BY created_at DESC, id DESC;
+-- name: GetAPITokenByHash :one
+SELECT id, user_id, last_used_at FROM api_tokens WHERE token_hash = sqlc.arg(token_hash);
+-- name: DeleteAPIToken :execrows
+DELETE FROM api_tokens WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: TouchAPIToken :exec
+UPDATE api_tokens SET last_used_at = sqlc.arg(last_used_at)
+WHERE id = sqlc.arg(id) AND (last_used_at IS NULL OR last_used_at < sqlc.arg(touched_before));
+-- name: DeleteUserAPITokens :exec
+DELETE FROM api_tokens WHERE user_id = sqlc.arg(user_id);

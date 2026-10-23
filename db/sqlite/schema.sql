@@ -51,3 +51,18 @@ CREATE TABLE "action_items" (
 CREATE INDEX "action_items_user_created_idx" ON "action_items" ("user_id", "created_at", "id");
 -- Create index "action_items_user_status_created_idx" to table: "action_items"
 CREATE INDEX "action_items_user_status_created_idx" ON "action_items" ("user_id", "status", "created_at", "id");
+-- Create "api_tokens" table
+CREATE TABLE "api_tokens" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "name" text NOT NULL,
+  "token_hash" text NOT NULL,
+  "created_at" integer NOT NULL,
+  "last_used_at" integer NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "api_tokens_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "api_tokens_token_hash_key" to table: "api_tokens"
+CREATE UNIQUE INDEX "api_tokens_token_hash_key" ON "api_tokens" ("token_hash");
+-- Create index "api_tokens_user_created_idx" to table: "api_tokens"
+CREATE INDEX "api_tokens_user_created_idx" ON "api_tokens" ("user_id", "created_at", "id");

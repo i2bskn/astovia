@@ -24,6 +24,10 @@ sql:
             go_type:
               import: database/sql
               type: NullInt64
+          - column: api_tokens.last_used_at
+            go_type:
+              import: database/sql
+              type: NullInt64
   - engine: postgresql
     schema: db/postgres/schema.sql
     queries: db/postgres/queries.sql

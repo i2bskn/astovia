@@ -27,6 +27,41 @@ func (q *Queries) ConsumeRefresh(ctx context.Context, arg ConsumeRefreshParams) 
 	return result.RowsAffected()
 }
 
+const countAPITokens = `-- name: CountAPITokens :one
+SELECT COUNT(*) FROM api_tokens WHERE user_id = ?1
+`
+
+func (q *Queries) CountAPITokens(ctx context.Context, userID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countAPITokens, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createAPIToken = `-- name: CreateAPIToken :exec
+INSERT INTO api_tokens (id,user_id,name,token_hash,created_at,last_used_at)
+VALUES (?1,?2,?3,?4,?5,NULL)
+`
+
+type CreateAPITokenParams struct {
+	ID        string
+	UserID    string
+	Name      string
+	TokenHash string
+	CreatedAt int64
+}
+
+func (q *Queries) CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) error {
+	_, err := q.db.ExecContext(ctx, createAPIToken,
+		arg.ID,
+		arg.UserID,
+		arg.Name,
+		arg.TokenHash,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const createActionItem = `-- name: CreateActionItem :exec
 INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at)
 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
@@ -118,6 +153,32 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
 	return err
 }
 
+const deleteAPIToken = `-- name: DeleteAPIToken :execrows
+DELETE FROM api_tokens WHERE id = ?1 AND user_id = ?2
+`
+
+type DeleteAPITokenParams struct {
+	ID     string
+	UserID string
+}
+
+func (q *Queries) DeleteAPIToken(ctx context.Context, arg DeleteAPITokenParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteAPIToken, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteUserAPITokens = `-- name: DeleteUserAPITokens :exec
+DELETE FROM api_tokens WHERE user_id = ?1
+`
+
+func (q *Queries) DeleteUserAPITokens(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserAPITokens, userID)
+	return err
+}
+
 const disableUser = `-- name: DisableUser :exec
 UPDATE users SET disabled = 1 WHERE id = ?
 `
@@ -125,6 +186,23 @@ UPDATE users SET disabled = 1 WHERE id = ?
 func (q *Queries) DisableUser(ctx context.Context, id string) error {
 	_, err := q.db.ExecContext(ctx, disableUser, id)
 	return err
+}
+
+const getAPITokenByHash = `-- name: GetAPITokenByHash :one
+SELECT id, user_id, last_used_at FROM api_tokens WHERE token_hash = ?1
+`
+
+type GetAPITokenByHashRow struct {
+	ID         string
+	UserID     string
+	LastUsedAt sql.NullInt64
+}
+
+func (q *Queries) GetAPITokenByHash(ctx context.Context, tokenHash string) (GetAPITokenByHashRow, error) {
+	row := q.db.QueryRowContext(ctx, getAPITokenByHash, tokenHash)
+	var i GetAPITokenByHashRow
+	err := row.Scan(&i.ID, &i.UserID, &i.LastUsedAt)
+	return i, err
 }
 
 const getActionItem = `-- name: GetActionItem :one
@@ -244,6 +322,48 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listAPITokens = `-- name: ListAPITokens :many
+SELECT id, user_id, name, created_at, last_used_at FROM api_tokens
+WHERE user_id = ?1 ORDER BY created_at DESC, id DESC
+`
+
+type ListAPITokensRow struct {
+	ID         string
+	UserID     string
+	Name       string
+	CreatedAt  int64
+	LastUsedAt sql.NullInt64
+}
+
+func (q *Queries) ListAPITokens(ctx context.Context, userID string) ([]ListAPITokensRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAPITokens, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAPITokensRow
+	for rows.Next() {
+		var i ListAPITokensRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listActionItems = `-- name: ListActionItems :many
@@ -440,6 +560,22 @@ type RevokeUserSessionsParams struct {
 
 func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessionsParams) error {
 	_, err := q.db.ExecContext(ctx, revokeUserSessions, arg.RevokedAt, arg.UserID)
+	return err
+}
+
+const touchAPIToken = `-- name: TouchAPIToken :exec
+UPDATE api_tokens SET last_used_at = ?1
+WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)
+`
+
+type TouchAPITokenParams struct {
+	LastUsedAt    sql.NullInt64
+	ID            string
+	TouchedBefore sql.NullInt64
+}
+
+func (q *Queries) TouchAPIToken(ctx context.Context, arg TouchAPITokenParams) error {
+	_, err := q.db.ExecContext(ctx, touchAPIToken, arg.LastUsedAt, arg.ID, arg.TouchedBefore)
 	return err
 }
 

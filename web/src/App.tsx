@@ -2,6 +2,7 @@ import { useId, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
 import { auth } from './auth';
 import ActionItemList from './ActionItemList';
+import APITokenList from './APITokenList';
 
 function Brand() {
   return <div className="brand" aria-label="Astovia"><span className="brand-mark" aria-hidden="true">a</span><span>Astovia</span></div>;
@@ -65,6 +66,7 @@ export default function App() {
         <div className="dashboard-heading"><div><div className="section-label">YOUR WORKSPACE</div><h1>こんにちは、<span className="user-email">{state.user?.email}</span></h1><p className="intro">Astoviaにログインしています。</p></div><button className="button secondary" disabled={state.busy === 'logout'} onClick={() => { void auth.logout(); }}>{state.busy === 'logout' ? 'ログアウト中…' : 'ログアウト'}</button></div>
         {state.error ? <p className="notice error" role="alert">{state.error}</p> : null}
         <ActionItemList />
+        <APITokenList />
         <p className="privacy-note"><span aria-hidden="true">◈</span> この画面は、ログインした本人のためのスペースです。</p>
       </> : null}
     </main>

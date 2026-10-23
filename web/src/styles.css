@@ -78,6 +78,13 @@ input:disabled, textarea:disabled { background: #f6f7f4; }
 .action-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
 .action-empty, .action-loading { padding: 28px 0; color: #6b7971; font-size: 14px; text-align: center; }
 .more-button { margin: 20px auto 0; width: fit-content; }
+.token-panel { margin-top: 24px; }
+.token-created { margin: 4px 0 24px; padding: 18px; border: 1px solid #d9e2d2; background: #f2f6ed; border-radius: 12px; display: grid; gap: 12px; min-width: 0; }
+.token-created-lead { font-size: 13px; font-weight: 600; }
+.token-secret, .token-command { display: block; margin: 0; padding: 10px 12px; border: 1px solid #cfd9d0; border-radius: 8px; background: #fff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; overflow-wrap: anywhere; white-space: pre-wrap; user-select: all; }
+.token-created-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.token-created-label { font-size: 12px; color: #5d6d64; }
+.danger { color: #8c342b; border-color: #f0d1c7; }
 .privacy-note { display: flex; gap: 8px; margin-top: 20px; color: #7b877e; font-size: 11px; }
 @media (max-width: 767px) {
   .site-header { padding: 24px; }

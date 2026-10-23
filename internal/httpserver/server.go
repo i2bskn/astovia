@@ -73,16 +73,25 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/auth/login", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogin))))
 	mux.Handle("/auth/refresh", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleRefresh))))
 	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))
-	// Every /api/v1/* route must be wrapped with requireUser.
+	// Every /api/v1/* route must be wrapped with either requireUser (access
+	// JWT only) or requireUserOrAPIToken (access JWT or API token). Routes that
+	// manage credentials or the account use requireUser.
 	mux.Handle("/api/v1/me", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleMe))))
 	mux.Handle("/api/v1/action-items", allowMethods(map[string]http.Handler{
-		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleListActionItems)),
-		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handleCreateActionItem))),
+		http.MethodGet:  s.requireUserOrAPIToken(http.HandlerFunc(s.handleListActionItems)),
+		http.MethodPost: s.requireUserOrAPIToken(requireJSON(http.HandlerFunc(s.handleCreateActionItem))),
 	}))
 	mux.Handle("/api/v1/action-items/{id}", allowMethods(map[string]http.Handler{
-		http.MethodGet:   s.requireUser(http.HandlerFunc(s.handleGetActionItem)),
-		http.MethodPatch: s.requireUser(requireJSON(http.HandlerFunc(s.handleUpdateActionItem))),
+		http.MethodGet:   s.requireUserOrAPIToken(http.HandlerFunc(s.handleGetActionItem)),
+		http.MethodPatch: s.requireUserOrAPIToken(requireJSON(http.HandlerFunc(s.handleUpdateActionItem))),
 	}))
+	mux.Handle("/api/v1/api-tokens", allowMethods(map[string]http.Handler{
+		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleListAPITokens)),
+		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handleCreateAPIToken))),
+	}))
+	mux.Handle("/api/v1/api-tokens/{id}", allow(http.MethodDelete, s.requireUser(http.HandlerFunc(s.handleDeleteAPIToken))))
+	// /mcp authenticates with API tokens only; see mcpAuth.
+	mux.Handle("/mcp", allow(http.MethodPost, s.mcpAuth(s.mcpHandler())))
 	mux.Handle("/admin", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
 	})))
@@ -98,7 +107,7 @@ func secureHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
-		if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") {
+		if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/mcp" {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)
@@ -162,29 +171,83 @@ func requireJSON(next http.Handler) http.Handler {
 }
 
 type userKey struct{}
+type sessionKey struct{}
 
-// requireUser authenticates the Bearer access token and stores the user in
-// the request context for userFrom.
+// bearerToken returns the token of an "Authorization: Bearer" header.
+func bearerToken(r *http.Request) (string, bool) {
+	v := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(v, "Bearer ")
+	if !strings.HasPrefix(v, "Bearer ") || token == "" {
+		return "", false
+	}
+	return token, true
+}
+
+// withSession stores the authenticated user and, for access JWTs, the
+// verified session ID in the request context.
+func withSession(r *http.Request, u store.User, sid string) *http.Request {
+	ctx := context.WithValue(r.Context(), userKey{}, u)
+	if sid != "" {
+		ctx = context.WithValue(ctx, sessionKey{}, sid)
+	}
+	return r.WithContext(ctx)
+}
+
+// requireUser authenticates the Bearer access token and stores the user and
+// session ID in the request context for userFrom and sessionFrom. API tokens
+// are rejected.
 func (s *Server) requireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		v := r.Header.Get("Authorization")
-		token := strings.TrimPrefix(v, "Bearer ")
-		if !strings.HasPrefix(v, "Bearer ") || token == "" {
+		token, ok := bearerToken(r)
+		if !ok {
 			s.authError(w, r, store.ErrUnauthorized)
 			return
 		}
-		u, err := s.auth.Authenticate(r.Context(), token)
+		u, sid, err := s.auth.AuthenticateSession(r.Context(), token)
 		if err != nil {
 			s.authError(w, r, err)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, u)))
+		next.ServeHTTP(w, withSession(r, u, sid))
+	})
+}
+
+// requireUserOrAPIToken accepts an API token (a Bearer value starting with
+// "ast_") as well as an access JWT. Only the access JWT path stores a session
+// ID.
+func (s *Server) requireUserOrAPIToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := bearerToken(r)
+		if !ok {
+			s.authError(w, r, store.ErrUnauthorized)
+			return
+		}
+		var u store.User
+		var sid string
+		var err error
+		if strings.HasPrefix(token, "ast_") {
+			u, err = s.auth.AuthenticateAPIToken(r.Context(), token)
+		} else {
+			u, sid, err = s.auth.AuthenticateSession(r.Context(), token)
+		}
+		if err != nil {
+			s.authError(w, r, err)
+			return
+		}
+		next.ServeHTTP(w, withSession(r, u, sid))
 	})
 }
 
 func userFrom(ctx context.Context) (store.User, bool) {
 	u, ok := ctx.Value(userKey{}).(store.User)
 	return u, ok
+}
+
+// sessionFrom returns the session ID of the access JWT that authenticated the
+// request. It is absent for API tokens.
+func sessionFrom(ctx context.Context) (string, bool) {
+	sid, ok := ctx.Value(sessionKey{}).(string)
+	return sid, ok && sid != ""
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
