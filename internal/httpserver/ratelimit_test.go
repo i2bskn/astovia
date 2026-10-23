@@ -139,7 +139,7 @@ func TestLoginRateLimitIgnoresForwardedFor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Username: "alice", PasswordHash: hash}); err != nil {
+	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
@@ -151,7 +151,7 @@ func TestLoginRateLimitIgnoresForwardedFor(t *testing.T) {
 	srv.limiter.now = func() time.Time { return now }
 	h := srv.handler()
 	for i := 1; i <= 11; i++ {
-		r := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"username":"alice","password":"wrong-password-1"}`))
+		r := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"email":"alice@example.com","password":"wrong-password-1"}`))
 		r.RemoteAddr = "192.0.2.1:1234"
 		r.Header.Set("X-Forwarded-For", "198.51.100."+strconv.Itoa(i))
 		r.Header.Set("Origin", "https://astovia.test")

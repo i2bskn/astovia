@@ -8,6 +8,19 @@ import (
 	"database/sql"
 )
 
+type ActionItem struct {
+	ID        string
+	UserID    string
+	Content   string
+	Status    string
+	Note      sql.NullString
+	DueAt     sql.NullInt64
+	Refs      string
+	Version   int64
+	CreatedAt int64
+	UpdatedAt int64
+}
+
 type RefreshToken struct {
 	Hash       string
 	SessionID  string
@@ -25,7 +38,7 @@ type Session struct {
 
 type User struct {
 	ID           string
-	Username     string
+	Email        string
 	PasswordHash string
 	Disabled     int64
 	CreatedAt    int64

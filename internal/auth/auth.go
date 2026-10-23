@@ -28,15 +28,32 @@ var PasswordCost = DefaultPasswordCost
 
 const audience = "astovia-browser"
 
-var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,63}$`)
+// emailPattern is the WHATWG HTML "valid e-mail address" grammar restricted
+// to lower-case ASCII. A dot in the domain is not required, so addresses such
+// as alice@localhost are accepted.
+var emailPattern = regexp.MustCompile("^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
 
-func Username(v string) (string, error) {
+const emailFormatError = "email must be a valid ASCII address such as alice@example.com, up to 254 characters"
+
+// Email trims surrounding ASCII whitespace, lower-cases and validates a login
+// email address. Non-ASCII input is rejected before trimming and case folding
+// so that Unicode case mappings (such as U+212A KELVIN SIGN to "k") and
+// Unicode spaces cannot produce a different ASCII address.
+func Email(v string) (string, error) {
 	if len(v) > 256 {
-		return "", errors.New("username is too long")
+		return "", errors.New("email is too long")
 	}
-	v = strings.ToLower(strings.TrimSpace(v))
-	if !usernamePattern.MatchString(v) {
-		return "", errors.New("username must be 3–64 ASCII letters, numbers, dots, underscores or hyphens, starting with a letter or number")
+	for i := 0; i < len(v); i++ {
+		if v[i] >= 0x80 {
+			return "", errors.New(emailFormatError)
+		}
+	}
+	v = strings.ToLower(strings.Trim(v, " \t\n\r\v\f"))
+	if len(v) > 254 || !emailPattern.MatchString(v) {
+		return "", errors.New(emailFormatError)
+	}
+	if local := strings.IndexByte(v, '@'); local < 1 || local > 64 {
+		return "", errors.New(emailFormatError)
 	}
 	return v, nil
 }
@@ -97,12 +114,12 @@ func New(s *store.Store, secret []byte, issuer string) (*Service, error) {
 	}
 	return &Service{Store: s, secret: secret, issuer: issuer, dummy: d, Now: time.Now}, nil
 }
-func (s *Service) Login(ctx context.Context, name, password string) (Result, error) {
-	normalized, e := Username(name)
+func (s *Service) Login(ctx context.Context, email, password string) (Result, error) {
+	normalized, e := Email(email)
 	if e != nil || len(password) < 1 || len(password) > 72 {
 		return Result{}, store.ErrUnauthorized
 	}
-	u, e := s.Store.UserByName(ctx, normalized)
+	u, e := s.Store.UserByEmail(ctx, normalized)
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
 		return Result{}, e
 	}

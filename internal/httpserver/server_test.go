@@ -51,7 +51,7 @@ func testHTTP(t *testing.T, driver string) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = s.CreateUser(context.Background(), store.User{ID: "alice-id", Username: "alice", PasswordHash: hash}); e != nil {
+	if e = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}); e != nil {
 		t.Fatal(e)
 	}
 	a, e := auth.New(s, make([]byte, 32), "https://astovia.test")
@@ -86,7 +86,7 @@ func testHTTP(t *testing.T, driver string) {
 			t.Fatal("failure modified cookie")
 		}
 	}
-	w := request("POST", "/auth/login", `{"username":"alice","password":"correct-password-123"}`, "https://astovia.test", "application/json", "", "")
+	w := request("POST", "/auth/login", `{"email":"alice@example.com","password":"correct-password-123"}`, "https://astovia.test", "application/json", "", "")
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -99,7 +99,7 @@ func testHTTP(t *testing.T, driver string) {
 	if !reflect.DeepEqual(keys, []string{"access_token", "expires_in", "user"}) {
 		t.Fatalf("login keys: %v", keys)
 	}
-	if _, keys = jsonKeys(t, body["user"]); !reflect.DeepEqual(keys, []string{"id", "username"}) {
+	if _, keys = jsonKeys(t, body["user"]); !reflect.DeepEqual(keys, []string{"email", "id"}) {
 		t.Fatalf("login user keys: %v", keys)
 	}
 	if strings.Contains(w.Body.String(), hash) || strings.Contains(w.Body.String(), "password_hash") {
@@ -118,7 +118,7 @@ func testHTTP(t *testing.T, driver string) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "alice-id") || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if _, keys = jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"id", "username"}) {
+	if _, keys = jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"email", "id"}) {
 		t.Fatalf("me keys: %v", keys)
 	}
 	w = request("POST", "/auth/refresh", "{}", "https://astovia.test", "application/json", cookie, "")
@@ -158,7 +158,7 @@ func testHTTP(t *testing.T, driver string) {
 	}
 	// Rate limiting applies to the direct peer regardless of forwarded headers.
 	for i := 0; i < 12; i++ {
-		w = request("POST", "/auth/login", `{"username":"alice","password":""}`, "https://astovia.test", "application/json", "", "")
+		w = request("POST", "/auth/login", `{"email":"alice@example.com","password":""}`, "https://astovia.test", "application/json", "", "")
 	}
 	if w.Code != 429 || w.Header().Get("Retry-After") == "" {
 		t.Fatal("rate limit absent")
@@ -236,7 +236,7 @@ func TestRejectedLoginDoesNotConsumeRateLimit(t *testing.T) {
 	}
 	handler := New(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{})
 	request := func(origin, ct string) int {
-		r := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"username":"alice","password":"wrong-password-1"}`))
+		r := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"email":"alice@example.com","password":"wrong-password-1"}`))
 		r.Header.Set("Origin", origin)
 		r.Header.Set("Content-Type", ct)
 		w := httptest.NewRecorder()
@@ -273,7 +273,7 @@ func TestCanonicalPublicURLAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Username: "alice", PasswordHash: hash}); err != nil {
+	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := auth.New(s, cfg.Secret, cfg.PublicURL)
@@ -296,7 +296,7 @@ func TestCanonicalPublicURLAuthentication(t *testing.T) {
 		handler.ServeHTTP(w, r)
 		return w
 	}
-	w := request("POST", "/auth/login", `{"username":"alice","password":"correct-password-123"}`, "https://example.com", nil, "")
+	w := request("POST", "/auth/login", `{"email":"alice@example.com","password":"correct-password-123"}`, "https://example.com", nil, "")
 	if w.Code != http.StatusOK {
 		t.Fatalf("canonical login: %d %s", w.Code, w.Body.String())
 	}
@@ -367,7 +367,7 @@ func TestAuthEndpointInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Username: "alice", PasswordHash: hash}); err != nil {
+	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
@@ -392,12 +392,13 @@ func TestAuthEndpointInputs(t *testing.T) {
 		}
 	}
 	cases := map[string][]tc{
-		"/auth/login": append(common(`{"username":"alice","password":"wrong-password-1"}`),
-			tc{"charset parameter", "POST", origin, "application/json; charset=utf-8", `{"username":"alice","password":"wrong-password-1"}`, 401, "unauthorized"},
-			tc{"username of 256 bytes", "POST", origin, "application/json", `{"username":"` + strings.Repeat("a", 256) + `","password":"wrong-password-1"}`, 401, "unauthorized"},
-			tc{"username over 256 bytes", "POST", origin, "application/json", `{"username":"` + strings.Repeat("a", 257) + `","password":"wrong-password-1"}`, 400, "invalid_request"},
-			tc{"password of 72 bytes", "POST", origin, "application/json", `{"username":"alice","password":"` + strings.Repeat("p", 72) + `"}`, 401, "unauthorized"},
-			tc{"password over 72 bytes", "POST", origin, "application/json", `{"username":"alice","password":"` + strings.Repeat("p", 73) + `"}`, 400, "invalid_request"},
+		"/auth/login": append(common(`{"email":"alice@example.com","password":"wrong-password-1"}`),
+			tc{"charset parameter", "POST", origin, "application/json; charset=utf-8", `{"email":"alice@example.com","password":"wrong-password-1"}`, 401, "unauthorized"},
+			tc{"username key", "POST", origin, "application/json", `{"username":"alice@example.com","password":"correct-password-123"}`, 400, "invalid_request"},
+			tc{"email of 256 bytes", "POST", origin, "application/json", `{"email":"` + strings.Repeat("a", 256) + `","password":"wrong-password-1"}`, 401, "unauthorized"},
+			tc{"email over 256 bytes", "POST", origin, "application/json", `{"email":"` + strings.Repeat("a", 257) + `","password":"wrong-password-1"}`, 400, "invalid_request"},
+			tc{"password of 72 bytes", "POST", origin, "application/json", `{"email":"alice@example.com","password":"` + strings.Repeat("p", 72) + `"}`, 401, "unauthorized"},
+			tc{"password over 72 bytes", "POST", origin, "application/json", `{"email":"alice@example.com","password":"` + strings.Repeat("p", 73) + `"}`, 400, "invalid_request"},
 		),
 		"/auth/refresh": append(common("{}"),
 			tc{"charset parameter without cookie", "POST", origin, "application/json; charset=utf-8", "{}", 401, "unauthorized"},

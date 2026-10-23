@@ -30,7 +30,7 @@ func main() {
 func run(args []string) error {
 	users := len(args) > 0 && args[0] == "users"
 	if !users && len(args) > 0 && (len(args) != 1 || args[0] != "serve") {
-		return errors.New("usage: astovia [serve | users create/reset-password/disable --username NAME [--password-stdin]]")
+		return errors.New("usage: astovia [serve | users create/reset-password/disable --email ADDRESS [--password-stdin]]")
 	}
 	c, e := config.Load(!users)
 	if e != nil {
@@ -83,7 +83,7 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		return errors.New("unknown users command")
 	}
 	f := flag.NewFlagSet(op, flag.ContinueOnError)
-	name := f.String("username", "", "username")
+	email := f.String("email", "", "email address")
 	stdin := f.Bool("password-stdin", false, "read password from stdin")
 	if e := f.Parse(args[1:]); e != nil {
 		return e
@@ -91,7 +91,7 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 	if f.NArg() != 0 {
 		return errors.New("unexpected arguments")
 	}
-	u, e := auth.Username(*name)
+	u, e := auth.Email(*email)
 	if e != nil {
 		return e
 	}
@@ -113,7 +113,7 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		if e != nil {
 			return e
 		}
-		e = s.CreateUser(ctx, store.User{ID: id, Username: u, PasswordHash: hash, CreatedAt: time.Now().Unix()})
+		e = s.CreateUser(ctx, store.User{ID: id, Email: u, PasswordHash: hash, CreatedAt: time.Now().Unix()})
 		if e != nil {
 			if errors.Is(e, store.ErrConflict) {
 				return e

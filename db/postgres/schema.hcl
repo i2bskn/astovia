@@ -5,7 +5,7 @@ table "users" {
     type = text
     null = false
   }
-  column "username" {
+  column "email" {
     type = text
     null = false
   }
@@ -24,9 +24,9 @@ table "users" {
   primary_key {
     columns = [column.id]
   }
-  index "users_username_key" {
+  index "users_email_key" {
     unique = true
-    columns = [column.username]
+    columns = [column.email]
   }
 }
 table "sessions" {
@@ -89,5 +89,61 @@ table "refresh_tokens" {
   }
   index "refresh_tokens_session_id_idx" {
     columns = [column.session_id]
+  }
+}
+table "action_items" {
+  schema = schema.public
+  column "id" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "content" {
+    type = text
+    null = false
+  }
+  column "status" {
+    type = text
+    null = false
+  }
+  column "note" {
+    type = text
+    null = true
+  }
+  column "due_at" {
+    type = bigint
+    null = true
+  }
+  column "refs" {
+    type = text
+    null = false
+  }
+  column "version" {
+    type = bigint
+    null = false
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "updated_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "action_items_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "action_items_user_created_idx" {
+    columns = [column.user_id, column.created_at, column.id]
+  }
+  index "action_items_user_status_created_idx" {
+    columns = [column.user_id, column.status, column.created_at, column.id]
   }
 }

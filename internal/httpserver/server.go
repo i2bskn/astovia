@@ -14,6 +14,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,8 +31,8 @@ type Server struct {
 
 // userResponse is the public representation of a user.
 type userResponse struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
+	ID    string `json:"id"`
+	Email string `json:"email"`
 }
 
 // authResponse is returned by login and refresh.
@@ -42,7 +43,7 @@ type authResponse struct {
 }
 
 func toUserResponse(u store.User) userResponse {
-	return userResponse{ID: u.ID, Username: u.Username}
+	return userResponse{ID: u.ID, Email: u.Email}
 }
 
 // New returns the application handler.
@@ -74,6 +75,14 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))
 	// Every /api/v1/* route must be wrapped with requireUser.
 	mux.Handle("/api/v1/me", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleMe))))
+	mux.Handle("/api/v1/action-items", allowMethods(map[string]http.Handler{
+		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleListActionItems)),
+		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handleCreateActionItem))),
+	}))
+	mux.Handle("/api/v1/action-items/{id}", allowMethods(map[string]http.Handler{
+		http.MethodGet:   s.requireUser(http.HandlerFunc(s.handleGetActionItem)),
+		http.MethodPatch: s.requireUser(requireJSON(http.HandlerFunc(s.handleUpdateActionItem))),
+	}))
 	mux.Handle("/admin", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
 	})))
@@ -108,13 +117,41 @@ func allow(method string, next http.Handler) http.Handler {
 	})
 }
 
+// allowMethods dispatches by method and rejects other methods with a JSON 405
+// listing the allowed methods.
+func allowMethods(handlers map[string]http.Handler) http.Handler {
+	methods := make([]string, 0, len(handlers))
+	for m := range handlers {
+		methods = append(methods, m)
+	}
+	sort.Strings(methods)
+	allowed := strings.Join(methods, ", ")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next, ok := handlers[r.Method]
+		if !ok {
+			w.Header().Set("Allow", allowed)
+			fail(w, 405, "method_not_allowed", "Method not allowed.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // browserJSON requires the configured Origin and a JSON content type.
 func (s *Server) browserJSON(next http.Handler) http.Handler {
+	jsonOnly := requireJSON(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Origin") != s.cfg.PublicURL {
 			fail(w, 403, "origin_rejected", "Request origin is not allowed.")
 			return
 		}
+		jsonOnly.ServeHTTP(w, r)
+	})
+}
+
+// requireJSON requires a JSON content type.
+func requireJSON(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err != nil || mt != "application/json" {
 			fail(w, 415, "unsupported_media_type", "Use application/json.")
@@ -158,8 +195,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, toUserResponse(u))
 }
-func decode(w http.ResponseWriter, r *http.Request, out any) bool {
-	body, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+
+// decode reads a single JSON object of at most limit bytes into out.
+func decode(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
+	body, e := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if e != nil {
 		var large *http.MaxBytesError
 		if errors.As(e, &large) {
@@ -194,17 +233,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Username string `json:"username"`
+		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if !decode(w, r, &in) {
+	if !decode(w, r, &in, 4096) {
 		return
 	}
-	if len(in.Username) > 256 || len(in.Password) > 72 {
+	if len(in.Email) > 256 || len(in.Password) > 72 {
 		fail(w, 400, "invalid_request", "Credentials exceed the supported length.")
 		return
 	}
-	result, err := s.auth.Login(r.Context(), in.Username, in.Password)
+	result, err := s.auth.Login(r.Context(), in.Email, in.Password)
 	if err != nil {
 		s.authError(w, r, err)
 		return
@@ -213,7 +252,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var empty struct{}
-	if !decode(w, r, &empty) {
+	if !decode(w, r, &empty, 4096) {
 		return
 	}
 	result, err := s.auth.Refresh(r.Context(), refreshCookie(r))
@@ -225,7 +264,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	var empty struct{}
-	if !decode(w, r, &empty) {
+	if !decode(w, r, &empty, 4096) {
 		return
 	}
 	if err := s.auth.Logout(r.Context(), refreshCookie(r)); err != nil {

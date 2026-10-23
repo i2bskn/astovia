@@ -27,6 +27,40 @@ func (q *Queries) ConsumeRefresh(ctx context.Context, arg ConsumeRefreshParams) 
 	return result.RowsAffected()
 }
 
+const createActionItem = `-- name: CreateActionItem :exec
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+`
+
+type CreateActionItemParams struct {
+	ID        string
+	UserID    string
+	Content   string
+	Status    string
+	Note      sql.NullString
+	DueAt     sql.NullInt64
+	Refs      string
+	Version   int64
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+func (q *Queries) CreateActionItem(ctx context.Context, arg CreateActionItemParams) error {
+	_, err := q.db.ExecContext(ctx, createActionItem,
+		arg.ID,
+		arg.UserID,
+		arg.Content,
+		arg.Status,
+		arg.Note,
+		arg.DueAt,
+		arg.Refs,
+		arg.Version,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
 const createRefresh = `-- name: CreateRefresh :exec
 INSERT INTO refresh_tokens (hash,session_id,created_at) VALUES (?,?,?)
 `
@@ -64,12 +98,12 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 }
 
 const createUser = `-- name: CreateUser :exec
-INSERT INTO users (id,username,password_hash,disabled,created_at) VALUES (?,?,?,0,?)
+INSERT INTO users (id,email,password_hash,disabled,created_at) VALUES (?,?,?,0,?)
 `
 
 type CreateUserParams struct {
 	ID           string
-	Username     string
+	Email        string
 	PasswordHash string
 	CreatedAt    int64
 }
@@ -77,7 +111,7 @@ type CreateUserParams struct {
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
 	_, err := q.db.ExecContext(ctx, createUser,
 		arg.ID,
-		arg.Username,
+		arg.Email,
 		arg.PasswordHash,
 		arg.CreatedAt,
 	)
@@ -91,6 +125,34 @@ UPDATE users SET disabled = 1 WHERE id = ?
 func (q *Queries) DisableUser(ctx context.Context, id string) error {
 	_, err := q.db.ExecContext(ctx, disableUser, id)
 	return err
+}
+
+const getActionItem = `-- name: GetActionItem :one
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+WHERE id = ?1 AND user_id = ?2
+`
+
+type GetActionItemParams struct {
+	ID     string
+	UserID string
+}
+
+func (q *Queries) GetActionItem(ctx context.Context, arg GetActionItemParams) (ActionItem, error) {
+	row := q.db.QueryRowContext(ctx, getActionItem, arg.ID, arg.UserID)
+	var i ActionItem
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Content,
+		&i.Status,
+		&i.Note,
+		&i.DueAt,
+		&i.Refs,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getActiveSession = `-- name: GetActiveSession :one
@@ -150,8 +212,25 @@ func (q *Queries) GetSession(ctx context.Context, id string) (Session, error) {
 	return i, err
 }
 
+const getUserByEmail = `-- name: GetUserByEmail :one
+SELECT id, email, password_hash, disabled, created_at FROM users WHERE email = ?1
+`
+
+func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserByEmail, email)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.PasswordHash,
+		&i.Disabled,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, username, password_hash, disabled, created_at FROM users WHERE id = ?1
+SELECT id, email, password_hash, disabled, created_at FROM users WHERE id = ?1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -159,7 +238,7 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 	var i User
 	err := row.Scan(
 		&i.ID,
-		&i.Username,
+		&i.Email,
 		&i.PasswordHash,
 		&i.Disabled,
 		&i.CreatedAt,
@@ -167,25 +246,146 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 	return i, err
 }
 
-const getUserByName = `-- name: GetUserByName :one
-SELECT id, username, password_hash, disabled, created_at FROM users WHERE username = ?1
+const listActionItems = `-- name: ListActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+WHERE user_id = ?1 AND (created_at < ?2 OR (created_at = ?3 AND id < ?4))
+ORDER BY created_at DESC, id DESC LIMIT ?5
 `
 
-func (q *Queries) GetUserByName(ctx context.Context, username string) (User, error) {
-	row := q.db.QueryRowContext(ctx, getUserByName, username)
-	var i User
+type ListActionItemsParams struct {
+	UserID          string
+	BeforeCreatedAt int64
+	TieCreatedAt    int64
+	BeforeID        string
+	PageSize        int64
+}
+
+func (q *Queries) ListActionItems(ctx context.Context, arg ListActionItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listActionItems,
+		arg.UserID,
+		arg.BeforeCreatedAt,
+		arg.TieCreatedAt,
+		arg.BeforeID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActionItemsByStatus = `-- name: ListActionItemsByStatus :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+WHERE user_id = ?1 AND status = ?2 AND (created_at < ?3 OR (created_at = ?4 AND id < ?5))
+ORDER BY created_at DESC, id DESC LIMIT ?6
+`
+
+type ListActionItemsByStatusParams struct {
+	UserID          string
+	Status          string
+	BeforeCreatedAt int64
+	TieCreatedAt    int64
+	BeforeID        string
+	PageSize        int64
+}
+
+func (q *Queries) ListActionItemsByStatus(ctx context.Context, arg ListActionItemsByStatusParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listActionItemsByStatus,
+		arg.UserID,
+		arg.Status,
+		arg.BeforeCreatedAt,
+		arg.TieCreatedAt,
+		arg.BeforeID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockActionItem = `-- name: LockActionItem :one
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+WHERE id = ?1 AND user_id = ?2
+`
+
+type LockActionItemParams struct {
+	ID     string
+	UserID string
+}
+
+func (q *Queries) LockActionItem(ctx context.Context, arg LockActionItemParams) (ActionItem, error) {
+	row := q.db.QueryRowContext(ctx, lockActionItem, arg.ID, arg.UserID)
+	var i ActionItem
 	err := row.Scan(
 		&i.ID,
-		&i.Username,
-		&i.PasswordHash,
-		&i.Disabled,
+		&i.UserID,
+		&i.Content,
+		&i.Status,
+		&i.Note,
+		&i.DueAt,
+		&i.Refs,
+		&i.Version,
 		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const lockUserByID = `-- name: LockUserByID :one
-SELECT id, username, password_hash, disabled, created_at FROM users WHERE id = ?1
+SELECT id, email, password_hash, disabled, created_at FROM users WHERE id = ?1
 `
 
 func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {
@@ -193,7 +393,7 @@ func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {
 	var i User
 	err := row.Scan(
 		&i.ID,
-		&i.Username,
+		&i.Email,
 		&i.PasswordHash,
 		&i.Disabled,
 		&i.CreatedAt,
@@ -241,4 +441,41 @@ type RevokeUserSessionsParams struct {
 func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessionsParams) error {
 	_, err := q.db.ExecContext(ctx, revokeUserSessions, arg.RevokedAt, arg.UserID)
 	return err
+}
+
+const updateActionItem = `-- name: UpdateActionItem :execrows
+UPDATE action_items SET content = ?1, status = ?2, note = ?3, due_at = ?4, refs = ?5, version = ?6, updated_at = ?7
+WHERE id = ?8 AND user_id = ?9 AND version = ?10
+`
+
+type UpdateActionItemParams struct {
+	Content        string
+	Status         string
+	Note           sql.NullString
+	DueAt          sql.NullInt64
+	Refs           string
+	NewVersion     int64
+	UpdatedAt      int64
+	ID             string
+	UserID         string
+	CurrentVersion int64
+}
+
+func (q *Queries) UpdateActionItem(ctx context.Context, arg UpdateActionItemParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateActionItem,
+		arg.Content,
+		arg.Status,
+		arg.Note,
+		arg.DueAt,
+		arg.Refs,
+		arg.NewVersion,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.UserID,
+		arg.CurrentVersion,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

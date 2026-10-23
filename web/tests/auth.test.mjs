@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-const user = { id: 'test-user', username: 'test-user' };
+const user = { id: 'test-user', email: 'test-user@example.com' };
 const session = { access_token: 'test-access-token', expires_in: 600, user };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
 function deferred() {
@@ -61,7 +61,7 @@ test('concurrent private requests share one refresh and each retry only once', a
     privateCalls += 1;
     return privateCalls <= 2 ? json({}, 401) : json({ ok: true });
   });
-  await auth.login('test-user', 'test-password');
+  await auth.login('test-user@example.com', 'test-password');
   const first = request('/api/v1/test');
   const second = request('/api/v1/test');
   await until(() => refreshCalls === 1);
@@ -81,7 +81,7 @@ test('a delayed refresh cannot undo logout and auth endpoints share the lock', a
     if (path === '/auth/logout') return new Response(null, { status: 204 });
     return json({}, 401);
   });
-  await auth.login('test-user', 'test-password');
+  await auth.login('test-user@example.com', 'test-password');
   const pending = request('/api/v1/test').catch(() => null);
   await until(() => refreshing);
   const logout = auth.logout();
@@ -99,7 +99,7 @@ test('failed logout keeps identity and gives a retry error', async () => {
     if (path === '/api/v1/me') return json(user);
     return json({}, 503);
   });
-  await auth.login('test-user', 'test-password');
+  await auth.login('test-user@example.com', 'test-password');
   await auth.logout();
   assert.equal(auth.getSnapshot().status, 'authenticated');
   assert.deepEqual(auth.getSnapshot().user, user);
@@ -130,7 +130,7 @@ test('a second 401 does not create a refresh loop', async () => {
     privateCalls += 1;
     return json({}, 401);
   });
-  await auth.login('test-user', 'test-password');
+  await auth.login('test-user@example.com', 'test-password');
   await assert.rejects(request('/api/v1/test'));
   assert.equal(refreshCalls, 1);
   assert.equal(privateCalls, 2);
@@ -139,13 +139,13 @@ test('a second 401 does not create a refresh loop', async () => {
 
 test('login failures map status codes to messages', async () => {
   for (const [status, check] of [
-    [401, (error) => assert.equal(error, 'ユーザー名またはパスワードを確認してください。')],
+    [401, (error) => assert.equal(error, 'メールアドレスまたはパスワードを確認してください。')],
     [429, (error) => assert.ok(error.startsWith('試行回数が上限に達しました'), error)],
     [403, (error) => assert.ok(error.startsWith('接続先の設定を確認できませんでした'), error)],
     [500, (error) => assert.ok(error.startsWith('サーバーに接続できませんでした'), error)],
   ]) {
     const { auth } = await harness(async () => json({ error: { code: 'x', message: 'x' } }, status));
-    await auth.login('test-user', 'test-password');
+    await auth.login('test-user@example.com', 'test-password');
     assert.equal(auth.getSnapshot().status, 'anonymous', `status ${status}`);
     assert.equal(auth.getSnapshot().user, null);
     check(auth.getSnapshot().error);
@@ -154,18 +154,46 @@ test('login failures map status codes to messages', async () => {
 
 test('malformed login responses do not authenticate', async () => {
   const { user: _omitted, ...withoutUser } = session;
-  for (const body of [{ ...session, expires_in: 0 }, withoutUser]) {
+  const usernameOnly = { ...session, user: { id: user.id, username: 'test-user' } };
+  for (const body of [{ ...session, expires_in: 0 }, withoutUser, usernameOnly]) {
     const calls = [];
     const { auth } = await harness(async (path) => {
       calls.push(path);
       if (path === '/auth/login') return json(body);
       return json(user);
     });
-    await auth.login('test-user', 'test-password');
+    await auth.login('test-user@example.com', 'test-password');
     assert.notEqual(auth.getSnapshot().status, 'authenticated');
     assert.equal(auth.getSnapshot().user, null);
     assert.deepEqual(calls, ['/auth/login']);
   }
+});
+
+test('login sends the email and password only', async () => {
+  const bodies = [];
+  const { auth } = await harness(async (path, init) => {
+    if (path === '/auth/login') {
+      bodies.push(JSON.parse(init.body));
+      return json(session);
+    }
+    if (path === '/api/v1/me') return json(user);
+    return json({}, 404);
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  assert.deepEqual(bodies, [{ email: 'test-user@example.com', password: 'test-password' }]);
+  assert.equal('username' in bodies[0], false);
+  assert.equal(auth.getSnapshot().status, 'authenticated');
+});
+
+test('a profile response without email is rejected', async () => {
+  const { auth } = await harness(async (path) => {
+    if (path === '/auth/login') return json(session);
+    if (path === '/api/v1/me') return json({ id: user.id, username: 'test-user' });
+    return json({}, 404);
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  assert.deepEqual(auth.getSnapshot().user, user);
+  assert.ok(auth.getSnapshot().error?.startsWith('アカウント情報を確認できませんでした'), auth.getSnapshot().error);
 });
 
 test('session-changed from another tab triggers a refresh', async () => {
@@ -190,10 +218,31 @@ test('request sends the access token as a Bearer header', async () => {
     if (path === '/api/v1/me') return json(user);
     return json({ ok: true });
   });
-  await auth.login('test-user', 'test-password');
+  await auth.login('test-user@example.com', 'test-password');
   assert.deepEqual(await request('/api/v1/test'), { ok: true });
   assert.deepEqual(headers, [
     ['/api/v1/me', 'Bearer test-access-token'],
     ['/api/v1/test', 'Bearer test-access-token'],
   ]);
+});
+
+test('request keeps the method, body and content type of a POST', async () => {
+  const sent = [];
+  const { auth, request } = await harness(async (path, init) => {
+    if (path === '/auth/login') return json(session);
+    if (path === '/api/v1/me') return json(user);
+    sent.push([path, init]);
+    return json({ ok: true }, 201);
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  const body = JSON.stringify({ content: 'x' });
+  assert.deepEqual(await request('/api/v1/action-items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }), { ok: true });
+  assert.equal(sent.length, 1);
+  const [path, init] = sent[0];
+  const headers = new Headers(init.headers);
+  assert.equal(path, '/api/v1/action-items');
+  assert.equal(init.method, 'POST');
+  assert.equal(init.body, body);
+  assert.equal(headers.get('content-type'), 'application/json');
+  assert.equal(headers.get('authorization'), 'Bearer test-access-token');
 });

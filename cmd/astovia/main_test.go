@@ -60,21 +60,24 @@ func TestUsersCommand(t *testing.T) {
 			}
 			login := func(password string) error {
 				t.Helper()
-				_, err := a.Login(ctx, "alice", password)
+				_, err := a.Login(ctx, "alice@example.com", password)
 				return err
 			}
 
 			// The trailing \r\n is removed before hashing.
-			if err = call("correct-password-123\r\n", "create", "--username", "alice", "--password-stdin"); err != nil {
+			if err = call("correct-password-123\r\n", "create", "--email", "alice@example.com", "--password-stdin"); err != nil {
 				t.Fatalf("create: %v", err)
 			}
 			if err = login("correct-password-123"); err != nil {
 				t.Fatalf("login after create: %v", err)
 			}
-			if err = call("correct-password-123\n", "create", "--username", "alice", "--password-stdin"); !errors.Is(err, store.ErrConflict) {
+			if err = call("correct-password-123\n", "create", "--email", "alice@example.com", "--password-stdin"); !errors.Is(err, store.ErrConflict) {
 				t.Fatalf("duplicate create: %v", err)
 			}
-			if err = call("replacement-password-123\n", "reset-password", "--username", "missing", "--password-stdin"); !errors.Is(err, store.ErrNotFound) {
+			if err = call("correct-password-123\n", "create", "--email", "Alice@Example.com", "--password-stdin"); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("duplicate create differing only in case: %v", err)
+			}
+			if err = call("replacement-password-123\n", "reset-password", "--email", "missing@example.com", "--password-stdin"); !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("reset of a missing user: %v", err)
 			}
 
@@ -84,10 +87,14 @@ func TestUsersCommand(t *testing.T) {
 				want string
 			}{
 				// alice exists, so a missing check would disable her instead of failing.
-				{"disable with password-stdin", []string{"disable", "--username", "alice", "--password-stdin"}, "disable does not accept --password-stdin"},
-				{"extra arguments", []string{"create", "--username", "alice", "extra"}, "unexpected arguments"},
-				{"unknown subcommand", []string{"rename", "--username", "alice"}, "unknown users command"},
+				{"disable with password-stdin", []string{"disable", "--email", "alice@example.com", "--password-stdin"}, "disable does not accept --password-stdin"},
+				{"extra arguments", []string{"create", "--email", "alice@example.com", "extra"}, "unexpected arguments"},
+				{"unknown subcommand", []string{"rename", "--email", "alice@example.com"}, "unknown users command"},
 				{"no subcommand", nil, "users command requires create, reset-password, or disable"},
+				{"username flag", []string{"create", "--username", "alice@example.com", "--password-stdin"}, "flag provided but not defined: -username"},
+				{"invalid email on create", []string{"create", "--email", "alice", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"invalid email on reset-password", []string{"reset-password", "--email", "alice@", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"invalid email on disable", []string{"disable", "--email", "alice@@example.com"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
 			} {
 				if err = call("correct-password-123\n", tc.args...); err == nil || err.Error() != tc.want {
 					t.Fatalf("%s: got %v, want %q", tc.name, err, tc.want)
@@ -97,7 +104,7 @@ func TestUsersCommand(t *testing.T) {
 				t.Fatalf("rejected commands changed the user: %v", err)
 			}
 
-			if err = call("replacement-password-123\n", "reset-password", "--username", "alice", "--password-stdin"); err != nil {
+			if err = call("replacement-password-123\n", "reset-password", "--email", "alice@example.com", "--password-stdin"); err != nil {
 				t.Fatalf("reset-password: %v", err)
 			}
 			if err = login("correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
@@ -107,7 +114,7 @@ func TestUsersCommand(t *testing.T) {
 				t.Fatalf("new password after reset: %v", err)
 			}
 
-			if err = call("", "disable", "--username", "alice"); err != nil {
+			if err = call("", "disable", "--email", "alice@example.com"); err != nil {
 				t.Fatalf("disable: %v", err)
 			}
 			if err = login("replacement-password-123"); !errors.Is(err, store.ErrUnauthorized) {

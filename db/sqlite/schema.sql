@@ -1,14 +1,14 @@
 -- Create "users" table
 CREATE TABLE "users" (
   "id" text NOT NULL,
-  "username" text NOT NULL,
+  "email" text NOT NULL,
   "password_hash" text NOT NULL,
   "disabled" integer NOT NULL,
   "created_at" integer NOT NULL,
   PRIMARY KEY ("id")
 );
--- Create index "users_username_key" to table: "users"
-CREATE UNIQUE INDEX "users_username_key" ON "users" ("username");
+-- Create index "users_email_key" to table: "users"
+CREATE UNIQUE INDEX "users_email_key" ON "users" ("email");
 -- Create "sessions" table
 CREATE TABLE "sessions" (
   "id" text NOT NULL,
@@ -32,3 +32,22 @@ CREATE TABLE "refresh_tokens" (
 );
 -- Create index "refresh_tokens_session_id_idx" to table: "refresh_tokens"
 CREATE INDEX "refresh_tokens_session_id_idx" ON "refresh_tokens" ("session_id");
+-- Create "action_items" table
+CREATE TABLE "action_items" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "content" text NOT NULL,
+  "status" text NOT NULL,
+  "note" text NULL,
+  "due_at" integer NULL,
+  "refs" text NOT NULL,
+  "version" integer NOT NULL,
+  "created_at" integer NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "action_items_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "action_items_user_created_idx" to table: "action_items"
+CREATE INDEX "action_items_user_created_idx" ON "action_items" ("user_id", "created_at", "id");
+-- Create index "action_items_user_status_created_idx" to table: "action_items"
+CREATE INDEX "action_items_user_status_created_idx" ON "action_items" ("user_id", "status", "created_at", "id");

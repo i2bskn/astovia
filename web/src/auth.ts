@@ -1,6 +1,6 @@
 export interface User {
   id: string;
-  username: string;
+  email: string;
 }
 
 interface AuthResponse {
@@ -16,7 +16,7 @@ export interface AuthState {
   error: string | null;
 }
 
-class APIError extends Error {
+export class APIError extends Error {
   constructor(readonly status: number) {
     super('Request failed');
   }
@@ -71,7 +71,7 @@ async function readAuth(response: Response): Promise<AuthResponse> {
     !('expires_in' in data) || typeof data.expires_in !== 'number' || data.expires_in <= 0 ||
     !('user' in data) || typeof data.user !== 'object' || data.user === null ||
     !('id' in data.user) || typeof data.user.id !== 'string' ||
-    !('username' in data.user) || typeof data.user.username !== 'string'
+    !('email' in data.user) || typeof data.user.email !== 'string'
   ) throw new Error('Unexpected authentication response');
   return data as AuthResponse;
 }
@@ -140,14 +140,14 @@ export const auth = {
     void restore();
   },
   retry(): void { void restore(); },
-  async login(username: string, password: string): Promise<void> {
+  async login(email: string, password: string): Promise<void> {
     const expected = ++generation;
     refreshPromise = null;
     publish({ status: 'anonymous', user: null, busy: 'login', error: null });
     try {
       await withAuthLock(async () => {
         isCurrent(expected);
-        const data = await readAuth(await post('/auth/login', { username, password }));
+        const data = await readAuth(await post('/auth/login', { email, password }));
         accept(data, expected);
         channel?.postMessage('session-changed');
       });
@@ -155,7 +155,7 @@ export const auth = {
     } catch (error) {
       if (expected !== generation || error instanceof SupersededError) return;
       publish({ status: 'anonymous', user: null, busy: null, error: error instanceof APIError && error.status === 401
-        ? 'ユーザー名またはパスワードを確認してください。' : connectionMessage(error) });
+        ? 'メールアドレスまたはパスワードを確認してください。' : connectionMessage(error) });
     }
   },
   async logout(): Promise<void> {
@@ -206,7 +206,7 @@ async function verifyProfile(expected: number): Promise<void> {
   try {
     const user = await request<User>('/api/v1/me');
     isCurrent(expected);
-    if (typeof user.id !== 'string' || typeof user.username !== 'string') throw new Error('Unexpected user response');
+    if (typeof user.id !== 'string' || typeof user.email !== 'string') throw new Error('Unexpected user response');
     publish({ ...state, user });
   } catch (error) {
     if (expected !== generation || error instanceof SupersededError) return;

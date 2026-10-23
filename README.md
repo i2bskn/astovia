@@ -1,6 +1,6 @@
 # Astovia
 
-Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在はアプリケーションの土台として、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存を実装しています。対応事項、MCP、APIトークン、外部サービス連携、AI抽出は**まだ実装していません**。
+Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在は、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存と、本人の対応事項の作成・一覧・状態変更（管理画面とREST API）を実装しています。MCP、APIトークン、外部サービス連携、AI抽出は**まだ実装していません**。
 
 ## Dockerでローカル開発する
 
@@ -26,6 +26,8 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は「PostgreSQLを使用する」の手順で行ってください。
 
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+
 生のコマンドは次のとおりです。
 
 ```sh
@@ -36,10 +38,12 @@ docker compose -f compose.test.yaml run --rm atlas schema apply --url 'sqlite://
 ### 3. 初期ユーザーを作成する
 
 ```sh
-make user-create USER_NAME=alice
+make user-create USER_EMAIL=alice@example.com
 ```
 
-パスワードは画面に表示されない対話入力で設定します。`USER_NAME`はmakeのコマンドライン引数で指定してください。シェルの環境変数として設定した`USER_NAME`は使用せず、未指定時と同じく何も実行せずに失敗します。ユーザー名として受け付けない値も、実行前に拒否します。
+ログインIDはメールアドレスです。パスワードは画面に表示されない対話入力で設定します。`USER_EMAIL`はmakeのコマンドライン引数で指定してください。シェルの環境変数として設定した`USER_EMAIL`は使用せず、未指定時と同じく何も実行せずに失敗します。make経由で使える文字は英数字と`._%+@-`だけで、`@`を含まない値や3〜254文字に収まらない値も実行前に拒否します。それ以外の記号を含むアドレスは`astovia users ... --email`を直接使ってください。形式の検証はCLIが行います。
+
+ログインIDをメールアドレスに変更する前に作成したSQLiteのDBは、`users`表の列が異なるため起動時のスキーマ確認で失敗します。開発中のデータしか無い場合は、DBファイルを削除して`make migrate`で作り直し、`make user-create USER_EMAIL=...`でユーザーを作り直してください。自動移行は用意していません。旧DBに対して`make migrate`を実行すると、`username`列の削除と`email`列の追加の計画が表示されます。データが残らないため承認せず、DBファイルを作り直してください。
 
 ユーザー操作は`docker compose run --rm app go run ./cmd/astovia users ...`で、イメージ内の古いバイナリではなく現在のソースから実行します。そのため、CLIのコードを変更してもイメージの再ビルドは不要です。ユーザー操作CLIには署名鍵は不要ですが、Airから起動する`serve`では必須です。
 
@@ -89,7 +93,7 @@ make build
 ```sh
 mkdir -p data
 atlas schema apply --url 'sqlite://data/astovia.db' --to 'file://db/sqlite/schema.hcl' --dev-url 'sqlite://file?mode=memory'
-./bin/astovia users create --username alice
+./bin/astovia users create --email alice@example.com
 # 初回に保存した署名鍵をシェルのASTOVIA_JWT_SECRETへ設定してから起動します。
 ./bin/astovia serve
 ```
@@ -133,22 +137,22 @@ atlas schema apply --url "$ASTOVIA_DB_DSN" --to file://db/postgres/schema.hcl --
 Dockerで起動している場合は、同じCompose構成で操作します。現在のソースから`go run`で実行するため、イメージの再ビルドは不要です。
 
 ```sh
-make user-create USER_NAME=alice
-make user-reset-password USER_NAME=alice
-make user-disable USER_NAME=alice
+make user-create USER_EMAIL=alice@example.com
+make user-reset-password USER_EMAIL=alice@example.com
+make user-disable USER_EMAIL=alice@example.com
 ```
 
 ネイティブバイナリでは次のように実行します。
 
 ```sh
-./bin/astovia users create --username alice
-./bin/astovia users reset-password --username alice
-./bin/astovia users disable --username alice
+./bin/astovia users create --email alice@example.com
+./bin/astovia users reset-password --email alice@example.com
+./bin/astovia users disable --email alice@example.com
 ```
 
-パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --username alice --password-stdin`のように`-T`を付けて実行します。
+パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-ユーザー名は前後の空白を除去して小文字に変換し、英数字で始まる3〜64文字のASCII英数字・ピリオド・アンダースコア・ハイフンを受け付けます。パスワードはUTF-8で12〜72バイトです。同じユーザー名の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させます。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させます。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## 認証と運用上の制約
 
@@ -170,12 +174,18 @@ make user-disable USER_NAME=alice
 | `GET /` | `/admin/`へリダイレクト |
 | `GET /healthz` | プロセスの稼働確認のみ。非公開情報は返さない |
 | `GET /admin/*` | 埋め込み管理画面。存在しないアセットは404 |
-| `POST /auth/login` | 本文は`{ "username": "alice", "password": "…" }` |
+| `POST /auth/login` | 本文は`{ "email": "alice@example.com", "password": "…" }` |
 | `POST /auth/refresh` | Cookieのトークンを更新。本文は`{}` |
 | `POST /auth/logout` | セッション失効とCookie削除。本文は`{}` |
-| `GET /api/v1/me` | 本人の`{id, username}`。Bearer Access JWTが必要 |
+| `GET /api/v1/me` | 本人の`{id, email}`。Bearer Access JWTが必要 |
+| `GET /api/v1/action-items` | 本人の対応事項の一覧。クエリは`status`（`open`／`done`／`dismissed`）、`limit`（1〜100、既定50）、`cursor`。`{items, next_cursor}`を返す |
+| `POST /api/v1/action-items` | 対応事項を作成し201と`Location`を返す。本文は`{content, status?, note?, due_at?, refs?}` |
+| `GET /api/v1/action-items/{id}` | 本人の対応事項を1件返す |
+| `PATCH /api/v1/action-items/{id}` | 指定したキーだけを更新する。`note`／`due_at`は`null`で消去。`version`を付けると一致しない場合に409 |
 
-LoginとRefreshは`{access_token, expires_in, user: {id, username}}`を返します。エラーは`{error: {code, message}}`です。認証・非公開APIの応答には`Cache-Control: no-store`を付けます。存在しないAPI・MCP・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
+LoginとRefreshは`{access_token, expires_in, user: {id, email}}`を返します。
+
+対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at}`で、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。エラーは`{error: {code, message}}`です。認証・非公開APIの応答には`Cache-Control: no-store`を付けます。存在しないAPI・MCP・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
 
 ## コード生成と検証
 

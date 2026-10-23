@@ -6,20 +6,23 @@ import (
 	"errors"
 	"fmt"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"math"
 	_ "modernc.org/sqlite"
 	"net/url"
 	"strings"
 )
 
 var ErrUnauthorized = errors.New("invalid credentials")
-var ErrConflict = errors.New("username already exists")
+var ErrConflict = errors.New("email already exists")
 var ErrNotFound = errors.New("user not found")
+var ErrItemNotFound = errors.New("action item not found")
+var ErrVersionConflict = errors.New("action item was updated by another request")
 
 // User, Session and Refresh are storage types. They are not serialized
 // directly; HTTP handlers define their own response types.
 type User struct {
 	ID           string
-	Username     string
+	Email        string // Callers normalize it with auth.Email; case-insensitive uniqueness relies on that.
 	PasswordHash string
 	Disabled     int64
 	CreatedAt    int64
@@ -35,12 +38,28 @@ type Refresh struct {
 	ConsumedAt      sql.NullInt64
 	CreatedAt       int64
 }
+type ActionItem struct {
+	ID, UserID, Content, Status string
+	Note                        sql.NullString
+	DueAt                       sql.NullInt64
+	Refs                        string // JSON array; validated and normalized by the HTTP handlers.
+	Version                     int64
+	CreatedAt                   int64
+	UpdatedAt                   int64
+}
+
+// ActionItemCursor is the position after which ListActionItems continues,
+// in created_at DESC, id DESC order.
+type ActionItemCursor struct {
+	CreatedAt int64
+	ID        string
+}
 
 // queries adapts the sqlc packages generated for each database. sqlc emits
 // distinct types per package, so each driver has a small adapter that is
 // checked against this interface at compile time.
 type queries interface {
-	userByName(ctx context.Context, name string) (User, error)
+	userByEmail(ctx context.Context, email string) (User, error)
 	userByID(ctx context.Context, id string) (User, error)
 	lockUser(ctx context.Context, id string) (User, error)
 	createUser(ctx context.Context, user User) error
@@ -54,6 +73,11 @@ type queries interface {
 	createRefresh(ctx context.Context, refresh Refresh) error
 	refreshByHash(ctx context.Context, hash string) (Refresh, error)
 	consumeRefresh(ctx context.Context, hash string, now int64) (int64, error)
+	createActionItem(ctx context.Context, item ActionItem) error
+	actionItem(ctx context.Context, userID, id string) (ActionItem, error)
+	lockActionItem(ctx context.Context, userID, id string) (ActionItem, error)
+	listActionItems(ctx context.Context, userID, status string, after ActionItemCursor, limit int) ([]ActionItem, error)
+	updateActionItem(ctx context.Context, item ActionItem, currentVersion int64) (int64, error)
 }
 type Store struct {
 	db     *sql.DB
@@ -93,7 +117,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,username,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at FROM action_items LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -104,8 +128,8 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 	}
 	return nil
 }
-func (s *Store) UserByName(ctx context.Context, name string) (User, error) {
-	return s.q.userByName(ctx, name)
+func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
+	return s.q.userByEmail(ctx, email)
 }
 func (s *Store) transaction(ctx context.Context, fn func(queries) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -121,15 +145,15 @@ func (s *Store) transaction(ctx context.Context, fn func(queries) error) error {
 func (s *Store) CreateUser(ctx context.Context, u User) error {
 	err := s.transaction(ctx, func(q queries) error { return q.createUser(ctx, u) })
 	if err != nil {
-		existing, e := s.q.userByName(ctx, u.Username)
+		existing, e := s.q.userByEmail(ctx, u.Email)
 		if e == nil && existing.ID != "" {
 			return ErrConflict
 		}
 	}
 	return err
 }
-func (s *Store) ChangeUser(ctx context.Context, name, hash string, disable bool, now int64) error {
-	u, err := s.q.userByName(ctx, name)
+func (s *Store) ChangeUser(ctx context.Context, email, hash string, disable bool, now int64) error {
+	u, err := s.q.userByEmail(ctx, email)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -269,4 +293,64 @@ func (s *Store) Authenticated(ctx context.Context, uid, sid string, now int64) (
 		return User{}, ErrUnauthorized
 	}
 	return u, nil
+}
+
+func (s *Store) CreateActionItem(ctx context.Context, item ActionItem) error {
+	return s.q.createActionItem(ctx, item)
+}
+
+// ActionItem returns the user's item, or ErrItemNotFound when the item does
+// not exist or belongs to another user.
+func (s *Store) ActionItem(ctx context.Context, userID, id string) (ActionItem, error) {
+	item, err := s.q.actionItem(ctx, userID, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ActionItem{}, ErrItemNotFound
+	}
+	return item, err
+}
+
+// ListActionItems returns up to limit of the user's items after the cursor in
+// created_at DESC, id DESC order. An empty status lists every status.
+func (s *Store) ListActionItems(ctx context.Context, userID, status string, after *ActionItemCursor, limit int) ([]ActionItem, error) {
+	// The first page uses a cursor that sorts after every row.
+	c := ActionItemCursor{CreatedAt: math.MaxInt64}
+	if after != nil {
+		c = *after
+	}
+	return s.q.listActionItems(ctx, userID, status, c, limit)
+}
+
+// UpdateActionItem locks the user's item, lets fn modify it and stores the
+// result with the version incremented. ID, UserID and CreatedAt cannot be
+// changed by fn. An error from fn is returned as is and nothing is stored.
+// The transaction explicitly locks only the target action_items row.
+func (s *Store) UpdateActionItem(ctx context.Context, userID, id string, fn func(*ActionItem) error) (ActionItem, error) {
+	var updated ActionItem
+	err := s.transaction(ctx, func(q queries) error {
+		item, e := q.lockActionItem(ctx, userID, id)
+		if errors.Is(e, sql.ErrNoRows) {
+			return ErrItemNotFound
+		}
+		if e != nil {
+			return e
+		}
+		next := item
+		if e = fn(&next); e != nil {
+			return e
+		}
+		next.ID, next.UserID, next.CreatedAt, next.Version = item.ID, item.UserID, item.CreatedAt, item.Version+1
+		n, e := q.updateActionItem(ctx, next, item.Version)
+		if e != nil {
+			return e
+		}
+		if n != 1 {
+			return ErrVersionConflict
+		}
+		updated = next
+		return nil
+	})
+	if err != nil {
+		return ActionItem{}, err
+	}
+	return updated, nil
 }

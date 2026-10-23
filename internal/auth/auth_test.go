@@ -40,7 +40,7 @@ func TestRefreshNearSessionExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := store.User{ID: "alice-id", Username: "alice", PasswordHash: hash, CreatedAt: base.Unix()}
+	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, CreatedAt: base.Unix()}
 	if err = s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func newContractFixture(t *testing.T, driver string, names ...string) *contractF
 	}
 	f.hash = hash
 	for _, name := range names {
-		u := store.User{ID: name + "-id", Username: name, PasswordHash: hash, CreatedAt: f.now.Unix()}
+		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: hash, CreatedAt: f.now.Unix()}
 		if err = s.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -130,11 +130,11 @@ func (f *contractFixture) reopen() (*store.Store, *Service) {
 	return other, f.service(other)
 }
 
-func (f *contractFixture) login(name, password string) Result {
+func (f *contractFixture) login(email, password string) Result {
 	f.t.Helper()
-	r, err := f.auth.Login(f.ctx, name, password)
+	r, err := f.auth.Login(f.ctx, email, password)
 	if err != nil {
-		f.t.Fatalf("login %s: %v", name, err)
+		f.t.Fatalf("login %s: %v", email, err)
 	}
 	return r
 }
@@ -166,33 +166,40 @@ func accessClaims(t *testing.T, token string) *claims {
 func TestContracts(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
-			t.Run("duplicate username conflicts", func(t *testing.T) {
+			t.Run("duplicate email conflicts", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				if err := f.store.CreateUser(f.ctx, store.User{ID: "other", Username: "alice", PasswordHash: f.hash}); !errors.Is(err, store.ErrConflict) {
+				if err := f.store.CreateUser(f.ctx, store.User{ID: "other", Email: "alice@example.com", PasswordHash: f.hash}); !errors.Is(err, store.ErrConflict) {
 					t.Fatalf("duplicate: %v", err)
+				}
+				email, err := Email("Alice@Example.com")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = f.store.CreateUser(f.ctx, store.User{ID: "other-case", Email: email, PasswordHash: f.hash}); !errors.Is(err, store.ErrConflict) {
+					t.Fatalf("duplicate differing only in case: %v", err)
 				}
 			})
 
 			t.Run("invalid login is unauthorized", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				f.login("alice", "correct-password-123")
-				for _, name := range []string{"alice", "missing"} {
+				f.login("alice@example.com", "correct-password-123")
+				for _, name := range []string{"alice@example.com", "missing@example.com"} {
 					if _, err := f.auth.Login(f.ctx, name, "wrong-password"); !errors.Is(err, store.ErrUnauthorized) {
 						t.Fatalf("invalid login %s: %v", name, err)
 					}
 				}
 			})
 
-			t.Run("login normalizes the username", func(t *testing.T) {
+			t.Run("login normalizes the email", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				first := f.login(" ALICE ", "correct-password-123")
+				first := f.login(" Alice@Example.COM ", "correct-password-123")
 				f.assertActive(first.AccessToken, "alice-id")
 			})
 
 			t.Run("rotation and replay", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice", "bob")
-				first := f.login("alice", "correct-password-123")
-				bob := f.login("bob", "correct-password-123")
+				first := f.login("alice@example.com", "correct-password-123")
+				bob := f.login("bob@example.com", "correct-password-123")
 				// Move the clock (still inside the access lifetime) so that a
 				// rotation which extended the session would change ExpiresAt.
 				f.now = f.now.Add(time.Minute)
@@ -214,7 +221,7 @@ func TestContracts(t *testing.T) {
 
 			t.Run("logout with a rotated token revokes the session", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				r := f.login("alice", "correct-password-123")
+				r := f.login("alice@example.com", "correct-password-123")
 				rr, err := f.auth.Refresh(f.ctx, r.Refresh)
 				if err != nil {
 					t.Fatal(err)
@@ -232,13 +239,13 @@ func TestContracts(t *testing.T) {
 
 			t.Run("password reset revokes sessions and stale logins", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				r := f.login("alice", "correct-password-123")
+				r := f.login("alice@example.com", "correct-password-123")
 				f.assertActive(r.AccessToken, "alice-id")
 				newHash, err := Password("replacement-password-123")
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = f.store.ChangeUser(f.ctx, "alice", newHash, false, f.now.Unix()); err != nil {
+				if err = f.store.ChangeUser(f.ctx, "alice@example.com", newHash, false, f.now.Unix()); err != nil {
 					t.Fatal(err)
 				}
 				f.assertRejected(r.AccessToken, "access after reset")
@@ -246,24 +253,24 @@ func TestContracts(t *testing.T) {
 				if err = f.store.Login(f.ctx, f.users["alice"], store.Session{ID: "stale-session", UserID: "alice-id", ExpiresAt: f.now.Add(time.Hour).Unix()}, store.Refresh{Hash: "stale-hash", SessionID: "stale-session"}); !errors.Is(err, store.ErrUnauthorized) {
 					t.Fatalf("stale verification: %v", err)
 				}
-				f.login("alice", "replacement-password-123")
+				f.login("alice@example.com", "replacement-password-123")
 			})
 
 			t.Run("disable revokes sessions and reset does not enable", func(t *testing.T) {
 				f := newContractFixture(t, driver, "bob")
-				bob := f.login("bob", "correct-password-123")
+				bob := f.login("bob@example.com", "correct-password-123")
 				f.assertActive(bob.AccessToken, "bob-id")
-				if err := f.store.ChangeUser(f.ctx, "bob", "", true, f.now.Unix()); err != nil {
+				if err := f.store.ChangeUser(f.ctx, "bob@example.com", "", true, f.now.Unix()); err != nil {
 					t.Fatal(err)
 				}
 				f.assertRejected(bob.AccessToken, "access after disable")
-				if _, err := f.auth.Login(f.ctx, "bob", "correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
+				if _, err := f.auth.Login(f.ctx, "bob@example.com", "correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
 					t.Fatalf("disabled login: %v", err)
 				}
-				if err := f.store.ChangeUser(f.ctx, "bob", f.hash, false, f.now.Unix()); err != nil {
+				if err := f.store.ChangeUser(f.ctx, "bob@example.com", f.hash, false, f.now.Unix()); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := f.auth.Login(f.ctx, "bob", "correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
+				if _, err := f.auth.Login(f.ctx, "bob@example.com", "correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
 					t.Fatalf("reset enabled disabled user: %v", err)
 				}
 			})
@@ -271,7 +278,7 @@ func TestContracts(t *testing.T) {
 			t.Run("concurrent refresh across stores", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
 				_, a2 := f.reopen()
-				r := f.login("alice", "correct-password-123")
+				r := f.login("alice@example.com", "correct-password-123")
 				f.assertActive(r.AccessToken, "alice-id")
 				results := make(chan error, 2)
 				var wg sync.WaitGroup
@@ -299,7 +306,7 @@ func TestContracts(t *testing.T) {
 
 			t.Run("failed rotation keeps the token", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				r := f.login("alice", "correct-password-123")
+				r := f.login("alice@example.com", "correct-password-123")
 				// A successor insertion failure rolls back consumption of the original token.
 				if _, _, err := f.store.Rotate(f.ctx, Hash(r.Refresh), Hash(r.Refresh), f.now.Unix()); err == nil {
 					t.Fatal("duplicate successor hash did not fail")
@@ -318,7 +325,7 @@ func TestContracts(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					r := f.login("alice", "correct-password-123")
+					r := f.login("alice@example.com", "correct-password-123")
 					f.assertActive(r.AccessToken, "alice-id")
 					gate := make(chan struct{})
 					type refreshResult struct {
@@ -337,7 +344,7 @@ func TestContracts(t *testing.T) {
 						if operation == "logout" {
 							changed <- f.auth.Logout(f.ctx, raw)
 						} else {
-							changed <- f.store.ChangeUser(f.ctx, "alice", newHash, false, f.now.Unix())
+							changed <- f.store.ChangeUser(f.ctx, "alice@example.com", newHash, false, f.now.Unix())
 						}
 					}(r.Refresh)
 					close(gate)
@@ -360,7 +367,7 @@ func TestContracts(t *testing.T) {
 
 			t.Run("expired session", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				r := f.login("alice", "correct-password-123")
+				r := f.login("alice@example.com", "correct-password-123")
 				f.assertActive(r.AccessToken, "alice-id")
 				f.now = f.now.Add(8 * 24 * time.Hour)
 				if _, err := f.auth.Refresh(f.ctx, r.Refresh); !errors.Is(err, store.ErrUnauthorized) {
@@ -371,7 +378,7 @@ func TestContracts(t *testing.T) {
 
 			t.Run("invalid claims", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				r := f.login("alice", "correct-password-123")
+				r := f.login("alice@example.com", "correct-password-123")
 				sign := func(method jwt.SigningMethod, c *claims) string {
 					t.Helper()
 					raw, err := jwt.NewWithClaims(method, c).SignedString(contractSecret)
@@ -404,7 +411,7 @@ func TestContracts(t *testing.T) {
 			t.Run("reopened store retains users", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
 				other, _ := f.reopen()
-				if user, err := other.UserByName(f.ctx, "alice"); err != nil || user.ID != "alice-id" {
+				if user, err := other.UserByEmail(f.ctx, "alice@example.com"); err != nil || user.ID != "alice-id" {
 					t.Fatalf("persistence: %+v %v", user, err)
 				}
 			})
@@ -412,7 +419,7 @@ func TestContracts(t *testing.T) {
 	}
 }
 
-func TestPasswordAndUsernameBoundaries(t *testing.T) {
+func TestPasswordAndEmailBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		length int
 		ok     bool
@@ -421,13 +428,32 @@ func TestPasswordAndUsernameBoundaries(t *testing.T) {
 			t.Fatalf("Password with %d bytes: err=%v", tc.length, err)
 		}
 	}
+	local64 := strings.Repeat("a", 64)
+	domain := strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "."
+	valid254 := local64 + "@" + domain + strings.Repeat("d", 61)
+	invalid255 := local64 + "@" + domain + strings.Repeat("d", 62)
+	if len(valid254) != 254 || len(invalid255) != 255 {
+		t.Fatalf("fixture lengths: %d %d", len(valid254), len(invalid255))
+	}
+	padded257 := "alice@example.com" + strings.Repeat(" ", 257-len("alice@example.com"))
 	for _, tc := range []struct {
-		length int
-		ok     bool
-	}{{2, false}, {3, true}, {64, true}, {65, false}} {
-		if _, err := Username(strings.Repeat("u", tc.length)); (err == nil) != tc.ok {
-			t.Fatalf("Username with %d characters: err=%v", tc.length, err)
+		name  string
+		input string
+		ok    bool
+	}{
+		{"local part of 64 bytes", local64 + "@example.com", true},
+		{"254 bytes", valid254, true},
+		{"domain label of 64 characters", "alice@" + strings.Repeat("b", 64) + ".com", false},
+		{"local part of 65 bytes", strings.Repeat("a", 65) + "@example.com", false},
+		{"255 bytes", invalid255, false},
+		{"257 bytes before trimming", padded257, false},
+	} {
+		if _, err := Email(tc.input); (err == nil) != tc.ok {
+			t.Fatalf("Email with %s: err=%v", tc.name, err)
 		}
+	}
+	if _, err := Email(padded257); err == nil || err.Error() != "email is too long" {
+		t.Fatalf("Email with 257 bytes before trimming: err=%v", err)
 	}
 }
 
@@ -435,9 +461,9 @@ func TestInputBoundaries(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			f := newContractFixture(t, driver, "alice")
-			r := f.login("alice", "correct-password-123")
+			r := f.login("alice@example.com", "correct-password-123")
 			for name, password := range map[string]string{"empty": "", "73 bytes": strings.Repeat("p", 73)} {
-				if _, err := f.auth.Login(f.ctx, "alice", password); !errors.Is(err, store.ErrUnauthorized) {
+				if _, err := f.auth.Login(f.ctx, "alice@example.com", password); !errors.Is(err, store.ErrUnauthorized) {
 					t.Fatalf("Login with %s password: %v", name, err)
 				}
 			}
@@ -474,7 +500,7 @@ func TestSessionExpiryBoundary(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			f := newContractFixture(t, driver, "alice")
-			r := f.login("alice", "correct-password-123")
+			r := f.login("alice@example.com", "correct-password-123")
 			c := accessClaims(t, r.AccessToken)
 			if _, err := f.store.Authenticated(f.ctx, c.Subject, c.SessionID, r.ExpiresAt-1); err != nil {
 				t.Fatalf("session rejected one second before expiry: %v", err)
@@ -485,14 +511,29 @@ func TestSessionExpiryBoundary(t *testing.T) {
 		})
 	}
 }
-func TestPasswordAndUsername(t *testing.T) {
-	for _, s := range []string{"ab", "bad name", "日本語", "_abc"} {
-		if _, e := Username(s); e == nil {
+func TestPasswordAndEmail(t *testing.T) {
+	for _, s := range []string{
+		"", "   ", "alice", "@example.com", "alice@", "alice@@example.com", "a@b@example.com",
+		"alice@-example.com", "alice@example-.com", "alice@.example.com", "alice@example.com.", "alice@ex..com",
+		"alice @example.com", "アリス@example.com", "alice@例え.jp",
+		"\u212alice@example.com", "\u3000alice@example.com\u3000",
+	} {
+		if _, e := Email(s); e == nil {
 			t.Fatalf("accepted %q", s)
 		}
 	}
-	if v, e := Username(" Alice "); e != nil || v != "alice" {
-		t.Fatal(v, e)
+	for input, want := range map[string]string{
+		"alice@example.com":     "alice@example.com",
+		" Alice@Example.COM ":   "alice@example.com",
+		"\talice@example.com\n": "alice@example.com",
+		"alice+tag@example.com": "alice+tag@example.com",
+		"a.b@sub.example.co.jp": "a.b@sub.example.co.jp",
+		"alice@localhost":       "alice@localhost",
+		"alice@xn--r8jz45g.jp":  "alice@xn--r8jz45g.jp",
+	} {
+		if v, e := Email(input); e != nil || v != want {
+			t.Fatalf("Email(%q) = %q, %v; want %q", input, v, e, want)
+		}
 	}
 	if _, e := Password("short"); e == nil {
 		t.Fatal("short password accepted")
@@ -515,10 +556,10 @@ func activeAuthFixture(t *testing.T, driver string, names ...string) (*Service, 
 	}
 	results := make(map[string]Result, len(names))
 	for _, name := range names {
-		if err = s.CreateUser(ctx, store.User{ID: name + "-id", Username: name, PasswordHash: hash, CreatedAt: now.Unix()}); err != nil {
+		if err = s.CreateUser(ctx, store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: hash, CreatedAt: now.Unix()}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := a.Login(ctx, name, "correct-password-123")
+		result, err := a.Login(ctx, name+"@example.com", "correct-password-123")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -16,6 +16,14 @@ sql:
             go_type:
               import: database/sql
               type: NullInt64
+          - column: action_items.note
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: action_items.due_at
+            go_type:
+              import: database/sql
+              type: NullInt64
   - engine: postgresql
     schema: db/postgres/schema.sql
     queries: db/postgres/queries.sql
