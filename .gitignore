@@ -10,3 +10,4 @@ web/dist/
 
 .playwright-cli/
 db/*/schema.sql.tmp
+.codex/

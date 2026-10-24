@@ -1,5 +1,0 @@
-[mcp_servers.astovia]
-url = "http://localhost:5173/mcp"
-
-[mcp_servers.astovia.http_headers]
-Authorization = "Bearer ast_C0Ze2ZdprMTkkNQQLA1sLdI1p8VNpAr2gI6D6gxVhR0"
