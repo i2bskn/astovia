@@ -48,8 +48,8 @@ export default function ConsentPage({ email }: { email: string }) {
 
   const offline = consent?.scopes.includes('offline_access') ?? false;
 
-  return <section className="consent-card" aria-labelledby={headingID} aria-busy={!consent && !error}>
-    <div className="section-label">CONNECT AI CLIENT</div>
+  return <section className="gate-card consent-card" aria-labelledby={headingID} aria-busy={!consent && !error}>
+    <p className="eyebrow">AI クライアントの接続</p>
     {consent ? <>
       <h1 id={headingID}><span className="consent-client">{consent.client_name}</span> が Astovia への接続を求めています</h1>
       <dl className="consent-facts">
@@ -60,7 +60,7 @@ export default function ConsentPage({ email }: { email: string }) {
       <p className="consent-warning">表示しているドメインをよく確認してください。</p>
       <h2 className="consent-subheading">許可される内容</h2>
       <ul className="consent-scopes">
-        <li>対応事項の閲覧・作成・更新</li>
+        <li>タスクの閲覧・作成・更新</li>
         <li>{offline ? '再ログインなしで接続を維持（使うたびに最長90日延長）' : '7日後に再接続が必要'}</li>
       </ul>
       <p className="consent-account"><span className="user-email">{email}</span> としてログイン中</p>

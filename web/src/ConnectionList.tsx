@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import { request } from './auth';
+import { dateTime } from './format';
+import CopyField from './CopyField';
 import { createOAuthClient } from './oauth';
+import Phrased from './Phrased';
 import type { Connection } from './oauth';
 
 const client = createOAuthClient(request);
 
 function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ja-JP');
+  return dateTime(value, new Date());
 }
 
 function ConnectionRow({ connection, confirming, busy, onAsk, onCancel, onDelete }: {
@@ -75,9 +77,15 @@ export default function ConnectionList() {
     }
   }
 
-  return <section className="action-panel token-panel" aria-labelledby={headingID}>
-    <h2 id={headingID}>接続中の AI クライアント</h2>
-    <p className="intro">Claude Code: <code className="inline-code">claude mcp add --transport http astovia {endpoint}</code>。Claude のカスタムコネクタや ChatGPT には <code className="inline-code">{endpoint}</code> を入力します。</p>
+  return <section className="action-panel settings-panel" id="connections" aria-labelledby={headingID}>
+    <h2 id={headingID}>AI クライアント</h2>
+    <p className="intro"><Phrased text="Claude や ChatGPT などの AI クライアントから、MCP でタスクを確認・更新できます。OAuth に対応したクライアントは、下の URL を登録すると、ブラウザでの許可だけで接続できます。トークンの発行は要りません。" /></p>
+    <h3 className="settings-subheading first">接続のしかた</h3>
+    <div className="copy-stack">
+      <CopyField label="Claude Code で接続するコマンド" value={`claude mcp add --transport http astovia ${endpoint}`} />
+      <CopyField label="Claude のカスタムコネクタや ChatGPT に入力する URL" value={endpoint} />
+    </div>
+    <h3 className="settings-subheading">接続中のクライアント</h3>
     {error ? <p className="notice error" role="alert">{error}</p> : null}
     {connections.length > 0 ? <ul className="action-list token-list">
       {connections.map((connection) => <ConnectionRow key={connection.id} connection={connection}
@@ -87,7 +95,7 @@ export default function ConnectionList() {
         onCancel={() => setConfirmingID(null)}
         onDelete={() => { void remove(connection.id); }} />)}
     </ul> : null}
-    {!loading && !error && connections.length === 0 ? <p className="action-empty">接続中の AI クライアントはありません。</p> : null}
+    {!loading && !error && connections.length === 0 ? <p className="action-empty"><Phrased text="接続中の AI クライアントはありません。上の方法で接続すると、ここに表示されます。" /></p> : null}
     {loading ? <p className="action-loading" aria-live="polite">読み込んでいます…</p> : null}
   </section>;
 }

@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { request } from './auth';
+import { dateTime } from './format';
 import { isConflict } from './actionItems';
 import { createAPITokensClient } from './apiTokens';
 import type { APIToken, CreatedAPIToken } from './apiTokens';
+import Phrased from './Phrased';
 
 const client = createAPITokensClient(request);
 
 function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ja-JP');
+  return dateTime(value, new Date());
 }
 
 function connectCommand(token: string): string {
@@ -145,19 +146,20 @@ export default function APITokenList() {
     }
   }
 
-  return <section className="action-panel token-panel" aria-labelledby={headingID}>
+  return <section className="action-panel settings-panel" id="tokens" aria-labelledby={headingID}>
     <h2 id={headingID}>API トークン</h2>
-    <p className="intro">AI クライアントから MCP で接続するときに使います。トークンは発行したときに一度だけ表示します。</p>
+    <p className="intro"><Phrased text="OAuth に対応していない AI クライアントや REST API から使うときに発行します。発行すると、トークンと Authorization ヘッダーに付けて接続する例を一度だけ表示します。" /></p>
     <form className="action-form" onSubmit={(event) => { void submit(event); }} aria-busy={submitting}>
       <div className="field">
         <label htmlFor={nameID}>名前</label>
-        <input id={nameID} name="name" maxLength={100} placeholder="Claude Code" value={name} onChange={(e) => { setName(e.target.value); setFormError(null); }} disabled={submitting} aria-describedby={formError ? formErrorID : undefined} />
+        <input id={nameID} name="name" maxLength={100} placeholder="例: Claude Code" value={name} onChange={(e) => { setName(e.target.value); setFormError(null); }} disabled={submitting} aria-describedby={formError ? formErrorID : undefined} />
       </div>
       {formError ? <p id={formErrorID} className="notice error" role="alert">{formError}</p> : null}
       <button className="button primary add-button" type="submit" disabled={submitting}>{submitting ? '発行中…' : '発行'}</button>
     </form>
     {created ? <CreatedPanel created={created} onClose={() => setCreated(null)} /> : null}
     {error ? <p className="notice error" role="alert">{error}</p> : null}
+    {tokens.length > 0 ? <h3 className="settings-subheading">発行済みのトークン</h3> : null}
     {tokens.length > 0 ? <ul className="action-list token-list">
       {tokens.map((token) => <TokenRow key={token.id} token={token}
         confirming={confirmingID === token.id}

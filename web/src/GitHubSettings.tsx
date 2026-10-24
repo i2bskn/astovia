@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import type { FormEvent } from 'react';
 import { APIError, request } from './auth';
+import { dateTime } from './format';
 import { GITHUB_TOKEN_URL, githubErrorMessage, githubStatusMessage } from './automation';
 import { createIntegrationsClient } from './integrations';
 import type { GitHubState } from './integrations';
+import Phrased from './Phrased';
 
 const client = createIntegrationsClient(request);
 
 function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ja-JP');
+  return dateTime(value, new Date());
 }
 
 function TokenForm({ submitLabel, busy, error, onSubmit, onCancel }: {
@@ -39,7 +40,7 @@ function TokenForm({ submitLabel, busy, error, onSubmit, onCancel }: {
 
   return <form className="action-form" onSubmit={submit} aria-busy={busy}>
     <div className="field">
-      <label htmlFor={inputID}>Personal access token（classic）</label>
+      <label htmlFor={inputID}>Personal access token (classic)</label>
       <input id={inputID} name="token" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={255} value={token} onChange={(e) => { setToken(e.target.value); setValidation(null); }} disabled={busy} aria-describedby={message ? errorID : undefined} />
     </div>
     {message ? <p id={errorID} className="notice error" role="alert">{message}</p> : null}
@@ -115,14 +116,14 @@ export default function GitHubSettings() {
     }
   }
 
-  return <section className="action-panel settings-panel" aria-labelledby={headingID}>
+  return <section className="action-panel settings-panel" id="github" aria-labelledby={headingID}>
     <h2 id={headingID}>GitHub 連携</h2>
-    <p className="intro">自分宛てのレビュー依頼と割り当てを見つけて対応事項にし、PR や Issue が片付いたら自動で完了にします。</p>
+    <p className="intro"><Phrased text="自分宛てのレビュー依頼と割り当てを見つけてタスクにし、PR や Issue が片付いたら自動で完了にします。" /></p>
     {error ? <p className="notice error" role="alert">{error}</p> : null}
     {loading ? <p className="action-loading" aria-live="polite">読み込んでいます…</p> : null}
     {!loading && state && !state.connected ? <>
       <ol className="steps">
-        <li><a href={GITHUB_TOKEN_URL} rel="noopener noreferrer" target="_blank">GitHub のトークン作成ページ</a>を開き、classic の personal access token を作ります（スコープ <span className="inline-code">repo</span> と <span className="inline-code">notifications</span>）。</li>
+        <li><a href={GITHUB_TOKEN_URL} rel="noopener noreferrer" target="_blank">GitHub のトークン作成ページ</a>を開き、classic の personal access token を作ります。スコープは <span className="nowrap"><span className="inline-code">repo</span> と <span className="inline-code">notifications</span></span> を選びます。</li>
         <li>作ったトークンを下に貼り付けて「接続する」を押します。</li>
       </ol>
       <TokenForm submitLabel="接続する" busy={busy} error={formError} onSubmit={(token) => { void connect(token); }} />

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { APIError, request } from './auth';
+import { dateTime } from './format';
 import { createIntegrationsClient } from './integrations';
 import type { PushDevice } from './integrations';
 import { base64URLToBytes, bytesToBase64URL, deviceLabel, isIOS, pushSupport, sameKey } from './notifications';
 import type { PushSupport } from './notifications';
+import Phrased from './Phrased';
 
 const client = createIntegrationsClient(request);
 
 function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ja-JP');
+  return dateTime(value, new Date());
 }
 
 function browserTimezone(): string {
@@ -47,6 +48,13 @@ const timezones: readonly string[] = (() => {
     return [];
   }
 })();
+
+// SupportMessage puts the first sentence (the state) in bold and leaves
+// the instructions after it in the normal weight.
+function SupportMessage({ text }: { text: string }) {
+  const end = text.indexOf('。') + 1;
+  return end > 0 && end < text.length ? <><strong>{text.slice(0, end)}</strong><Phrased text={text.slice(end)} /></> : <Phrased text={text} />;
+}
 
 // subscribe registers this browser for Web Push. It must be called from a
 // user action: Notification.requestPermission is called first, before any
@@ -109,7 +117,6 @@ export default function NotificationSettings() {
   const [settingsMessage, setSettingsMessage] = useState<{ error: boolean; text: string } | null>(null);
   const headingID = useId();
   const tzID = useId();
-  const tzListID = useId();
   const hourID = useId();
   const daysID = useId();
   const hours = useMemo(() => Array.from({ length: 24 }, (_, i) => i), []);
@@ -205,23 +212,25 @@ export default function NotificationSettings() {
     }
   }
 
-  return <section className="action-panel settings-panel" aria-labelledby={headingID}>
+  return <section className="action-panel settings-panel" id="notifications" aria-labelledby={headingID}>
     <h2 id={headingID}>通知</h2>
-    <p className="intro">新しく見つけた対応事項、未対応が続いている事項、朝のまとめをこの端末に通知します。</p>
+    <p className="intro"><Phrased text="新しく見つけたタスク、未対応が続いているタスク、朝のまとめをこの端末に通知します。" /></p>
     {support === 'supported'
       ? <div className="form-actions"><button className="button primary add-button" type="button" disabled={busy} onClick={() => { void enable(); }}>この端末で通知を受け取る</button></div>
-      : <p className="notice">{supportMessages[support]}</p>}
+      : <p className={support === 'denied' ? 'notice warning' : 'notice'} role={support === 'denied' ? 'alert' : undefined}><SupportMessage text={supportMessages[support]} /></p>}
+    {support !== 'ios-home-screen' ? <p className="field-hint"><Phrased text="iPhone・iPad では、Safari の共有メニューから「ホーム画面に追加」した Astovia を開いて登録します。" /></p> : null}
     {notice ? <p className="notice success" role="status">{notice}</p> : null}
     {error ? <p className="notice error" role="alert">{error}</p> : null}
     <h3 className="settings-subheading">通知を受け取る端末</h3>
     {devices.length > 0 ? <ul className="action-list">
       {devices.map((device) => <DeviceRow key={device.id} device={device} busy={busy} onDelete={() => { void remove(device.id); }} />)}
     </ul> : null}
-    {!loading && devices.length === 0 ? <p className="action-empty">登録された端末はありません。</p> : null}
+    {!loading && devices.length === 0 ? <p className="action-empty">登録された端末はありません。{support === 'supported' ? '上の「この端末で通知を受け取る」から登録できます。' : null}</p> : null}
     {loading ? <p className="action-loading" aria-live="polite">読み込んでいます…</p> : null}
     {devices.length > 0 ? <div className="form-actions"><button className="button secondary" type="button" disabled={busy} onClick={() => { void test(); }}>テスト通知を送る</button></div> : null}
     <h3 className="settings-subheading">通知のタイミング</h3>
     <form className="action-form settings-form" onSubmit={(event) => { void save(event); }} aria-busy={saving}>
+      <div className="field-grid">
       <div className="field">
         <label htmlFor={hourID}>朝のまとめの時刻</label>
         <select id={hourID} value={digestHour} onChange={(e) => setDigestHour(Number(e.target.value))} disabled={saving}>
@@ -229,16 +238,21 @@ export default function NotificationSettings() {
         </select>
       </div>
       <div className="field">
-        <label htmlFor={daysID}>未対応を知らせるまでの日数</label>
+        <label htmlFor={daysID}>未対応を知らせるまで（日）</label>
         <input id={daysID} type="number" inputMode="numeric" min={1} max={30} required value={staleDays} onChange={(e) => setStaleDays(Math.min(30, Math.max(1, Math.trunc(Number(e.target.value)) || 1)))} disabled={saving} />
       </div>
       <div className="field">
         <label htmlFor={tzID}>タイムゾーン</label>
-        <input id={tzID} list={tzListID} autoCapitalize="none" spellCheck={false} maxLength={64} required value={timezone} onChange={(e) => setTimezone(e.target.value)} disabled={saving} />
-        <datalist id={tzListID}>{timezones.map((tz) => <option key={tz} value={tz} />)}</datalist>
+        {timezones.length > 0
+          ? <select id={tzID} value={timezone} onChange={(e) => setTimezone(e.target.value)} disabled={saving}>
+            {timezones.includes(timezone) ? null : <option value={timezone}>{timezone}</option>}
+            {timezones.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
+          </select>
+          : <input id={tzID} autoCapitalize="none" spellCheck={false} maxLength={64} required value={timezone} onChange={(e) => setTimezone(e.target.value)} disabled={saving} />}
+      </div>
       </div>
       {settingsMessage ? <p className={settingsMessage.error ? 'notice error' : 'notice success'} role={settingsMessage.error ? 'alert' : 'status'}>{settingsMessage.text}</p> : null}
-      <button className="button primary add-button" type="submit" disabled={saving}>{saving ? '保存中…' : '保存'}</button>
+      <div className="form-actions"><button className="button primary" type="submit" disabled={saving}>{saving ? '保存中…' : '通知のタイミングを保存'}</button></div>
     </form>
   </section>;
 }
