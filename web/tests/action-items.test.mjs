@@ -33,6 +33,16 @@ test('listActionItems adds status and cursor to the query', async () => {
   assert.equal(calls[1].path, '/api/v1/action-items?status=done&cursor=abc_-');
 });
 
+test('listActionItems asks for automatically completed items', async () => {
+  const auto = { ...item, status: 'done', source: 'github', auto: { reason: 'github.pr_merged', ref_url: null, at: '2026-10-24T10:00:00Z' } };
+  const { client, calls } = fake({ items: [auto], next_cursor: 'a.next' });
+  assert.deepEqual(await client.listActionItems({ status: 'done', auto: true, cursor: 'a.x' }), { items: [auto], next_cursor: 'a.next' });
+  assert.equal(calls[0].path, '/api/v1/action-items?status=done&auto=true&cursor=a.x');
+  for (const bad of [{ ...auto, source: 1 }, { ...auto, auto: { reason: 'x', ref_url: 1, at: 'y' } }, { ...auto, auto: { ref_url: null, at: 'y' } }, { ...auto, auto: 'x' }]) {
+    await assert.rejects(fake({ items: [bad], next_cursor: null }).client.listActionItems(), /Unexpected action item list response/);
+  }
+});
+
 test('createActionItem posts JSON', async () => {
   const { client, calls } = fake(item);
   assert.deepEqual(await client.createActionItem({ content: 'x', note: 'memo' }), item);

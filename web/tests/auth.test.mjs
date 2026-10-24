@@ -246,3 +246,15 @@ test('request keeps the method, body and content type of a POST', async () => {
   assert.equal(headers.get('content-type'), 'application/json');
   assert.equal(headers.get('authorization'), 'Bearer test-access-token');
 });
+
+test('request failures carry the error code of the JSON body', async () => {
+  const { auth, request, APIError } = await harness(async (path) => {
+    if (path === '/auth/login') return json(session);
+    if (path === '/api/v1/me') return json(user);
+    if (path === '/api/v1/coded') return json({ error: { code: 'github_token_invalid', message: 'x' } }, 400);
+    return new Response('not json', { status: 503 });
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  await assert.rejects(request('/api/v1/coded'), (error) => error instanceof APIError && error.status === 400 && error.code === 'github_token_invalid');
+  await assert.rejects(request('/api/v1/plain'), (error) => error instanceof APIError && error.status === 503 && error.code === null);
+});

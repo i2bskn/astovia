@@ -28,25 +28,58 @@ SELECT hash, session_id, consumed_at, created_at FROM refresh_tokens WHERE hash 
 -- name: ConsumeRefresh :execrows
 UPDATE refresh_tokens SET consumed_at = ? WHERE hash = ? AND consumed_at IS NULL;
 -- name: CreateActionItem :exec
-INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at)
-VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(content),sqlc.arg(status),sqlc.arg(note),sqlc.arg(due_at),sqlc.arg(refs),sqlc.arg(version),sqlc.arg(created_at),sqlc.arg(updated_at));
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(content),sqlc.arg(status),sqlc.arg(note),sqlc.arg(due_at),sqlc.arg(refs),sqlc.arg(version),sqlc.arg(created_at),sqlc.arg(updated_at),sqlc.arg(source),sqlc.arg(source_key),sqlc.arg(tracking),sqlc.arg(auto_reason),sqlc.arg(auto_ref),sqlc.arg(auto_at),sqlc.arg(detected_at),sqlc.arg(tracked_at));
+-- name: InsertSourcedActionItem :execrows
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(content),sqlc.arg(status),sqlc.arg(note),sqlc.arg(due_at),sqlc.arg(refs),sqlc.arg(version),sqlc.arg(created_at),sqlc.arg(updated_at),sqlc.arg(source),sqlc.arg(source_key),sqlc.arg(tracking),sqlc.arg(auto_reason),sqlc.arg(auto_ref),sqlc.arg(auto_at),sqlc.arg(detected_at),sqlc.arg(tracked_at))
+ON CONFLICT (user_id, source_key) DO NOTHING;
 -- name: GetActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
 -- name: LockActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: LockActionItemBySourceKey :one
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source_key = sqlc.arg(source_key);
 -- name: ListActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND (created_at < sqlc.arg(before_created_at) OR (created_at = sqlc.arg(tie_created_at) AND id < sqlc.arg(before_id)))
 ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
 -- name: ListActionItemsByStatus :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND status = sqlc.arg(status) AND (created_at < sqlc.arg(before_created_at) OR (created_at = sqlc.arg(tie_created_at) AND id < sqlc.arg(before_id)))
 ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListAutoActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND auto_reason IS NOT NULL AND (auto_at < sqlc.arg(before_auto_at) OR (auto_at = sqlc.arg(tie_auto_at) AND id < sqlc.arg(before_id)))
+ORDER BY auto_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListAutoActionItemsByStatus :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND status = sqlc.arg(status) AND auto_reason IS NOT NULL AND (auto_at < sqlc.arg(before_auto_at) OR (auto_at = sqlc.arg(tie_auto_at) AND id < sqlc.arg(before_id)))
+ORDER BY auto_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListTrackedActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND tracking = 1 AND status = 'open'
+ORDER BY COALESCE(tracked_at, 0), id LIMIT sqlc.arg(page_size);
+-- name: ListStaleActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND status = 'open' AND created_at <= sqlc.arg(created_before)
+ORDER BY created_at, id LIMIT sqlc.arg(page_size);
+-- name: CountActionItemsByStatus :one
+SELECT COUNT(*) FROM action_items WHERE user_id = sqlc.arg(user_id) AND status = sqlc.arg(status);
+-- name: CountAutoActionItemsSince :one
+SELECT COUNT(*) FROM action_items WHERE user_id = sqlc.arg(user_id) AND auto_reason IS NOT NULL AND auto_at > sqlc.arg(since);
 -- name: UpdateActionItem :execrows
-UPDATE action_items SET content = sqlc.arg(content), status = sqlc.arg(status), note = sqlc.arg(note), due_at = sqlc.arg(due_at), refs = sqlc.arg(refs), version = sqlc.arg(new_version), updated_at = sqlc.arg(updated_at)
+UPDATE action_items SET content = sqlc.arg(content), status = sqlc.arg(status), note = sqlc.arg(note), due_at = sqlc.arg(due_at), refs = sqlc.arg(refs), source = sqlc.arg(source), source_key = sqlc.arg(source_key), tracking = sqlc.arg(tracking), auto_reason = sqlc.arg(auto_reason), auto_ref = sqlc.arg(auto_ref), auto_at = sqlc.arg(auto_at), detected_at = sqlc.arg(detected_at), tracked_at = sqlc.arg(tracked_at), version = sqlc.arg(new_version), updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND version = sqlc.arg(current_version);
+-- name: TouchActionItemTracked :execrows
+UPDATE action_items SET tracked_at = sqlc.arg(tracked_at)
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND version = sqlc.arg(version);
+-- name: UntrackSourceActionItems :exec
+UPDATE action_items SET tracking = 0, source_key = NULL, version = version + 1, updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND (tracking = 1 OR source_key IS NOT NULL);
 -- name: CreateAPIToken :exec
 INSERT INTO api_tokens (id,user_id,name,token_hash,created_at,last_used_at)
 VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(name),sqlc.arg(token_hash),sqlc.arg(created_at),NULL);
@@ -120,3 +153,98 @@ DELETE FROM oauth_tokens WHERE grant_id = sqlc.arg(grant_id) AND user_id = sqlc.
 DELETE FROM oauth_tokens WHERE user_id = sqlc.arg(user_id) AND expires_at <= sqlc.arg(now);
 -- name: DeleteUserOAuthTokens :exec
 DELETE FROM oauth_tokens WHERE user_id = sqlc.arg(user_id);
+-- name: GetGitHubConnection :one
+SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
+WHERE user_id = sqlc.arg(user_id);
+-- name: LockGitHubConnection :one
+SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
+WHERE user_id = sqlc.arg(user_id);
+-- name: CreateGitHubConnection :exec
+INSERT INTO github_connections (user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(generation),sqlc.arg(token_sealed),sqlc.arg(token_last4),sqlc.arg(login),sqlc.arg(scopes),sqlc.arg(immediate_notify),sqlc.arg(status),sqlc.arg(last_error),sqlc.arg(failure_count),sqlc.arg(last_modified),sqlc.arg(initial_import_pending),sqlc.arg(next_poll_at),sqlc.arg(last_synced_at),sqlc.arg(last_reconciled_at),sqlc.arg(last_tracked_at),sqlc.arg(created_at),sqlc.arg(updated_at));
+-- name: ReplaceGitHubConnection :exec
+UPDATE github_connections SET generation = sqlc.arg(generation), token_sealed = sqlc.arg(token_sealed), token_last4 = sqlc.arg(token_last4), login = sqlc.arg(login), scopes = sqlc.arg(scopes), immediate_notify = sqlc.arg(immediate_notify), status = sqlc.arg(status), last_error = sqlc.arg(last_error), failure_count = sqlc.arg(failure_count), last_modified = sqlc.arg(last_modified), initial_import_pending = sqlc.arg(initial_import_pending), next_poll_at = sqlc.arg(next_poll_at), last_synced_at = sqlc.arg(last_synced_at), last_reconciled_at = sqlc.arg(last_reconciled_at), last_tracked_at = sqlc.arg(last_tracked_at), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id);
+-- name: UpdateGitHubSyncState :execrows
+UPDATE github_connections SET status = sqlc.arg(status), last_error = sqlc.arg(last_error), failure_count = sqlc.arg(failure_count), last_modified = sqlc.arg(last_modified), initial_import_pending = sqlc.arg(initial_import_pending), next_poll_at = sqlc.arg(next_poll_at), last_synced_at = sqlc.arg(last_synced_at), last_reconciled_at = sqlc.arg(last_reconciled_at), last_tracked_at = sqlc.arg(last_tracked_at), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation);
+-- name: UpdateGitHubImmediateNotify :execrows
+UPDATE github_connections SET immediate_notify = sqlc.arg(immediate_notify), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id);
+-- name: DeleteGitHubConnection :exec
+DELETE FROM github_connections WHERE user_id = sqlc.arg(user_id);
+-- name: ListDueGitHubConnections :many
+SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
+WHERE status = 'active' AND next_poll_at <= sqlc.arg(now) AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY next_poll_at, user_id LIMIT sqlc.arg(page_size);
+-- name: CreatePushSubscription :exec
+INSERT INTO web_push_subscriptions (id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(endpoint),sqlc.arg(p256dh),sqlc.arg(auth),sqlc.arg(label),sqlc.arg(created_at),NULL);
+-- name: LockPushSubscriptionByEndpoint :one
+SELECT id, user_id, endpoint, p256dh, auth, label, created_at, last_used_at FROM web_push_subscriptions
+WHERE endpoint = sqlc.arg(endpoint);
+-- name: UpdatePushSubscriptionKeys :exec
+UPDATE web_push_subscriptions SET p256dh = sqlc.arg(p256dh), auth = sqlc.arg(auth), label = sqlc.arg(label)
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: CountPushSubscriptions :one
+SELECT COUNT(*) FROM web_push_subscriptions WHERE user_id = sqlc.arg(user_id);
+-- name: ListPushSubscriptions :many
+SELECT id, user_id, endpoint, p256dh, auth, label, created_at, last_used_at FROM web_push_subscriptions
+WHERE user_id = sqlc.arg(user_id) ORDER BY created_at DESC, id DESC;
+-- name: ListPushUserIDs :many
+SELECT DISTINCT user_id FROM web_push_subscriptions
+WHERE user_id IN (SELECT id FROM users WHERE disabled = 0) ORDER BY user_id;
+-- name: TouchPushSubscription :exec
+UPDATE web_push_subscriptions SET last_used_at = sqlc.arg(last_used_at) WHERE id = sqlc.arg(id);
+-- name: DeletePushSubscription :execrows
+DELETE FROM web_push_subscriptions WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: DeletePushSubscriptionByID :exec
+DELETE FROM web_push_subscriptions WHERE id = sqlc.arg(id);
+-- name: DeleteUserPushSubscriptions :exec
+DELETE FROM web_push_subscriptions WHERE user_id = sqlc.arg(user_id);
+-- name: DeleteAllPushSubscriptions :exec
+DELETE FROM web_push_subscriptions;
+-- name: GetNotificationSettings :one
+SELECT user_id, timezone, digest_hour, stale_days, updated_at FROM notification_settings
+WHERE user_id = sqlc.arg(user_id);
+-- name: UpsertNotificationSettings :exec
+INSERT INTO notification_settings (user_id,timezone,digest_hour,stale_days,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(timezone),sqlc.arg(digest_hour),sqlc.arg(stale_days),sqlc.arg(updated_at))
+ON CONFLICT (user_id) DO UPDATE SET timezone = excluded.timezone, digest_hour = excluded.digest_hour, stale_days = excluded.stale_days, updated_at = excluded.updated_at;
+-- name: CreateNotificationSettingsIfMissing :exec
+INSERT INTO notification_settings (user_id,timezone,digest_hour,stale_days,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(timezone),sqlc.arg(digest_hour),sqlc.arg(stale_days),sqlc.arg(updated_at))
+ON CONFLICT (user_id) DO NOTHING;
+-- name: EnqueueNotification :execrows
+INSERT INTO notifications (id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(kind),sqlc.arg(action_item_id),sqlc.arg(dedupe_key),sqlc.arg(title),sqlc.arg(body),sqlc.arg(url),sqlc.arg(scheduled_at),sqlc.arg(sent_at),sqlc.arg(attempts),sqlc.arg(last_error),sqlc.arg(created_at))
+ON CONFLICT (user_id, dedupe_key) DO NOTHING;
+-- name: CountNotificationsByDedupeKey :one
+SELECT COUNT(*) FROM notifications WHERE user_id = sqlc.arg(user_id) AND dedupe_key = sqlc.arg(dedupe_key);
+-- name: LatestNotificationCreatedAt :one
+SELECT created_at FROM notifications WHERE user_id = sqlc.arg(user_id) AND kind = sqlc.arg(kind)
+ORDER BY created_at DESC LIMIT 1;
+-- name: ListDueNotifications :many
+SELECT id, user_id, kind, action_item_id, dedupe_key, title, body, url, scheduled_at, sent_at, attempts, last_error, created_at FROM notifications
+WHERE sent_at IS NULL AND scheduled_at <= sqlc.arg(now) AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY scheduled_at, id LIMIT sqlc.arg(page_size);
+-- name: UpdateNotificationResult :exec
+UPDATE notifications SET attempts = sqlc.arg(attempts), last_error = sqlc.arg(last_error), scheduled_at = sqlc.arg(scheduled_at), sent_at = sqlc.arg(sent_at)
+WHERE id = sqlc.arg(id) AND sent_at IS NULL;
+-- name: DeleteItemPendingNotifications :exec
+DELETE FROM notifications WHERE user_id = sqlc.arg(user_id) AND action_item_id = sqlc.arg(action_item_id) AND sent_at IS NULL;
+-- name: DeleteUserPendingNotifications :exec
+DELETE FROM notifications WHERE user_id = sqlc.arg(user_id) AND sent_at IS NULL;
+-- name: DeleteUserPendingNotificationsByKind :exec
+DELETE FROM notifications WHERE user_id = sqlc.arg(user_id) AND kind = sqlc.arg(kind) AND sent_at IS NULL;
+-- name: DeleteSentNotificationsBefore :exec
+DELETE FROM notifications WHERE sent_at IS NOT NULL AND sent_at < sqlc.arg(before);
+-- name: GetInstanceSecret :one
+SELECT name, value, created_at, updated_at FROM instance_secrets WHERE name = sqlc.arg(name);
+-- name: CreateInstanceSecret :execrows
+INSERT INTO instance_secrets (name,value,created_at,updated_at)
+VALUES (sqlc.arg(name),sqlc.arg(value),sqlc.arg(created_at),sqlc.arg(updated_at))
+ON CONFLICT (name) DO NOTHING;
+-- name: ReplaceInstanceSecret :execrows
+UPDATE instance_secrets SET value = sqlc.arg(new_value), updated_at = sqlc.arg(updated_at)
+WHERE name = sqlc.arg(name) AND value = sqlc.arg(old_value);

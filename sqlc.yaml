@@ -44,6 +44,70 @@ sql:
             go_type:
               import: database/sql
               type: NullInt64
+          - column: action_items.source
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: action_items.source_key
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: action_items.auto_reason
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: action_items.auto_ref
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: action_items.auto_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: action_items.detected_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: action_items.tracked_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: github_connections.last_error
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: github_connections.last_modified
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: github_connections.last_synced_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: github_connections.last_reconciled_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: github_connections.last_tracked_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: web_push_subscriptions.last_used_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: notifications.action_item_id
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: notifications.sent_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: notifications.last_error
+            go_type:
+              import: database/sql
+              type: NullString
   - engine: postgresql
     schema: db/postgres/schema.sql
     queries: db/postgres/queries.sql

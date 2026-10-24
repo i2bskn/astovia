@@ -109,8 +109,11 @@ func testActionItemsAPI(t *testing.T, driver string) {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 	body, keys := jsonKeys(t, w.Body.Bytes())
-	if !reflect.DeepEqual(keys, []string{"content", "created_at", "due_at", "id", "note", "refs", "status", "updated_at", "version"}) {
+	if !reflect.DeepEqual(keys, []string{"auto", "content", "created_at", "due_at", "id", "note", "refs", "source", "status", "updated_at", "version"}) {
 		t.Fatalf("item keys: %v", keys)
+	}
+	if string(body["source"]) != "null" || string(body["auto"]) != "null" {
+		t.Fatalf("source and auto of a created item: %s %s", body["source"], body["auto"])
 	}
 	var refs []map[string]json.RawMessage
 	if err := json.Unmarshal(body["refs"], &refs); err != nil || len(refs) != 2 {

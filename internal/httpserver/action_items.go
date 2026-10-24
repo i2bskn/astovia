@@ -48,6 +48,19 @@ type actionItemResponse struct {
 	Version   int64           `json:"version"`
 	CreatedAt string          `json:"created_at"`
 	UpdatedAt string          `json:"updated_at"`
+	// Source is the integration that created the item, or null. Auto
+	// describes an automatic completion, or is null. The source key and the
+	// tracking flag are internal and not returned.
+	Source *string             `json:"source"`
+	Auto   *actionItemAutoInfo `json:"auto"`
+}
+
+// actionItemAutoInfo is why and when an item was completed automatically.
+// RefURL is the evidence on the source service, when known.
+type actionItemAutoInfo struct {
+	Reason string  `json:"reason"`
+	RefURL *string `json:"ref_url"`
+	At     string  `json:"at"`
 }
 
 type actionItemListResponse struct {
@@ -72,6 +85,19 @@ func toActionItemResponse(item store.ActionItem) (actionItemResponse, error) {
 	if item.DueAt.Valid {
 		v := formatTime(item.DueAt.Int64)
 		out.DueAt = &v
+	}
+	if item.Source.Valid {
+		out.Source = &item.Source.String
+	}
+	if item.AutoReason.Valid {
+		auto := &actionItemAutoInfo{Reason: item.AutoReason.String, At: formatTime(item.UpdatedAt)}
+		if item.AutoAt.Valid {
+			auto.At = formatTime(item.AutoAt.Int64)
+		}
+		if item.AutoRef.Valid {
+			auto.RefURL = &item.AutoRef.String
+		}
+		out.Auto = auto
 	}
 	return out, nil
 }
@@ -281,6 +307,25 @@ func decodeCursor(v string) (*store.ActionItemCursor, bool) {
 	return &store.ActionItemCursor{CreatedAt: n, ID: id}, true
 }
 
+// autoCursorPrefix marks cursors of the auto=true list, so that the two kinds
+// of cursor cannot be mixed.
+const autoCursorPrefix = "a."
+
+func encodeAutoCursor(item store.ActionItem) string {
+	return autoCursorPrefix + base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(item.AutoAt.Int64, 10)+":"+item.ID))
+}
+func decodeAutoCursor(v string) (*store.AutoActionItemCursor, bool) {
+	raw, ok := strings.CutPrefix(v, autoCursorPrefix)
+	if !ok {
+		return nil, false
+	}
+	c, ok := decodeCursor(raw)
+	if !ok {
+		return nil, false
+	}
+	return &store.AutoActionItemCursor{AutoAt: c.CreatedAt, ID: c.ID}, true
+}
+
 const (
 	statusMessage = "status must be open, done or dismissed."
 	limitMessage  = "limit must be an integer from 1 to 100."
@@ -312,6 +357,42 @@ func (s *Server) listActionItems(ctx context.Context, userID, status string, lim
 	if len(items) > limit {
 		items = items[:limit]
 		next := encodeCursor(items[limit-1])
+		out.NextCursor = &next
+	}
+	for _, item := range items {
+		v, e := itemResponse("list", userID, item)
+		if e != nil {
+			return actionItemListResponse{}, e
+		}
+		out.Items = append(out.Items, v)
+	}
+	return out, nil
+}
+
+// listAutoActionItems lists the user's automatically completed items, newest
+// completion first. Its cursors start with autoCursorPrefix.
+func (s *Server) listAutoActionItems(ctx context.Context, userID, status string, limit int, cursor string) (actionItemListResponse, *opError) {
+	if status != "" && !validStatus(status) {
+		return actionItemListResponse{}, invalidRequest(statusMessage)
+	}
+	if limit < 1 || limit > 100 {
+		return actionItemListResponse{}, invalidRequest(limitMessage)
+	}
+	var after *store.AutoActionItemCursor
+	if cursor != "" {
+		var ok bool
+		if after, ok = decodeAutoCursor(cursor); !ok {
+			return actionItemListResponse{}, invalidRequest(cursorMessage)
+		}
+	}
+	items, err := s.auth.Store.ListAutoActionItems(ctx, userID, status, after, limit+1)
+	if err != nil {
+		return actionItemListResponse{}, storeError("list", userID, err)
+	}
+	out := actionItemListResponse{Items: []actionItemResponse{}}
+	if len(items) > limit {
+		items = items[:limit]
+		next := encodeAutoCursor(items[limit-1])
 		out.NextCursor = &next
 	}
 	for _, item := range items {
@@ -382,7 +463,14 @@ func (s *Server) updateActionItem(ctx context.Context, userID, id string, body a
 		if body.Version != nil && item.Version != version {
 			return store.ErrVersionConflict
 		}
+		status := item.Status
 		apply(item)
+		// A status chosen by the user ends the integration's say over the
+		// item: it is no longer completed or reopened automatically.
+		if item.Status != status {
+			item.Tracking = 0
+			item.AutoReason, item.AutoRef, item.AutoAt = sql.NullString{}, sql.NullString{}, sql.NullInt64{}
+		}
 		item.UpdatedAt = now
 		return nil
 	})
@@ -404,10 +492,18 @@ func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for k, v := range q {
-		if (k != "status" && k != "limit" && k != "cursor") || len(v) != 1 {
-			fail(w, 400, "invalid_request", "Only status, limit and cursor are allowed, each at most once.")
+		if (k != "status" && k != "limit" && k != "cursor" && k != "auto") || len(v) != 1 {
+			fail(w, 400, "invalid_request", "Only status, limit, cursor and auto are allowed, each at most once.")
 			return
 		}
+	}
+	auto := false
+	if v, ok := q["auto"]; ok {
+		if v[0] != "true" {
+			fail(w, 400, "invalid_request", "auto must be true.")
+			return
+		}
+		auto = true
 	}
 	status := ""
 	if v, ok := q["status"]; ok {
@@ -434,7 +530,11 @@ func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
 		}
 		cursor = v[0]
 	}
-	out, e := s.listActionItems(r.Context(), u.ID, status, limit, cursor)
+	list := s.listActionItems
+	if auto {
+		list = s.listAutoActionItems
+	}
+	out, e := list(r.Context(), u.ID, status, limit, cursor)
 	if e != nil {
 		failOp(w, e)
 		return

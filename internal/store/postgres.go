@@ -89,7 +89,7 @@ func (q postgresQueries) listActionItems(ctx context.Context, userID, status str
 	return items, nil
 }
 func (q postgresQueries) updateActionItem(ctx context.Context, item ActionItem, currentVersion int64) (int64, error) {
-	return q.q.UpdateActionItem(ctx, db.UpdateActionItemParams{Content: item.Content, Status: item.Status, Note: item.Note, DueAt: item.DueAt, Refs: item.Refs, NewVersion: item.Version, UpdatedAt: item.UpdatedAt, ID: item.ID, UserID: item.UserID, CurrentVersion: currentVersion})
+	return q.q.UpdateActionItem(ctx, db.UpdateActionItemParams{Content: item.Content, Status: item.Status, Note: item.Note, DueAt: item.DueAt, Refs: item.Refs, Source: item.Source, SourceKey: item.SourceKey, Tracking: item.Tracking, AutoReason: item.AutoReason, AutoRef: item.AutoRef, AutoAt: item.AutoAt, DetectedAt: item.DetectedAt, TrackedAt: item.TrackedAt, NewVersion: item.Version, UpdatedAt: item.UpdatedAt, ID: item.ID, UserID: item.UserID, CurrentVersion: currentVersion})
 }
 func (q postgresQueries) createAPIToken(ctx context.Context, token APIToken, hash string) error {
 	return q.q.CreateAPIToken(ctx, db.CreateAPITokenParams{ID: token.ID, UserID: token.UserID, Name: token.Name, TokenHash: hash, CreatedAt: token.CreatedAt})
@@ -218,4 +218,187 @@ func (postgresQueries) grant(row db.OauthGrant) OAuthGrant {
 }
 func (postgresQueries) token(row db.OauthToken) OAuthToken {
 	return OAuthToken{Hash: row.TokenHash, Kind: row.Kind, GrantID: row.GrantID, UserID: row.UserID, CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt}
+}
+func (q postgresQueries) insertSourcedActionItem(ctx context.Context, item ActionItem) (int64, error) {
+	return q.q.InsertSourcedActionItem(ctx, db.InsertSourcedActionItemParams(item))
+}
+func (q postgresQueries) lockActionItemBySourceKey(ctx context.Context, userID, sourceKey string) (ActionItem, error) {
+	item, err := q.q.LockActionItemBySourceKey(ctx, db.LockActionItemBySourceKeyParams{UserID: userID, SourceKey: sql.NullString{String: sourceKey, Valid: true}})
+	return ActionItem(item), err
+}
+func (q postgresQueries) listAutoActionItems(ctx context.Context, userID, status string, after AutoActionItemCursor, limit int) ([]ActionItem, error) {
+	var rows []db.ActionItem
+	var err error
+	at := sql.NullInt64{Int64: after.AutoAt, Valid: true}
+	if status == "" {
+		rows, err = q.q.ListAutoActionItems(ctx, db.ListAutoActionItemsParams{UserID: userID, BeforeAutoAt: at, TieAutoAt: at, BeforeID: after.ID, PageSize: int32(limit)})
+	} else {
+		rows, err = q.q.ListAutoActionItemsByStatus(ctx, db.ListAutoActionItemsByStatusParams{UserID: userID, Status: status, BeforeAutoAt: at, TieAutoAt: at, BeforeID: after.ID, PageSize: int32(limit)})
+	}
+	return q.actionItems(rows, err)
+}
+func (q postgresQueries) listTrackedActionItems(ctx context.Context, userID, source string, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListTrackedActionItems(ctx, db.ListTrackedActionItemsParams{UserID: userID, Source: sql.NullString{String: source, Valid: true}, PageSize: int32(limit)}))
+}
+func (q postgresQueries) listStaleActionItems(ctx context.Context, userID string, createdBefore int64, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListStaleActionItems(ctx, db.ListStaleActionItemsParams{UserID: userID, CreatedBefore: createdBefore, PageSize: int32(limit)}))
+}
+func (q postgresQueries) countActionItemsByStatus(ctx context.Context, userID, status string) (int64, error) {
+	return q.q.CountActionItemsByStatus(ctx, db.CountActionItemsByStatusParams{UserID: userID, Status: status})
+}
+func (q postgresQueries) countAutoActionItemsSince(ctx context.Context, userID string, since int64) (int64, error) {
+	return q.q.CountAutoActionItemsSince(ctx, db.CountAutoActionItemsSinceParams{UserID: userID, Since: sql.NullInt64{Int64: since, Valid: true}})
+}
+func (q postgresQueries) touchActionItemTracked(ctx context.Context, userID, id string, version, now int64) (int64, error) {
+	return q.q.TouchActionItemTracked(ctx, db.TouchActionItemTrackedParams{TrackedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id, UserID: userID, Version: version})
+}
+func (q postgresQueries) untrackSourceActionItems(ctx context.Context, userID, source string, now int64) error {
+	return q.q.UntrackSourceActionItems(ctx, db.UntrackSourceActionItemsParams{UpdatedAt: now, UserID: userID, Source: sql.NullString{String: source, Valid: true}})
+}
+func (q postgresQueries) githubConnection(ctx context.Context, userID string) (GitHubConnection, error) {
+	row, err := q.q.GetGitHubConnection(ctx, userID)
+	return GitHubConnection(row), err
+}
+func (q postgresQueries) lockGitHubConnection(ctx context.Context, userID string) (GitHubConnection, error) {
+	row, err := q.q.LockGitHubConnection(ctx, userID)
+	return GitHubConnection(row), err
+}
+func (q postgresQueries) createGitHubConnection(ctx context.Context, c GitHubConnection) error {
+	return q.q.CreateGitHubConnection(ctx, db.CreateGitHubConnectionParams(c))
+}
+func (q postgresQueries) replaceGitHubConnection(ctx context.Context, c GitHubConnection) error {
+	return q.q.ReplaceGitHubConnection(ctx, db.ReplaceGitHubConnectionParams{Generation: c.Generation, TokenSealed: c.TokenSealed, TokenLast4: c.TokenLast4, Login: c.Login, Scopes: c.Scopes, ImmediateNotify: c.ImmediateNotify, Status: c.Status, LastError: c.LastError, FailureCount: c.FailureCount, LastModified: c.LastModified, InitialImportPending: c.InitialImportPending, NextPollAt: c.NextPollAt, LastSyncedAt: c.LastSyncedAt, LastReconciledAt: c.LastReconciledAt, LastTrackedAt: c.LastTrackedAt, UpdatedAt: c.UpdatedAt, UserID: c.UserID})
+}
+func (q postgresQueries) updateGitHubSyncState(ctx context.Context, c GitHubConnection) (int64, error) {
+	return q.q.UpdateGitHubSyncState(ctx, db.UpdateGitHubSyncStateParams{Status: c.Status, LastError: c.LastError, FailureCount: c.FailureCount, LastModified: c.LastModified, InitialImportPending: c.InitialImportPending, NextPollAt: c.NextPollAt, LastSyncedAt: c.LastSyncedAt, LastReconciledAt: c.LastReconciledAt, LastTrackedAt: c.LastTrackedAt, UpdatedAt: c.UpdatedAt, UserID: c.UserID, Generation: c.Generation})
+}
+func (q postgresQueries) updateGitHubImmediateNotify(ctx context.Context, userID string, immediateNotify, now int64) (int64, error) {
+	return q.q.UpdateGitHubImmediateNotify(ctx, db.UpdateGitHubImmediateNotifyParams{ImmediateNotify: immediateNotify, UpdatedAt: now, UserID: userID})
+}
+func (q postgresQueries) deleteGitHubConnection(ctx context.Context, userID string) error {
+	return q.q.DeleteGitHubConnection(ctx, userID)
+}
+func (q postgresQueries) listDueGitHubConnections(ctx context.Context, now int64, limit int) ([]GitHubConnection, error) {
+	rows, err := q.q.ListDueGitHubConnections(ctx, db.ListDueGitHubConnectionsParams{Now: now, PageSize: int32(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]GitHubConnection, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, GitHubConnection(row))
+	}
+	return out, nil
+}
+func (q postgresQueries) createPushSubscription(ctx context.Context, p PushSubscription) error {
+	return q.q.CreatePushSubscription(ctx, db.CreatePushSubscriptionParams{ID: p.ID, UserID: p.UserID, Endpoint: p.Endpoint, P256dh: p.P256dh, Auth: p.Auth, Label: p.Label, CreatedAt: p.CreatedAt})
+}
+func (q postgresQueries) lockPushSubscriptionByEndpoint(ctx context.Context, endpoint string) (PushSubscription, error) {
+	row, err := q.q.LockPushSubscriptionByEndpoint(ctx, endpoint)
+	return PushSubscription(row), err
+}
+func (q postgresQueries) updatePushSubscriptionKeys(ctx context.Context, p PushSubscription) error {
+	return q.q.UpdatePushSubscriptionKeys(ctx, db.UpdatePushSubscriptionKeysParams{P256dh: p.P256dh, Auth: p.Auth, Label: p.Label, ID: p.ID, UserID: p.UserID})
+}
+func (q postgresQueries) countPushSubscriptions(ctx context.Context, userID string) (int64, error) {
+	return q.q.CountPushSubscriptions(ctx, userID)
+}
+func (q postgresQueries) listPushSubscriptions(ctx context.Context, userID string) ([]PushSubscription, error) {
+	rows, err := q.q.ListPushSubscriptions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PushSubscription, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, PushSubscription(row))
+	}
+	return out, nil
+}
+func (q postgresQueries) listPushUserIDs(ctx context.Context) ([]string, error) {
+	ids, err := q.q.ListPushUserIDs(ctx)
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, err
+}
+func (q postgresQueries) touchPushSubscription(ctx context.Context, id string, now int64) error {
+	return q.q.TouchPushSubscription(ctx, db.TouchPushSubscriptionParams{LastUsedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id})
+}
+func (q postgresQueries) deletePushSubscription(ctx context.Context, userID, id string) (int64, error) {
+	return q.q.DeletePushSubscription(ctx, db.DeletePushSubscriptionParams{ID: id, UserID: userID})
+}
+func (q postgresQueries) deletePushSubscriptionByID(ctx context.Context, id string) error {
+	return q.q.DeletePushSubscriptionByID(ctx, id)
+}
+func (q postgresQueries) deleteUserPushSubscriptions(ctx context.Context, userID string) error {
+	return q.q.DeleteUserPushSubscriptions(ctx, userID)
+}
+func (q postgresQueries) deleteAllPushSubscriptions(ctx context.Context) error {
+	return q.q.DeleteAllPushSubscriptions(ctx)
+}
+func (q postgresQueries) notificationSettings(ctx context.Context, userID string) (NotificationSettings, error) {
+	row, err := q.q.GetNotificationSettings(ctx, userID)
+	return NotificationSettings(row), err
+}
+func (q postgresQueries) upsertNotificationSettings(ctx context.Context, n NotificationSettings) error {
+	return q.q.UpsertNotificationSettings(ctx, db.UpsertNotificationSettingsParams(n))
+}
+func (q postgresQueries) createNotificationSettingsIfMissing(ctx context.Context, n NotificationSettings) error {
+	return q.q.CreateNotificationSettingsIfMissing(ctx, db.CreateNotificationSettingsIfMissingParams(n))
+}
+func (q postgresQueries) enqueueNotification(ctx context.Context, n Notification) (int64, error) {
+	return q.q.EnqueueNotification(ctx, db.EnqueueNotificationParams{ID: n.ID, UserID: n.UserID, Kind: n.Kind, ActionItemID: n.ActionItemID, DedupeKey: n.DedupeKey, Title: n.Title, Body: n.Body, Url: n.URL, ScheduledAt: n.ScheduledAt, SentAt: n.SentAt, Attempts: n.Attempts, LastError: n.LastError, CreatedAt: n.CreatedAt})
+}
+func (q postgresQueries) countNotificationsByDedupeKey(ctx context.Context, userID, dedupeKey string) (int64, error) {
+	return q.q.CountNotificationsByDedupeKey(ctx, db.CountNotificationsByDedupeKeyParams{UserID: userID, DedupeKey: dedupeKey})
+}
+func (q postgresQueries) latestNotificationCreatedAt(ctx context.Context, userID, kind string) (int64, error) {
+	return q.q.LatestNotificationCreatedAt(ctx, db.LatestNotificationCreatedAtParams{UserID: userID, Kind: kind})
+}
+func (q postgresQueries) listDueNotifications(ctx context.Context, now int64, limit int) ([]Notification, error) {
+	rows, err := q.q.ListDueNotifications(ctx, db.ListDueNotificationsParams{Now: now, PageSize: int32(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Notification, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, Notification{ID: row.ID, UserID: row.UserID, Kind: row.Kind, ActionItemID: row.ActionItemID, DedupeKey: row.DedupeKey, Title: row.Title, Body: row.Body, URL: row.Url, ScheduledAt: row.ScheduledAt, SentAt: row.SentAt, Attempts: row.Attempts, LastError: row.LastError, CreatedAt: row.CreatedAt})
+	}
+	return out, nil
+}
+func (q postgresQueries) updateNotificationResult(ctx context.Context, n Notification) error {
+	return q.q.UpdateNotificationResult(ctx, db.UpdateNotificationResultParams{Attempts: n.Attempts, LastError: n.LastError, ScheduledAt: n.ScheduledAt, SentAt: n.SentAt, ID: n.ID})
+}
+func (q postgresQueries) deleteItemPendingNotifications(ctx context.Context, userID, itemID string) error {
+	return q.q.DeleteItemPendingNotifications(ctx, db.DeleteItemPendingNotificationsParams{UserID: userID, ActionItemID: sql.NullString{String: itemID, Valid: true}})
+}
+func (q postgresQueries) deleteUserPendingNotifications(ctx context.Context, userID string) error {
+	return q.q.DeleteUserPendingNotifications(ctx, userID)
+}
+func (q postgresQueries) deleteUserPendingNotificationsByKind(ctx context.Context, userID, kind string) error {
+	return q.q.DeleteUserPendingNotificationsByKind(ctx, db.DeleteUserPendingNotificationsByKindParams{UserID: userID, Kind: kind})
+}
+func (q postgresQueries) deleteSentNotificationsBefore(ctx context.Context, before int64) error {
+	return q.q.DeleteSentNotificationsBefore(ctx, sql.NullInt64{Int64: before, Valid: true})
+}
+func (q postgresQueries) instanceSecret(ctx context.Context, name string) (InstanceSecret, error) {
+	row, err := q.q.GetInstanceSecret(ctx, name)
+	return InstanceSecret(row), err
+}
+func (q postgresQueries) createInstanceSecret(ctx context.Context, sec InstanceSecret) (int64, error) {
+	return q.q.CreateInstanceSecret(ctx, db.CreateInstanceSecretParams(sec))
+}
+func (q postgresQueries) replaceInstanceSecret(ctx context.Context, name, oldValue, newValue string, now int64) (int64, error) {
+	return q.q.ReplaceInstanceSecret(ctx, db.ReplaceInstanceSecretParams{NewValue: newValue, UpdatedAt: now, Name: name, OldValue: oldValue})
+}
+
+// actionItems converts the rows of a list query.
+func (postgresQueries) actionItems(rows []db.ActionItem, err error) ([]ActionItem, error) {
+	if err != nil {
+		return nil, err
+	}
+	items := make([]ActionItem, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, ActionItem(row))
+	}
+	return items, nil
 }

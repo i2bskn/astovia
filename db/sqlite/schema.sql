@@ -44,6 +44,14 @@ CREATE TABLE "action_items" (
   "version" integer NOT NULL,
   "created_at" integer NOT NULL,
   "updated_at" integer NOT NULL,
+  "source" text NULL,
+  "source_key" text NULL,
+  "tracking" integer NOT NULL DEFAULT 0,
+  "auto_reason" text NULL,
+  "auto_ref" text NULL,
+  "auto_at" integer NULL,
+  "detected_at" integer NULL,
+  "tracked_at" integer NULL,
   PRIMARY KEY ("id"),
   CONSTRAINT "action_items_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
 );
@@ -51,6 +59,12 @@ CREATE TABLE "action_items" (
 CREATE INDEX "action_items_user_created_idx" ON "action_items" ("user_id", "created_at", "id");
 -- Create index "action_items_user_status_created_idx" to table: "action_items"
 CREATE INDEX "action_items_user_status_created_idx" ON "action_items" ("user_id", "status", "created_at", "id");
+-- Create index "action_items_user_source_key_key" to table: "action_items"
+CREATE UNIQUE INDEX "action_items_user_source_key_key" ON "action_items" ("user_id", "source_key");
+-- Create index "action_items_user_tracking_idx" to table: "action_items"
+CREATE INDEX "action_items_user_tracking_idx" ON "action_items" ("user_id", "source", "tracking", "status", "tracked_at");
+-- Create index "action_items_user_auto_idx" to table: "action_items"
+CREATE INDEX "action_items_user_auto_idx" ON "action_items" ("user_id", "auto_at", "id");
 -- Create "api_tokens" table
 CREATE TABLE "api_tokens" (
   "id" text NOT NULL,
@@ -119,3 +133,90 @@ CREATE TABLE "oauth_tokens" (
 CREATE INDEX "oauth_tokens_grant_idx" ON "oauth_tokens" ("grant_id");
 -- Create index "oauth_tokens_user_expires_idx" to table: "oauth_tokens"
 CREATE INDEX "oauth_tokens_user_expires_idx" ON "oauth_tokens" ("user_id", "expires_at");
+-- Create "github_connections" table
+CREATE TABLE "github_connections" (
+  "user_id" text NOT NULL,
+  "generation" integer NOT NULL,
+  "token_sealed" text NOT NULL,
+  "token_last4" text NOT NULL,
+  "login" text NOT NULL,
+  "scopes" text NOT NULL,
+  "immediate_notify" integer NOT NULL DEFAULT 1,
+  "status" text NOT NULL,
+  "last_error" text NULL,
+  "failure_count" integer NOT NULL DEFAULT 0,
+  "last_modified" text NULL,
+  "initial_import_pending" integer NOT NULL,
+  "next_poll_at" integer NOT NULL,
+  "last_synced_at" integer NULL,
+  "last_reconciled_at" integer NULL,
+  "last_tracked_at" integer NULL,
+  "created_at" integer NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "github_connections_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "github_connections_status_next_poll_idx" to table: "github_connections"
+CREATE INDEX "github_connections_status_next_poll_idx" ON "github_connections" ("status", "next_poll_at");
+-- Create "web_push_subscriptions" table
+CREATE TABLE "web_push_subscriptions" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "endpoint" text NOT NULL,
+  "p256dh" text NOT NULL,
+  "auth" text NOT NULL,
+  "label" text NOT NULL DEFAULT '',
+  "created_at" integer NOT NULL,
+  "last_used_at" integer NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "web_push_subscriptions_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "web_push_subscriptions_endpoint_key" to table: "web_push_subscriptions"
+CREATE UNIQUE INDEX "web_push_subscriptions_endpoint_key" ON "web_push_subscriptions" ("endpoint");
+-- Create index "web_push_subscriptions_user_created_idx" to table: "web_push_subscriptions"
+CREATE INDEX "web_push_subscriptions_user_created_idx" ON "web_push_subscriptions" ("user_id", "created_at");
+-- Create "notification_settings" table
+CREATE TABLE "notification_settings" (
+  "user_id" text NOT NULL,
+  "timezone" text NOT NULL,
+  "digest_hour" integer NOT NULL,
+  "stale_days" integer NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "notification_settings_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create "notifications" table
+CREATE TABLE "notifications" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "kind" text NOT NULL,
+  "action_item_id" text NULL,
+  "dedupe_key" text NOT NULL,
+  "title" text NOT NULL,
+  "body" text NOT NULL,
+  "url" text NOT NULL,
+  "scheduled_at" integer NOT NULL,
+  "sent_at" integer NULL,
+  "attempts" integer NOT NULL DEFAULT 0,
+  "last_error" text NULL,
+  "created_at" integer NOT NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "notifications_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id"),
+  CONSTRAINT "notifications_action_item_id_fk" FOREIGN KEY ("action_item_id") REFERENCES "action_items" ("id")
+);
+-- Create index "notifications_user_dedupe_key" to table: "notifications"
+CREATE UNIQUE INDEX "notifications_user_dedupe_key" ON "notifications" ("user_id", "dedupe_key");
+-- Create index "notifications_sent_scheduled_idx" to table: "notifications"
+CREATE INDEX "notifications_sent_scheduled_idx" ON "notifications" ("sent_at", "scheduled_at");
+-- Create index "notifications_action_item_idx" to table: "notifications"
+CREATE INDEX "notifications_action_item_idx" ON "notifications" ("action_item_id");
+-- Create index "notifications_user_kind_created_idx" to table: "notifications"
+CREATE INDEX "notifications_user_kind_created_idx" ON "notifications" ("user_id", "kind", "created_at");
+-- Create "instance_secrets" table
+CREATE TABLE "instance_secrets" (
+  "name" text NOT NULL,
+  "value" text NOT NULL,
+  "created_at" integer NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("name")
+);

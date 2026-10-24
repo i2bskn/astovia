@@ -7,8 +7,13 @@ import (
 	"fmt"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
+	"github.com/i2bskn/astovia/internal/github"
+	"github.com/i2bskn/astovia/internal/githubsync"
 	"github.com/i2bskn/astovia/internal/httpserver"
+	"github.com/i2bskn/astovia/internal/notify"
+	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/store"
+	"github.com/i2bskn/astovia/internal/worker"
 	"github.com/i2bskn/astovia/web"
 	"golang.org/x/term"
 	"io"
@@ -17,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -59,11 +65,16 @@ func run(args []string) error {
 	srv := &http.Server{Addr: c.Addr, Handler: httpserver.New(c, a, assets), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	signals, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	background, cancelBackground := context.WithCancel(ctx)
+	defer cancelBackground()
+	workers := startWorkers(background, s, c, a)
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()
 	log.Printf("Astovia listening on %s", c.Addr)
 	select {
 	case e = <-done:
+		cancelBackground()
+		waitWorkers(workers, time.Now().Add(10*time.Second))
 		if errors.Is(e, http.ErrServerClosed) {
 			return nil
 		}
@@ -71,7 +82,58 @@ func run(args []string) error {
 	case <-signals.Done():
 		shutdown, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdown)
+		// The loops stop together with the HTTP server; the run in
+		// progress may take until the same deadline.
+		cancelBackground()
+		e = srv.Shutdown(shutdown)
+		deadline, _ := shutdown.Deadline()
+		waitWorkers(workers, deadline)
+		return e
+	}
+}
+
+// startWorkers starts the background loops of serve: GitHub synchronization,
+// the notification engine, the dispatcher and the cleanup of sent
+// notifications. They share the authentication service's clock. They stop
+// when ctx is canceled; the returned group finishes when they have returned.
+func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.Service) *sync.WaitGroup {
+	now := func() time.Time { return a.Now() }
+	box := secretbox.New(c.Secret)
+	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), Box: box, Now: now}
+	engine := &notify.Engine{Store: s, Now: now}
+	vapid := &notify.VAPID{Store: s, Box: box, Now: now}
+	dispatcher := &notify.Dispatcher{Store: s, Channel: notify.NewWebPush(s, vapid, c.PublicURL, now), Now: now}
+	var wg sync.WaitGroup
+	for _, l := range []struct {
+		name     string
+		interval time.Duration
+		fn       func(context.Context)
+	}{
+		{"github sync", 15 * time.Second, syncer.RunOnce},
+		{"notification engine", time.Minute, engine.RunOnce},
+		{"notification dispatcher", 5 * time.Second, dispatcher.RunOnce},
+		{"notification cleanup", time.Hour, dispatcher.Cleanup},
+	} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			worker.Loop(ctx, l.name, l.interval, l.fn)
+		}()
+	}
+	return &wg
+}
+
+// waitWorkers waits for the loops to return, at most until deadline.
+func waitWorkers(wg *sync.WaitGroup, deadline time.Time) {
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(time.Until(deadline)):
+		log.Print("background work did not stop in time")
 	}
 }
 func account(ctx context.Context, s *store.Store, args []string, in io.Reader) error {

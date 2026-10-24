@@ -1,6 +1,6 @@
 # Astovia
 
-Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在は、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存と、本人の対応事項の作成・一覧・状態変更（管理画面とREST API）、APIトークン、MCPエンドポイントと、AIクライアントがURLだけで接続できるMCP用のOAuth認可サーバーを実装しています。外部サービス連携、AI抽出は**まだ実装していません**。
+Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在は、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存と、本人の対応事項の作成・一覧・状態変更（管理画面とREST API）、APIトークン、MCPエンドポイントと、AIクライアントがURLだけで接続できるMCP用のOAuth認可サーバー、GitHub連携（レビュー依頼・割り当ての検出と自動完了）、Web Push通知を実装しています。GitHub以外の外部サービス連携、AI抽出は**まだ実装していません**。
 
 ## Dockerでローカル開発する
 
@@ -26,7 +26,7 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は「PostgreSQLを使用する」の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -152,7 +152,7 @@ make user-disable USER_EMAIL=alice@example.com
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）をすべて削除します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、未送信の通知をすべて削除します。ユーザー無効化はGitHub連携も削除します（パスワード再設定では残します。「GitHub連携と通知」を参照）。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## 認証と運用上の制約
 
@@ -240,6 +240,37 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 - 期限切れの認可とトークンの行は、そのユーザーが新しく接続・トークンを交換するときに削除します。クライアント登録（`oauth_clients`）の行は削除しません。DCRの登録とCIMDの取得により、接続元IPごとに1分間で最大10件ずつ増える可能性があります。
 - `/oauth/*`の処理内で返すエラーは`{"error": "...", "error_description": "..."}`の形式です。メソッドの誤り（405）と存在しないURL（404）は、他のURLと同じ`{error: {code, message}}`です。
 
+## GitHub連携と通知
+
+GitHubで自分宛てになったレビュー依頼と割り当てを対応事項として取り込み、PR／Issueの状態から完了を確認できたら根拠付きで自動完了にします。判定はGitHubの通知APIと検索APIに基づく規則だけで行い、AIは使いません。新しく見つけた対応事項、未対応が続いている対応事項、朝のまとめはWeb Pushで通知します。
+
+### GitHubトークンを登録する
+
+1. 管理画面の「設定」を開き、「GitHub 連携」のリンクからGitHubのトークン作成ページを開きます（[直接開く](https://github.com/settings/tokens/new?scopes=repo,notifications&description=Astovia)）。
+2. **classic**のpersonal access tokenを、スコープ`repo`と`notifications`を付けて作成します。必須は`repo`です（PR／Issueの取得に使い、通知APIも`repo`で読めます）。fine-grained tokenには対応していません。
+3. 作成したトークンを「GitHub 連携」に貼り付けて「接続する」を押します。
+
+登録時に`GET /user`でトークンとスコープを確かめ、無効なトークン、`repo`のないトークン、fine-grained tokenは保存しません。トークンは`ASTOVIA_JWT_SECRET`から派生した鍵（AES-256-GCM）で暗号化して保存し、画面・APIには末尾4文字だけを表示します。
+
+- 取り込むのは、自分個人へのレビュー依頼（チーム宛ては対象外）と、Issue／PRへの自分の割り当てです。メンションやコメントは扱いません。接続した直後は、検索APIで現在開いているものを取り込みます（このときは通知しません）。以後は通知APIを60秒ごと（GitHubが指定する間隔）に読み、15分ごとに検索で取りこぼしを補います。
+- 取り込んだ対応事項は5分ごとにGitHubの状態を確認し、PRのマージ・クローズ、Issueのクローズ、レビューの提出、レビュー依頼の取り消し、割り当ての解除を確認したら自動で完了にします。「自動で処理したもの」画面で理由と根拠のリンクを確認でき、「未完了に戻す」と、その対応事項は以後自動では完了・再オープンされません。自動で完了したものに再びレビュー依頼・割り当てが来ると、未完了に戻して通知します。手動で完了・対象外にしたものは変更しません。
+- トークンが無効になると同期を止め、画面に表示します。トークンを更新すると再開します。GitHubの利用上限に達した場合は、解除される時刻まで待ってから自動で再開します。
+- 別のGitHubアカウントのトークンに付け替えた場合と、接続を解除した場合、それまでの対応事項は残し、自動処理の対象から外します。
+- パスワード再設定ではGitHub連携を削除しません。アカウントを乗っ取られていた可能性がある場合は、設定画面で連携を確認し、必要なら解除してトークンを登録し直してください（GitHub側でもトークンを削除してください）。
+
+### 通知（Web Push）
+
+- 「設定」の「通知」で「この端末で通知を受け取る」を押すと、ブラウザの通知許可を求め、この端末を登録します。1ユーザーあたり20台まで登録できます。「テスト通知を送る」で届くか確認できます（1分に3回まで）。
+- Web PushはHTTPSのページでだけ使えます（`localhost`は例外）。iPhone／iPadはiOS 16.4以降で、共有メニューの「ホーム画面に追加」で追加したAstoviaから登録してください。
+- 通知の内容は、GitHubで新しく見つけた対応事項（「検出したらすぐ通知する」をオフにすると送りません）、作成から一定日数（既定3日）を過ぎても未完了の対応事項、毎日決まった時刻（既定8時）の朝のまとめ（未完了の件数と、前回以降に自動で処理した件数）です。時刻と日数とタイムゾーンは「通知」で変更できます。サーバーが止まっていて朝のまとめの時刻を過ぎた日は、まとめを送りません。
+- VAPIDの鍵は初回に自動で作成し、DB（`instance_secrets`）に暗号化して保存します。VAPIDの連絡先（`sub`）には`ASTOVIA_PUBLIC_URL`がHTTPSならそのURLを、そうでなければ`mailto:webpush@localhost`を使います。後者はローカル開発用で、AppleのPushサービスでは送信に失敗する場合があります。
+- 送信先は、名前解決後のアドレスがグローバルなものだけです（プライベートアドレス、ループバック等には送りません）。送信に失敗した通知は最大4回まで再送し、Pushサービスが購読の終了を返した端末は登録を削除します。送信済みの通知は30日後に削除します。
+
+### 運用上の注意
+
+- バックグラウンド処理（GitHubの同期、通知の判定と送信）は`serve`のプロセス内で動きます。**同じDBに対してAstoviaのプロセスを1つだけ起動してください。**複数のプロセスを起動すると、同じ通知を重複して送る場合があります。
+- `ASTOVIA_JWT_SECRET`を変更すると、保存したGitHubトークンとVAPIDの秘密鍵を復号できなくなります。GitHub連携は「保存したトークンを読み出せません」と表示して止まるため、トークンを登録し直してください。VAPIDの鍵は自動で作り直し、すべての端末の登録を削除するため、各端末で「この端末で通知を受け取る」をもう一度押してください。
+
 ## URLと応答
 
 | URL | 動作 |
@@ -251,7 +282,7 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 | `POST /auth/refresh` | Cookieのトークンを更新。本文は`{}` |
 | `POST /auth/logout` | セッション失効とCookie削除。本文は`{}` |
 | `GET /api/v1/me` | 本人の`{id, email}`。Bearer Access JWTが必要 |
-| `GET /api/v1/action-items` | 本人の対応事項の一覧。クエリは`status`（`open`／`done`／`dismissed`）、`limit`（1〜100、既定50）、`cursor`。`{items, next_cursor}`を返す |
+| `GET /api/v1/action-items` | 本人の対応事項の一覧。クエリは`status`（`open`／`done`／`dismissed`）、`limit`（1〜100、既定50）、`cursor`、`auto`（`true`のみ。自動で完了したものだけを自動完了の新しい順に返す。カーソルは`auto`の有無で別物で、混ぜると400）。`{items, next_cursor}`を返す |
 | `POST /api/v1/action-items` | 対応事項を作成し201と`Location`を返す。本文は`{content, status?, note?, due_at?, refs?}` |
 | `GET /api/v1/action-items/{id}` | 本人の対応事項を1件返す |
 | `PATCH /api/v1/action-items/{id}` | 指定したキーだけを更新する。`note`／`due_at`は`null`で消去。`version`を付けると一致しない場合に409 |
@@ -262,6 +293,17 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 | `POST /api/v1/oauth/consent` | 本文`{request, approve}`（16KiB以内）で許可・拒否し、`{redirect_url}`を返す。Access JWTが必要 |
 | `GET /api/v1/oauth/connections` | 接続中のAIクライアントの一覧`{items: [{id, client_name, client_host, scopes, created_at, last_used_at, expires_at}]}`。Access JWTが必要 |
 | `DELETE /api/v1/oauth/connections/{id}` | 接続を削除し204を返す。そのトークンは即座に使えなくなる。他のユーザーの接続と存在しない接続は404。Access JWTが必要 |
+| `GET /api/v1/integrations/github` | GitHub連携の状態。未接続は`{connected: false}`、接続済みは`{connected, login, token_last4, scopes, immediate_notify, status, last_error, last_synced_at, created_at}`。トークン本体は返さない。Access JWTが必要 |
+| `PUT /api/v1/integrations/github` | 本文`{token, immediate_notify?}`（16KiB以内）でトークンを登録・置き換える。無効なトークンは400`github_token_invalid`、`repo`がなければ400`github_scopes_missing`、GitHubに届かなければ503`github_unavailable`。Access JWTが必要 |
+| `PATCH /api/v1/integrations/github` | 本文`{immediate_notify}`だけを受け付ける。未接続は404。Access JWTが必要 |
+| `DELETE /api/v1/integrations/github` | 連携を解除し204を返す。未接続でも204。Access JWTが必要 |
+| `GET /api/v1/push/public-key` | VAPIDの公開鍵`{public_key}`。Access JWTが必要 |
+| `GET /api/v1/push/subscriptions` | 通知を受け取る端末の一覧`{subscriptions: [{id, label, created_at, last_used_at}]}`。Access JWTが必要 |
+| `POST /api/v1/push/subscriptions` | 本文`{endpoint, keys: {p256dh, auth}, label?, timezone?}`で端末を登録する。新規は201、登録済みの端末は200。20台に達していると409`too_many_subscriptions`。Access JWTが必要 |
+| `DELETE /api/v1/push/subscriptions/{id}` | 端末の登録を削除し204を返す。他のユーザーの端末と存在しない端末は404。Access JWTが必要 |
+| `POST /api/v1/push/test` | テスト通知を送信待ちに入れ202を返す。端末がなければ409`no_subscription`、1分に4回目以降は429。Access JWTが必要 |
+| `GET /api/v1/notification-settings` | 通知設定`{timezone, digest_hour, stale_days}`。未保存なら既定値（UTC、8、3）。Access JWTが必要 |
+| `PUT /api/v1/notification-settings` | 本文`{timezone, digest_hour, stale_days}`（すべて必須。IANAのタイムゾーン名、0〜23、1〜30）で保存する。Access JWTが必要 |
 | `GET /.well-known/oauth-protected-resource/mcp` | MCPの保護リソースメタデータ（RFC 9728）。`/.well-known/oauth-protected-resource`も同じ内容 |
 | `GET /.well-known/oauth-authorization-server` | 認可サーバーのメタデータ（RFC 8414） |
 | `POST /oauth/register` | クライアント登録（RFC 7591）。`application/json`、64KiB以内。成功は201 |
@@ -271,7 +313,7 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 
 LoginとRefreshは`{access_token, expires_in, user: {id, email}}`を返します。
 
-対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at}`で、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。エラーは`{error: {code, message}}`です（`/oauth/*`の処理内で返すエラーだけは、OAuthの形式`{error, error_description}`です）。認証・非公開API・MCP・`/oauth/*`の応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
+対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at, source, auto}`で（`source`は連携が作ったものなら`"github"`、それ以外は`null`。`auto`は自動で完了したものなら`{reason, ref_url, at}`、それ以外は`null`。MCPの応答も同じ形です）、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。`status`を変更すると（REST・MCPとも）、その対応事項は連携による自動完了・再オープンの対象から外れ、`auto`は`null`に戻ります。エラーは`{error: {code, message}}`です（`/oauth/*`の処理内で返すエラーだけは、OAuthの形式`{error, error_description}`です）。認証・非公開API・MCP・`/oauth/*`の応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
 
 ## コード生成と検証
 

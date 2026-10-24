@@ -38,6 +38,65 @@ func (q *Queries) CountAPITokens(ctx context.Context, userID string) (int64, err
 	return count, err
 }
 
+const countActionItemsByStatus = `-- name: CountActionItemsByStatus :one
+SELECT COUNT(*) FROM action_items WHERE user_id = ?1 AND status = ?2
+`
+
+type CountActionItemsByStatusParams struct {
+	UserID string
+	Status string
+}
+
+func (q *Queries) CountActionItemsByStatus(ctx context.Context, arg CountActionItemsByStatusParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countActionItemsByStatus, arg.UserID, arg.Status)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countAutoActionItemsSince = `-- name: CountAutoActionItemsSince :one
+SELECT COUNT(*) FROM action_items WHERE user_id = ?1 AND auto_reason IS NOT NULL AND auto_at > ?2
+`
+
+type CountAutoActionItemsSinceParams struct {
+	UserID string
+	Since  sql.NullInt64
+}
+
+func (q *Queries) CountAutoActionItemsSince(ctx context.Context, arg CountAutoActionItemsSinceParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countAutoActionItemsSince, arg.UserID, arg.Since)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countNotificationsByDedupeKey = `-- name: CountNotificationsByDedupeKey :one
+SELECT COUNT(*) FROM notifications WHERE user_id = ?1 AND dedupe_key = ?2
+`
+
+type CountNotificationsByDedupeKeyParams struct {
+	UserID    string
+	DedupeKey string
+}
+
+func (q *Queries) CountNotificationsByDedupeKey(ctx context.Context, arg CountNotificationsByDedupeKeyParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countNotificationsByDedupeKey, arg.UserID, arg.DedupeKey)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countPushSubscriptions = `-- name: CountPushSubscriptions :one
+SELECT COUNT(*) FROM web_push_subscriptions WHERE user_id = ?1
+`
+
+func (q *Queries) CountPushSubscriptions(ctx context.Context, userID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPushSubscriptions, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createAPIToken = `-- name: CreateAPIToken :exec
 INSERT INTO api_tokens (id,user_id,name,token_hash,created_at,last_used_at)
 VALUES (?1,?2,?3,?4,?5,NULL)
@@ -63,21 +122,29 @@ func (q *Queries) CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) 
 }
 
 const createActionItem = `-- name: CreateActionItem :exec
-INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at)
-VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
 `
 
 type CreateActionItemParams struct {
-	ID        string
-	UserID    string
-	Content   string
-	Status    string
-	Note      sql.NullString
-	DueAt     sql.NullInt64
-	Refs      string
-	Version   int64
-	CreatedAt int64
-	UpdatedAt int64
+	ID         string
+	UserID     string
+	Content    string
+	Status     string
+	Note       sql.NullString
+	DueAt      sql.NullInt64
+	Refs       string
+	Version    int64
+	CreatedAt  int64
+	UpdatedAt  int64
+	Source     sql.NullString
+	SourceKey  sql.NullString
+	Tracking   int64
+	AutoReason sql.NullString
+	AutoRef    sql.NullString
+	AutoAt     sql.NullInt64
+	DetectedAt sql.NullInt64
+	TrackedAt  sql.NullInt64
 }
 
 func (q *Queries) CreateActionItem(ctx context.Context, arg CreateActionItemParams) error {
@@ -91,6 +158,115 @@ func (q *Queries) CreateActionItem(ctx context.Context, arg CreateActionItemPara
 		arg.Refs,
 		arg.Version,
 		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.Source,
+		arg.SourceKey,
+		arg.Tracking,
+		arg.AutoReason,
+		arg.AutoRef,
+		arg.AutoAt,
+		arg.DetectedAt,
+		arg.TrackedAt,
+	)
+	return err
+}
+
+const createGitHubConnection = `-- name: CreateGitHubConnection :exec
+INSERT INTO github_connections (user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+`
+
+type CreateGitHubConnectionParams struct {
+	UserID               string
+	Generation           int64
+	TokenSealed          string
+	TokenLast4           string
+	Login                string
+	Scopes               string
+	ImmediateNotify      int64
+	Status               string
+	LastError            sql.NullString
+	FailureCount         int64
+	LastModified         sql.NullString
+	InitialImportPending int64
+	NextPollAt           int64
+	LastSyncedAt         sql.NullInt64
+	LastReconciledAt     sql.NullInt64
+	LastTrackedAt        sql.NullInt64
+	CreatedAt            int64
+	UpdatedAt            int64
+}
+
+func (q *Queries) CreateGitHubConnection(ctx context.Context, arg CreateGitHubConnectionParams) error {
+	_, err := q.db.ExecContext(ctx, createGitHubConnection,
+		arg.UserID,
+		arg.Generation,
+		arg.TokenSealed,
+		arg.TokenLast4,
+		arg.Login,
+		arg.Scopes,
+		arg.ImmediateNotify,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.LastModified,
+		arg.InitialImportPending,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastReconciledAt,
+		arg.LastTrackedAt,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
+const createInstanceSecret = `-- name: CreateInstanceSecret :execrows
+INSERT INTO instance_secrets (name,value,created_at,updated_at)
+VALUES (?1,?2,?3,?4)
+ON CONFLICT (name) DO NOTHING
+`
+
+type CreateInstanceSecretParams struct {
+	Name      string
+	Value     string
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+func (q *Queries) CreateInstanceSecret(ctx context.Context, arg CreateInstanceSecretParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, createInstanceSecret,
+		arg.Name,
+		arg.Value,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const createNotificationSettingsIfMissing = `-- name: CreateNotificationSettingsIfMissing :exec
+INSERT INTO notification_settings (user_id,timezone,digest_hour,stale_days,updated_at)
+VALUES (?1,?2,?3,?4,?5)
+ON CONFLICT (user_id) DO NOTHING
+`
+
+type CreateNotificationSettingsIfMissingParams struct {
+	UserID     string
+	Timezone   string
+	DigestHour int64
+	StaleDays  int64
+	UpdatedAt  int64
+}
+
+func (q *Queries) CreateNotificationSettingsIfMissing(ctx context.Context, arg CreateNotificationSettingsIfMissingParams) error {
+	_, err := q.db.ExecContext(ctx, createNotificationSettingsIfMissing,
+		arg.UserID,
+		arg.Timezone,
+		arg.DigestHour,
+		arg.StaleDays,
 		arg.UpdatedAt,
 	)
 	return err
@@ -192,6 +368,34 @@ func (q *Queries) CreateOAuthToken(ctx context.Context, arg CreateOAuthTokenPara
 	return err
 }
 
+const createPushSubscription = `-- name: CreatePushSubscription :exec
+INSERT INTO web_push_subscriptions (id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,NULL)
+`
+
+type CreatePushSubscriptionParams struct {
+	ID        string
+	UserID    string
+	Endpoint  string
+	P256dh    string
+	Auth      string
+	Label     string
+	CreatedAt int64
+}
+
+func (q *Queries) CreatePushSubscription(ctx context.Context, arg CreatePushSubscriptionParams) error {
+	_, err := q.db.ExecContext(ctx, createPushSubscription,
+		arg.ID,
+		arg.UserID,
+		arg.Endpoint,
+		arg.P256dh,
+		arg.Auth,
+		arg.Label,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const createRefresh = `-- name: CreateRefresh :exec
 INSERT INTO refresh_tokens (hash,session_id,created_at) VALUES (?,?,?)
 `
@@ -266,6 +470,15 @@ func (q *Queries) DeleteAPIToken(ctx context.Context, arg DeleteAPITokenParams) 
 	return result.RowsAffected()
 }
 
+const deleteAllPushSubscriptions = `-- name: DeleteAllPushSubscriptions :exec
+DELETE FROM web_push_subscriptions
+`
+
+func (q *Queries) DeleteAllPushSubscriptions(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, deleteAllPushSubscriptions)
+	return err
+}
+
 const deleteExpiredOAuthGrants = `-- name: DeleteExpiredOAuthGrants :exec
 DELETE FROM oauth_grants WHERE user_id = ?1 AND expires_at <= ?2
 `
@@ -294,6 +507,15 @@ func (q *Queries) DeleteExpiredOAuthTokens(ctx context.Context, arg DeleteExpire
 	return err
 }
 
+const deleteGitHubConnection = `-- name: DeleteGitHubConnection :exec
+DELETE FROM github_connections WHERE user_id = ?1
+`
+
+func (q *Queries) DeleteGitHubConnection(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteGitHubConnection, userID)
+	return err
+}
+
 const deleteGrantOAuthTokens = `-- name: DeleteGrantOAuthTokens :exec
 DELETE FROM oauth_tokens WHERE grant_id = ?1 AND user_id = ?2
 `
@@ -305,6 +527,20 @@ type DeleteGrantOAuthTokensParams struct {
 
 func (q *Queries) DeleteGrantOAuthTokens(ctx context.Context, arg DeleteGrantOAuthTokensParams) error {
 	_, err := q.db.ExecContext(ctx, deleteGrantOAuthTokens, arg.GrantID, arg.UserID)
+	return err
+}
+
+const deleteItemPendingNotifications = `-- name: DeleteItemPendingNotifications :exec
+DELETE FROM notifications WHERE user_id = ?1 AND action_item_id = ?2 AND sent_at IS NULL
+`
+
+type DeleteItemPendingNotificationsParams struct {
+	UserID       string
+	ActionItemID sql.NullString
+}
+
+func (q *Queries) DeleteItemPendingNotifications(ctx context.Context, arg DeleteItemPendingNotificationsParams) error {
+	_, err := q.db.ExecContext(ctx, deleteItemPendingNotifications, arg.UserID, arg.ActionItemID)
 	return err
 }
 
@@ -342,6 +578,41 @@ func (q *Queries) DeleteOAuthToken(ctx context.Context, arg DeleteOAuthTokenPara
 	return result.RowsAffected()
 }
 
+const deletePushSubscription = `-- name: DeletePushSubscription :execrows
+DELETE FROM web_push_subscriptions WHERE id = ?1 AND user_id = ?2
+`
+
+type DeletePushSubscriptionParams struct {
+	ID     string
+	UserID string
+}
+
+func (q *Queries) DeletePushSubscription(ctx context.Context, arg DeletePushSubscriptionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deletePushSubscription, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deletePushSubscriptionByID = `-- name: DeletePushSubscriptionByID :exec
+DELETE FROM web_push_subscriptions WHERE id = ?1
+`
+
+func (q *Queries) DeletePushSubscriptionByID(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, deletePushSubscriptionByID, id)
+	return err
+}
+
+const deleteSentNotificationsBefore = `-- name: DeleteSentNotificationsBefore :exec
+DELETE FROM notifications WHERE sent_at IS NOT NULL AND sent_at < ?1
+`
+
+func (q *Queries) DeleteSentNotificationsBefore(ctx context.Context, before sql.NullInt64) error {
+	_, err := q.db.ExecContext(ctx, deleteSentNotificationsBefore, before)
+	return err
+}
+
 const deleteUserAPITokens = `-- name: DeleteUserAPITokens :exec
 DELETE FROM api_tokens WHERE user_id = ?1
 `
@@ -369,6 +640,38 @@ func (q *Queries) DeleteUserOAuthTokens(ctx context.Context, userID string) erro
 	return err
 }
 
+const deleteUserPendingNotifications = `-- name: DeleteUserPendingNotifications :exec
+DELETE FROM notifications WHERE user_id = ?1 AND sent_at IS NULL
+`
+
+func (q *Queries) DeleteUserPendingNotifications(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserPendingNotifications, userID)
+	return err
+}
+
+const deleteUserPendingNotificationsByKind = `-- name: DeleteUserPendingNotificationsByKind :exec
+DELETE FROM notifications WHERE user_id = ?1 AND kind = ?2 AND sent_at IS NULL
+`
+
+type DeleteUserPendingNotificationsByKindParams struct {
+	UserID string
+	Kind   string
+}
+
+func (q *Queries) DeleteUserPendingNotificationsByKind(ctx context.Context, arg DeleteUserPendingNotificationsByKindParams) error {
+	_, err := q.db.ExecContext(ctx, deleteUserPendingNotificationsByKind, arg.UserID, arg.Kind)
+	return err
+}
+
+const deleteUserPushSubscriptions = `-- name: DeleteUserPushSubscriptions :exec
+DELETE FROM web_push_subscriptions WHERE user_id = ?1
+`
+
+func (q *Queries) DeleteUserPushSubscriptions(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserPushSubscriptions, userID)
+	return err
+}
+
 const disableUser = `-- name: DisableUser :exec
 UPDATE users SET disabled = 1 WHERE id = ?
 `
@@ -376,6 +679,50 @@ UPDATE users SET disabled = 1 WHERE id = ?
 func (q *Queries) DisableUser(ctx context.Context, id string) error {
 	_, err := q.db.ExecContext(ctx, disableUser, id)
 	return err
+}
+
+const enqueueNotification = `-- name: EnqueueNotification :execrows
+INSERT INTO notifications (id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+ON CONFLICT (user_id, dedupe_key) DO NOTHING
+`
+
+type EnqueueNotificationParams struct {
+	ID           string
+	UserID       string
+	Kind         string
+	ActionItemID sql.NullString
+	DedupeKey    string
+	Title        string
+	Body         string
+	Url          string
+	ScheduledAt  int64
+	SentAt       sql.NullInt64
+	Attempts     int64
+	LastError    sql.NullString
+	CreatedAt    int64
+}
+
+func (q *Queries) EnqueueNotification(ctx context.Context, arg EnqueueNotificationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, enqueueNotification,
+		arg.ID,
+		arg.UserID,
+		arg.Kind,
+		arg.ActionItemID,
+		arg.DedupeKey,
+		arg.Title,
+		arg.Body,
+		arg.Url,
+		arg.ScheduledAt,
+		arg.SentAt,
+		arg.Attempts,
+		arg.LastError,
+		arg.CreatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const extendOAuthGrant = `-- name: ExtendOAuthGrant :exec
@@ -411,7 +758,7 @@ func (q *Queries) GetAPITokenByHash(ctx context.Context, tokenHash string) (GetA
 }
 
 const getActionItem = `-- name: GetActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE id = ?1 AND user_id = ?2
 `
 
@@ -434,6 +781,14 @@ func (q *Queries) GetActionItem(ctx context.Context, arg GetActionItemParams) (A
 		&i.Version,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Source,
+		&i.SourceKey,
+		&i.Tracking,
+		&i.AutoReason,
+		&i.AutoRef,
+		&i.AutoAt,
+		&i.DetectedAt,
+		&i.TrackedAt,
 	)
 	return i, err
 }
@@ -458,6 +813,71 @@ func (q *Queries) GetActiveSession(ctx context.Context, arg GetActiveSessionPara
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getGitHubConnection = `-- name: GetGitHubConnection :one
+SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
+WHERE user_id = ?1
+`
+
+func (q *Queries) GetGitHubConnection(ctx context.Context, userID string) (GithubConnection, error) {
+	row := q.db.QueryRowContext(ctx, getGitHubConnection, userID)
+	var i GithubConnection
+	err := row.Scan(
+		&i.UserID,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.TokenLast4,
+		&i.Login,
+		&i.Scopes,
+		&i.ImmediateNotify,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.LastModified,
+		&i.InitialImportPending,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastReconciledAt,
+		&i.LastTrackedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getInstanceSecret = `-- name: GetInstanceSecret :one
+SELECT name, value, created_at, updated_at FROM instance_secrets WHERE name = ?1
+`
+
+func (q *Queries) GetInstanceSecret(ctx context.Context, name string) (InstanceSecret, error) {
+	row := q.db.QueryRowContext(ctx, getInstanceSecret, name)
+	var i InstanceSecret
+	err := row.Scan(
+		&i.Name,
+		&i.Value,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getNotificationSettings = `-- name: GetNotificationSettings :one
+SELECT user_id, timezone, digest_hour, stale_days, updated_at FROM notification_settings
+WHERE user_id = ?1
+`
+
+func (q *Queries) GetNotificationSettings(ctx context.Context, userID string) (NotificationSetting, error) {
+	row := q.db.QueryRowContext(ctx, getNotificationSettings, userID)
+	var i NotificationSetting
+	err := row.Scan(
+		&i.UserID,
+		&i.Timezone,
+		&i.DigestHour,
+		&i.StaleDays,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -628,6 +1048,77 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 	return i, err
 }
 
+const insertSourcedActionItem = `-- name: InsertSourcedActionItem :execrows
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+ON CONFLICT (user_id, source_key) DO NOTHING
+`
+
+type InsertSourcedActionItemParams struct {
+	ID         string
+	UserID     string
+	Content    string
+	Status     string
+	Note       sql.NullString
+	DueAt      sql.NullInt64
+	Refs       string
+	Version    int64
+	CreatedAt  int64
+	UpdatedAt  int64
+	Source     sql.NullString
+	SourceKey  sql.NullString
+	Tracking   int64
+	AutoReason sql.NullString
+	AutoRef    sql.NullString
+	AutoAt     sql.NullInt64
+	DetectedAt sql.NullInt64
+	TrackedAt  sql.NullInt64
+}
+
+func (q *Queries) InsertSourcedActionItem(ctx context.Context, arg InsertSourcedActionItemParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertSourcedActionItem,
+		arg.ID,
+		arg.UserID,
+		arg.Content,
+		arg.Status,
+		arg.Note,
+		arg.DueAt,
+		arg.Refs,
+		arg.Version,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+		arg.Source,
+		arg.SourceKey,
+		arg.Tracking,
+		arg.AutoReason,
+		arg.AutoRef,
+		arg.AutoAt,
+		arg.DetectedAt,
+		arg.TrackedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const latestNotificationCreatedAt = `-- name: LatestNotificationCreatedAt :one
+SELECT created_at FROM notifications WHERE user_id = ?1 AND kind = ?2
+ORDER BY created_at DESC LIMIT 1
+`
+
+type LatestNotificationCreatedAtParams struct {
+	UserID string
+	Kind   string
+}
+
+func (q *Queries) LatestNotificationCreatedAt(ctx context.Context, arg LatestNotificationCreatedAtParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, latestNotificationCreatedAt, arg.UserID, arg.Kind)
+	var created_at int64
+	err := row.Scan(&created_at)
+	return created_at, err
+}
+
 const listAPITokens = `-- name: ListAPITokens :many
 SELECT id, user_id, name, created_at, last_used_at FROM api_tokens
 WHERE user_id = ?1 ORDER BY created_at DESC, id DESC
@@ -671,7 +1162,7 @@ func (q *Queries) ListAPITokens(ctx context.Context, userID string) ([]ListAPITo
 }
 
 const listActionItems = `-- name: ListActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE user_id = ?1 AND (created_at < ?2 OR (created_at = ?3 AND id < ?4))
 ORDER BY created_at DESC, id DESC LIMIT ?5
 `
@@ -710,6 +1201,14 @@ func (q *Queries) ListActionItems(ctx context.Context, arg ListActionItemsParams
 			&i.Version,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -725,7 +1224,7 @@ func (q *Queries) ListActionItems(ctx context.Context, arg ListActionItemsParams
 }
 
 const listActionItemsByStatus = `-- name: ListActionItemsByStatus :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE user_id = ?1 AND status = ?2 AND (created_at < ?3 OR (created_at = ?4 AND id < ?5))
 ORDER BY created_at DESC, id DESC LIMIT ?6
 `
@@ -766,6 +1265,241 @@ func (q *Queries) ListActionItemsByStatus(ctx context.Context, arg ListActionIte
 			&i.Version,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAutoActionItems = `-- name: ListAutoActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = ?1 AND auto_reason IS NOT NULL AND (auto_at < ?2 OR (auto_at = ?3 AND id < ?4))
+ORDER BY auto_at DESC, id DESC LIMIT ?5
+`
+
+type ListAutoActionItemsParams struct {
+	UserID       string
+	BeforeAutoAt sql.NullInt64
+	TieAutoAt    sql.NullInt64
+	BeforeID     string
+	PageSize     int64
+}
+
+func (q *Queries) ListAutoActionItems(ctx context.Context, arg ListAutoActionItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listAutoActionItems,
+		arg.UserID,
+		arg.BeforeAutoAt,
+		arg.TieAutoAt,
+		arg.BeforeID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAutoActionItemsByStatus = `-- name: ListAutoActionItemsByStatus :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = ?1 AND status = ?2 AND auto_reason IS NOT NULL AND (auto_at < ?3 OR (auto_at = ?4 AND id < ?5))
+ORDER BY auto_at DESC, id DESC LIMIT ?6
+`
+
+type ListAutoActionItemsByStatusParams struct {
+	UserID       string
+	Status       string
+	BeforeAutoAt sql.NullInt64
+	TieAutoAt    sql.NullInt64
+	BeforeID     string
+	PageSize     int64
+}
+
+func (q *Queries) ListAutoActionItemsByStatus(ctx context.Context, arg ListAutoActionItemsByStatusParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listAutoActionItemsByStatus,
+		arg.UserID,
+		arg.Status,
+		arg.BeforeAutoAt,
+		arg.TieAutoAt,
+		arg.BeforeID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDueGitHubConnections = `-- name: ListDueGitHubConnections :many
+SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
+WHERE status = 'active' AND next_poll_at <= ?1 AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY next_poll_at, user_id LIMIT ?2
+`
+
+type ListDueGitHubConnectionsParams struct {
+	Now      int64
+	PageSize int64
+}
+
+func (q *Queries) ListDueGitHubConnections(ctx context.Context, arg ListDueGitHubConnectionsParams) ([]GithubConnection, error) {
+	rows, err := q.db.QueryContext(ctx, listDueGitHubConnections, arg.Now, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GithubConnection
+	for rows.Next() {
+		var i GithubConnection
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Generation,
+			&i.TokenSealed,
+			&i.TokenLast4,
+			&i.Login,
+			&i.Scopes,
+			&i.ImmediateNotify,
+			&i.Status,
+			&i.LastError,
+			&i.FailureCount,
+			&i.LastModified,
+			&i.InitialImportPending,
+			&i.NextPollAt,
+			&i.LastSyncedAt,
+			&i.LastReconciledAt,
+			&i.LastTrackedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDueNotifications = `-- name: ListDueNotifications :many
+SELECT id, user_id, kind, action_item_id, dedupe_key, title, body, url, scheduled_at, sent_at, attempts, last_error, created_at FROM notifications
+WHERE sent_at IS NULL AND scheduled_at <= ?1 AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY scheduled_at, id LIMIT ?2
+`
+
+type ListDueNotificationsParams struct {
+	Now      int64
+	PageSize int64
+}
+
+func (q *Queries) ListDueNotifications(ctx context.Context, arg ListDueNotificationsParams) ([]Notification, error) {
+	rows, err := q.db.QueryContext(ctx, listDueNotifications, arg.Now, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Notification
+	for rows.Next() {
+		var i Notification
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Kind,
+			&i.ActionItemID,
+			&i.DedupeKey,
+			&i.Title,
+			&i.Body,
+			&i.Url,
+			&i.ScheduledAt,
+			&i.SentAt,
+			&i.Attempts,
+			&i.LastError,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -829,8 +1563,181 @@ func (q *Queries) ListOAuthGrants(ctx context.Context, arg ListOAuthGrantsParams
 	return items, nil
 }
 
+const listPushSubscriptions = `-- name: ListPushSubscriptions :many
+SELECT id, user_id, endpoint, p256dh, auth, label, created_at, last_used_at FROM web_push_subscriptions
+WHERE user_id = ?1 ORDER BY created_at DESC, id DESC
+`
+
+func (q *Queries) ListPushSubscriptions(ctx context.Context, userID string) ([]WebPushSubscription, error) {
+	rows, err := q.db.QueryContext(ctx, listPushSubscriptions, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []WebPushSubscription
+	for rows.Next() {
+		var i WebPushSubscription
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Endpoint,
+			&i.P256dh,
+			&i.Auth,
+			&i.Label,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPushUserIDs = `-- name: ListPushUserIDs :many
+SELECT DISTINCT user_id FROM web_push_subscriptions
+WHERE user_id IN (SELECT id FROM users WHERE disabled = 0) ORDER BY user_id
+`
+
+func (q *Queries) ListPushUserIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listPushUserIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var user_id string
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStaleActionItems = `-- name: ListStaleActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = ?1 AND status = 'open' AND created_at <= ?2
+ORDER BY created_at, id LIMIT ?3
+`
+
+type ListStaleActionItemsParams struct {
+	UserID        string
+	CreatedBefore int64
+	PageSize      int64
+}
+
+func (q *Queries) ListStaleActionItems(ctx context.Context, arg ListStaleActionItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listStaleActionItems, arg.UserID, arg.CreatedBefore, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTrackedActionItems = `-- name: ListTrackedActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = ?1 AND source = ?2 AND tracking = 1 AND status = 'open'
+ORDER BY COALESCE(tracked_at, 0), id LIMIT ?3
+`
+
+type ListTrackedActionItemsParams struct {
+	UserID   string
+	Source   sql.NullString
+	PageSize int64
+}
+
+func (q *Queries) ListTrackedActionItems(ctx context.Context, arg ListTrackedActionItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listTrackedActionItems, arg.UserID, arg.Source, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockActionItem = `-- name: LockActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE id = ?1 AND user_id = ?2
 `
 
@@ -851,6 +1758,81 @@ func (q *Queries) LockActionItem(ctx context.Context, arg LockActionItemParams) 
 		&i.DueAt,
 		&i.Refs,
 		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Source,
+		&i.SourceKey,
+		&i.Tracking,
+		&i.AutoReason,
+		&i.AutoRef,
+		&i.AutoAt,
+		&i.DetectedAt,
+		&i.TrackedAt,
+	)
+	return i, err
+}
+
+const lockActionItemBySourceKey = `-- name: LockActionItemBySourceKey :one
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
+WHERE user_id = ?1 AND source_key = ?2
+`
+
+type LockActionItemBySourceKeyParams struct {
+	UserID    string
+	SourceKey sql.NullString
+}
+
+func (q *Queries) LockActionItemBySourceKey(ctx context.Context, arg LockActionItemBySourceKeyParams) (ActionItem, error) {
+	row := q.db.QueryRowContext(ctx, lockActionItemBySourceKey, arg.UserID, arg.SourceKey)
+	var i ActionItem
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Content,
+		&i.Status,
+		&i.Note,
+		&i.DueAt,
+		&i.Refs,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Source,
+		&i.SourceKey,
+		&i.Tracking,
+		&i.AutoReason,
+		&i.AutoRef,
+		&i.AutoAt,
+		&i.DetectedAt,
+		&i.TrackedAt,
+	)
+	return i, err
+}
+
+const lockGitHubConnection = `-- name: LockGitHubConnection :one
+SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
+WHERE user_id = ?1
+`
+
+func (q *Queries) LockGitHubConnection(ctx context.Context, userID string) (GithubConnection, error) {
+	row := q.db.QueryRowContext(ctx, lockGitHubConnection, userID)
+	var i GithubConnection
+	err := row.Scan(
+		&i.UserID,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.TokenLast4,
+		&i.Login,
+		&i.Scopes,
+		&i.ImmediateNotify,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.LastModified,
+		&i.InitialImportPending,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastReconciledAt,
+		&i.LastTrackedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -913,6 +1895,27 @@ func (q *Queries) LockOAuthTokenByHash(ctx context.Context, arg LockOAuthTokenBy
 	return i, err
 }
 
+const lockPushSubscriptionByEndpoint = `-- name: LockPushSubscriptionByEndpoint :one
+SELECT id, user_id, endpoint, p256dh, auth, label, created_at, last_used_at FROM web_push_subscriptions
+WHERE endpoint = ?1
+`
+
+func (q *Queries) LockPushSubscriptionByEndpoint(ctx context.Context, endpoint string) (WebPushSubscription, error) {
+	row := q.db.QueryRowContext(ctx, lockPushSubscriptionByEndpoint, endpoint)
+	var i WebPushSubscription
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Endpoint,
+		&i.P256dh,
+		&i.Auth,
+		&i.Label,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
 const lockUserByID = `-- name: LockUserByID :one
 SELECT id, email, password_hash, disabled, created_at FROM users WHERE id = ?1
 `
@@ -943,6 +1946,79 @@ type MarkOAuthCodeUsedParams struct {
 
 func (q *Queries) MarkOAuthCodeUsed(ctx context.Context, arg MarkOAuthCodeUsedParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markOAuthCodeUsed, arg.CodeUsedAt, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const replaceGitHubConnection = `-- name: ReplaceGitHubConnection :exec
+UPDATE github_connections SET generation = ?1, token_sealed = ?2, token_last4 = ?3, login = ?4, scopes = ?5, immediate_notify = ?6, status = ?7, last_error = ?8, failure_count = ?9, last_modified = ?10, initial_import_pending = ?11, next_poll_at = ?12, last_synced_at = ?13, last_reconciled_at = ?14, last_tracked_at = ?15, updated_at = ?16
+WHERE user_id = ?17
+`
+
+type ReplaceGitHubConnectionParams struct {
+	Generation           int64
+	TokenSealed          string
+	TokenLast4           string
+	Login                string
+	Scopes               string
+	ImmediateNotify      int64
+	Status               string
+	LastError            sql.NullString
+	FailureCount         int64
+	LastModified         sql.NullString
+	InitialImportPending int64
+	NextPollAt           int64
+	LastSyncedAt         sql.NullInt64
+	LastReconciledAt     sql.NullInt64
+	LastTrackedAt        sql.NullInt64
+	UpdatedAt            int64
+	UserID               string
+}
+
+func (q *Queries) ReplaceGitHubConnection(ctx context.Context, arg ReplaceGitHubConnectionParams) error {
+	_, err := q.db.ExecContext(ctx, replaceGitHubConnection,
+		arg.Generation,
+		arg.TokenSealed,
+		arg.TokenLast4,
+		arg.Login,
+		arg.Scopes,
+		arg.ImmediateNotify,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.LastModified,
+		arg.InitialImportPending,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastReconciledAt,
+		arg.LastTrackedAt,
+		arg.UpdatedAt,
+		arg.UserID,
+	)
+	return err
+}
+
+const replaceInstanceSecret = `-- name: ReplaceInstanceSecret :execrows
+UPDATE instance_secrets SET value = ?1, updated_at = ?2
+WHERE name = ?3 AND value = ?4
+`
+
+type ReplaceInstanceSecretParams struct {
+	NewValue  string
+	UpdatedAt int64
+	Name      string
+	OldValue  string
+}
+
+func (q *Queries) ReplaceInstanceSecret(ctx context.Context, arg ReplaceInstanceSecretParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, replaceInstanceSecret,
+		arg.NewValue,
+		arg.UpdatedAt,
+		arg.Name,
+		arg.OldValue,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -1007,6 +2083,31 @@ func (q *Queries) TouchAPIToken(ctx context.Context, arg TouchAPITokenParams) er
 	return err
 }
 
+const touchActionItemTracked = `-- name: TouchActionItemTracked :execrows
+UPDATE action_items SET tracked_at = ?1
+WHERE id = ?2 AND user_id = ?3 AND version = ?4
+`
+
+type TouchActionItemTrackedParams struct {
+	TrackedAt sql.NullInt64
+	ID        string
+	UserID    string
+	Version   int64
+}
+
+func (q *Queries) TouchActionItemTracked(ctx context.Context, arg TouchActionItemTrackedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, touchActionItemTracked,
+		arg.TrackedAt,
+		arg.ID,
+		arg.UserID,
+		arg.Version,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const touchOAuthGrant = `-- name: TouchOAuthGrant :exec
 UPDATE oauth_grants SET last_used_at = ?1
 WHERE id = ?2 AND user_id = ?3 AND (last_used_at IS NULL OR last_used_at < ?4)
@@ -1029,9 +2130,39 @@ func (q *Queries) TouchOAuthGrant(ctx context.Context, arg TouchOAuthGrantParams
 	return err
 }
 
+const touchPushSubscription = `-- name: TouchPushSubscription :exec
+UPDATE web_push_subscriptions SET last_used_at = ?1 WHERE id = ?2
+`
+
+type TouchPushSubscriptionParams struct {
+	LastUsedAt sql.NullInt64
+	ID         string
+}
+
+func (q *Queries) TouchPushSubscription(ctx context.Context, arg TouchPushSubscriptionParams) error {
+	_, err := q.db.ExecContext(ctx, touchPushSubscription, arg.LastUsedAt, arg.ID)
+	return err
+}
+
+const untrackSourceActionItems = `-- name: UntrackSourceActionItems :exec
+UPDATE action_items SET tracking = 0, source_key = NULL, version = version + 1, updated_at = ?1
+WHERE user_id = ?2 AND source = ?3 AND (tracking = 1 OR source_key IS NOT NULL)
+`
+
+type UntrackSourceActionItemsParams struct {
+	UpdatedAt int64
+	UserID    string
+	Source    sql.NullString
+}
+
+func (q *Queries) UntrackSourceActionItems(ctx context.Context, arg UntrackSourceActionItemsParams) error {
+	_, err := q.db.ExecContext(ctx, untrackSourceActionItems, arg.UpdatedAt, arg.UserID, arg.Source)
+	return err
+}
+
 const updateActionItem = `-- name: UpdateActionItem :execrows
-UPDATE action_items SET content = ?1, status = ?2, note = ?3, due_at = ?4, refs = ?5, version = ?6, updated_at = ?7
-WHERE id = ?8 AND user_id = ?9 AND version = ?10
+UPDATE action_items SET content = ?1, status = ?2, note = ?3, due_at = ?4, refs = ?5, source = ?6, source_key = ?7, tracking = ?8, auto_reason = ?9, auto_ref = ?10, auto_at = ?11, detected_at = ?12, tracked_at = ?13, version = ?14, updated_at = ?15
+WHERE id = ?16 AND user_id = ?17 AND version = ?18
 `
 
 type UpdateActionItemParams struct {
@@ -1040,6 +2171,14 @@ type UpdateActionItemParams struct {
 	Note           sql.NullString
 	DueAt          sql.NullInt64
 	Refs           string
+	Source         sql.NullString
+	SourceKey      sql.NullString
+	Tracking       int64
+	AutoReason     sql.NullString
+	AutoRef        sql.NullString
+	AutoAt         sql.NullInt64
+	DetectedAt     sql.NullInt64
+	TrackedAt      sql.NullInt64
 	NewVersion     int64
 	UpdatedAt      int64
 	ID             string
@@ -1054,6 +2193,14 @@ func (q *Queries) UpdateActionItem(ctx context.Context, arg UpdateActionItemPara
 		arg.Note,
 		arg.DueAt,
 		arg.Refs,
+		arg.Source,
+		arg.SourceKey,
+		arg.Tracking,
+		arg.AutoReason,
+		arg.AutoRef,
+		arg.AutoAt,
+		arg.DetectedAt,
+		arg.TrackedAt,
 		arg.NewVersion,
 		arg.UpdatedAt,
 		arg.ID,
@@ -1064,6 +2211,114 @@ func (q *Queries) UpdateActionItem(ctx context.Context, arg UpdateActionItemPara
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const updateGitHubImmediateNotify = `-- name: UpdateGitHubImmediateNotify :execrows
+UPDATE github_connections SET immediate_notify = ?1, updated_at = ?2
+WHERE user_id = ?3
+`
+
+type UpdateGitHubImmediateNotifyParams struct {
+	ImmediateNotify int64
+	UpdatedAt       int64
+	UserID          string
+}
+
+func (q *Queries) UpdateGitHubImmediateNotify(ctx context.Context, arg UpdateGitHubImmediateNotifyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateGitHubImmediateNotify, arg.ImmediateNotify, arg.UpdatedAt, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateGitHubSyncState = `-- name: UpdateGitHubSyncState :execrows
+UPDATE github_connections SET status = ?1, last_error = ?2, failure_count = ?3, last_modified = ?4, initial_import_pending = ?5, next_poll_at = ?6, last_synced_at = ?7, last_reconciled_at = ?8, last_tracked_at = ?9, updated_at = ?10
+WHERE user_id = ?11 AND generation = ?12
+`
+
+type UpdateGitHubSyncStateParams struct {
+	Status               string
+	LastError            sql.NullString
+	FailureCount         int64
+	LastModified         sql.NullString
+	InitialImportPending int64
+	NextPollAt           int64
+	LastSyncedAt         sql.NullInt64
+	LastReconciledAt     sql.NullInt64
+	LastTrackedAt        sql.NullInt64
+	UpdatedAt            int64
+	UserID               string
+	Generation           int64
+}
+
+func (q *Queries) UpdateGitHubSyncState(ctx context.Context, arg UpdateGitHubSyncStateParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateGitHubSyncState,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.LastModified,
+		arg.InitialImportPending,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastReconciledAt,
+		arg.LastTrackedAt,
+		arg.UpdatedAt,
+		arg.UserID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateNotificationResult = `-- name: UpdateNotificationResult :exec
+UPDATE notifications SET attempts = ?1, last_error = ?2, scheduled_at = ?3, sent_at = ?4
+WHERE id = ?5 AND sent_at IS NULL
+`
+
+type UpdateNotificationResultParams struct {
+	Attempts    int64
+	LastError   sql.NullString
+	ScheduledAt int64
+	SentAt      sql.NullInt64
+	ID          string
+}
+
+func (q *Queries) UpdateNotificationResult(ctx context.Context, arg UpdateNotificationResultParams) error {
+	_, err := q.db.ExecContext(ctx, updateNotificationResult,
+		arg.Attempts,
+		arg.LastError,
+		arg.ScheduledAt,
+		arg.SentAt,
+		arg.ID,
+	)
+	return err
+}
+
+const updatePushSubscriptionKeys = `-- name: UpdatePushSubscriptionKeys :exec
+UPDATE web_push_subscriptions SET p256dh = ?1, auth = ?2, label = ?3
+WHERE id = ?4 AND user_id = ?5
+`
+
+type UpdatePushSubscriptionKeysParams struct {
+	P256dh string
+	Auth   string
+	Label  string
+	ID     string
+	UserID string
+}
+
+func (q *Queries) UpdatePushSubscriptionKeys(ctx context.Context, arg UpdatePushSubscriptionKeysParams) error {
+	_, err := q.db.ExecContext(ctx, updatePushSubscriptionKeys,
+		arg.P256dh,
+		arg.Auth,
+		arg.Label,
+		arg.ID,
+		arg.UserID,
+	)
+	return err
 }
 
 const upsertCIMDClient = `-- name: UpsertCIMDClient :exec
@@ -1088,6 +2343,31 @@ func (q *Queries) UpsertCIMDClient(ctx context.Context, arg UpsertCIMDClientPara
 		arg.RedirectUris,
 		arg.MetadataExpiresAt,
 		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
+const upsertNotificationSettings = `-- name: UpsertNotificationSettings :exec
+INSERT INTO notification_settings (user_id,timezone,digest_hour,stale_days,updated_at)
+VALUES (?1,?2,?3,?4,?5)
+ON CONFLICT (user_id) DO UPDATE SET timezone = excluded.timezone, digest_hour = excluded.digest_hour, stale_days = excluded.stale_days, updated_at = excluded.updated_at
+`
+
+type UpsertNotificationSettingsParams struct {
+	UserID     string
+	Timezone   string
+	DigestHour int64
+	StaleDays  int64
+	UpdatedAt  int64
+}
+
+func (q *Queries) UpsertNotificationSettings(ctx context.Context, arg UpsertNotificationSettingsParams) error {
+	_, err := q.db.ExecContext(ctx, upsertNotificationSettings,
+		arg.UserID,
+		arg.Timezone,
+		arg.DigestHour,
+		arg.StaleDays,
 		arg.UpdatedAt,
 	)
 	return err

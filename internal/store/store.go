@@ -51,6 +51,22 @@ type ActionItem struct {
 	Version                     int64
 	CreatedAt                   int64
 	UpdatedAt                   int64
+	// Source is the integration that created the item ("github"), or null
+	// for items created by the user, the REST API or MCP. SourceKey
+	// identifies the source object and is unique per user.
+	Source    sql.NullString
+	SourceKey sql.NullString
+	// Tracking is 1 while the integration follows the source object to
+	// complete or reopen the item.
+	Tracking int64
+	// AutoReason, AutoRef and AutoAt describe an automatic completion.
+	AutoReason sql.NullString
+	AutoRef    sql.NullString
+	AutoAt     sql.NullInt64
+	// DetectedAt is when the item was last detected or reopened, and
+	// TrackedAt when its source object was last checked.
+	DetectedAt sql.NullInt64
+	TrackedAt  sql.NullInt64
 }
 
 // APIToken is a long-lived bearer token. Only the SHA-256 hash of the secret
@@ -67,6 +83,13 @@ type APIToken struct {
 type ActionItemCursor struct {
 	CreatedAt int64
 	ID        string
+}
+
+// AutoActionItemCursor is the position after which ListAutoActionItems
+// continues, in auto_at DESC, id DESC order.
+type AutoActionItemCursor struct {
+	AutoAt int64
+	ID     string
 }
 
 // queries adapts the sqlc packages generated for each database. sqlc emits
@@ -92,6 +115,15 @@ type queries interface {
 	lockActionItem(ctx context.Context, userID, id string) (ActionItem, error)
 	listActionItems(ctx context.Context, userID, status string, after ActionItemCursor, limit int) ([]ActionItem, error)
 	updateActionItem(ctx context.Context, item ActionItem, currentVersion int64) (int64, error)
+	insertSourcedActionItem(ctx context.Context, item ActionItem) (int64, error)
+	lockActionItemBySourceKey(ctx context.Context, userID, sourceKey string) (ActionItem, error)
+	listAutoActionItems(ctx context.Context, userID, status string, after AutoActionItemCursor, limit int) ([]ActionItem, error)
+	listTrackedActionItems(ctx context.Context, userID, source string, limit int) ([]ActionItem, error)
+	listStaleActionItems(ctx context.Context, userID string, createdBefore int64, limit int) ([]ActionItem, error)
+	countActionItemsByStatus(ctx context.Context, userID, status string) (int64, error)
+	countAutoActionItemsSince(ctx context.Context, userID string, since int64) (int64, error)
+	touchActionItemTracked(ctx context.Context, userID, id string, version, now int64) (int64, error)
+	untrackSourceActionItems(ctx context.Context, userID, source string, now int64) error
 	createAPIToken(ctx context.Context, token APIToken, hash string) error
 	countAPITokens(ctx context.Context, userID string) (int64, error)
 	listAPITokens(ctx context.Context, userID string) ([]APIToken, error)
@@ -120,6 +152,40 @@ type queries interface {
 	deleteGrantOAuthTokens(ctx context.Context, userID, grantID string) error
 	deleteExpiredOAuthTokens(ctx context.Context, userID string, now int64) error
 	deleteUserOAuthTokens(ctx context.Context, userID string) error
+	githubConnection(ctx context.Context, userID string) (GitHubConnection, error)
+	lockGitHubConnection(ctx context.Context, userID string) (GitHubConnection, error)
+	createGitHubConnection(ctx context.Context, c GitHubConnection) error
+	replaceGitHubConnection(ctx context.Context, c GitHubConnection) error
+	updateGitHubSyncState(ctx context.Context, c GitHubConnection) (int64, error)
+	updateGitHubImmediateNotify(ctx context.Context, userID string, immediateNotify, now int64) (int64, error)
+	deleteGitHubConnection(ctx context.Context, userID string) error
+	listDueGitHubConnections(ctx context.Context, now int64, limit int) ([]GitHubConnection, error)
+	createPushSubscription(ctx context.Context, p PushSubscription) error
+	lockPushSubscriptionByEndpoint(ctx context.Context, endpoint string) (PushSubscription, error)
+	updatePushSubscriptionKeys(ctx context.Context, p PushSubscription) error
+	countPushSubscriptions(ctx context.Context, userID string) (int64, error)
+	listPushSubscriptions(ctx context.Context, userID string) ([]PushSubscription, error)
+	listPushUserIDs(ctx context.Context) ([]string, error)
+	touchPushSubscription(ctx context.Context, id string, now int64) error
+	deletePushSubscription(ctx context.Context, userID, id string) (int64, error)
+	deletePushSubscriptionByID(ctx context.Context, id string) error
+	deleteUserPushSubscriptions(ctx context.Context, userID string) error
+	deleteAllPushSubscriptions(ctx context.Context) error
+	notificationSettings(ctx context.Context, userID string) (NotificationSettings, error)
+	upsertNotificationSettings(ctx context.Context, n NotificationSettings) error
+	createNotificationSettingsIfMissing(ctx context.Context, n NotificationSettings) error
+	enqueueNotification(ctx context.Context, n Notification) (int64, error)
+	countNotificationsByDedupeKey(ctx context.Context, userID, dedupeKey string) (int64, error)
+	latestNotificationCreatedAt(ctx context.Context, userID, kind string) (int64, error)
+	listDueNotifications(ctx context.Context, now int64, limit int) ([]Notification, error)
+	updateNotificationResult(ctx context.Context, n Notification) error
+	deleteItemPendingNotifications(ctx context.Context, userID, itemID string) error
+	deleteUserPendingNotifications(ctx context.Context, userID string) error
+	deleteUserPendingNotificationsByKind(ctx context.Context, userID, kind string) error
+	deleteSentNotificationsBefore(ctx context.Context, before int64) error
+	instanceSecret(ctx context.Context, name string) (InstanceSecret, error)
+	createInstanceSecret(ctx context.Context, sec InstanceSecret) (int64, error)
+	replaceInstanceSecret(ctx context.Context, name, oldValue, newValue string, now int64) (int64, error)
 }
 type Store struct {
 	db     *sql.DB
@@ -159,7 +225,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -228,7 +294,23 @@ func (s *Store) ChangeUser(ctx context.Context, email, hash string, disable bool
 		if e = q.deleteUserOAuthTokens(ctx, u.ID); e != nil {
 			return e
 		}
-		return q.deleteUserOAuthGrants(ctx, u.ID)
+		if e = q.deleteUserOAuthGrants(ctx, u.ID); e != nil {
+			return e
+		}
+		// Integrations and notifications follow, in the lock order of their
+		// tables (github_connections, web_push_subscriptions, notifications).
+		// A push subscription registered during a takeover would keep
+		// receiving item titles, so it goes with a password reset as well.
+		// The GitHub connection is removed only when the user is disabled.
+		if disable {
+			if e = q.deleteGitHubConnection(ctx, u.ID); e != nil {
+				return e
+			}
+		}
+		if e = q.deleteUserPushSubscriptions(ctx, u.ID); e != nil {
+			return e
+		}
+		return q.deleteUserPendingNotifications(ctx, u.ID)
 	})
 }
 func (s *Store) Login(ctx context.Context, verified User, session Session, refresh Refresh) error {

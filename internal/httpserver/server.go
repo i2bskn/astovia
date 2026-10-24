@@ -7,7 +7,10 @@ import (
 	"errors"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
+	"github.com/i2bskn/astovia/internal/github"
+	"github.com/i2bskn/astovia/internal/notify"
 	"github.com/i2bskn/astovia/internal/oauth"
+	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/store"
 	"io"
 	"io/fs"
@@ -34,6 +37,14 @@ type Server struct {
 	cimdLimiter     *loginLimiter
 	// fetchCIMD fetches a Client ID Metadata Document. Tests replace it.
 	fetchCIMD func(ctx context.Context, clientID string) (oauth.Document, error)
+	// github verifies GitHub tokens. Tests replace its base URL.
+	github *github.Client
+	// box seals stored credentials, and vapid manages the Web Push key
+	// pair; both are the ones the background loops use as well.
+	box   *secretbox.Box
+	vapid *notify.VAPID
+	// pushTestLimiter limits test notifications per user.
+	pushTestLimiter *loginLimiter
 }
 
 // userResponse is the public representation of a user.
@@ -62,10 +73,19 @@ func New(c config.Config, a *auth.Service, assets fs.FS) http.Handler {
 // adjust the limiters and the CIMD fetcher before calling handler.
 func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
 	cimd := oauth.NewCIMDClient()
+	// The clock is read through a so that tests can replace a.Now later.
+	now := time.Now
+	var st *store.Store
+	if a != nil {
+		now = func() time.Time { return a.Now() }
+		st = a.Store
+	}
+	box := secretbox.New(c.Secret)
 	return &Server{cfg: c, auth: a, assets: assets, limiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
-		}}
+		},
+		github: github.New(now), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, pushTestLimiter: newKeyLimiter(3, time.Minute)}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -104,6 +124,23 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/api/v1/oauth/consent", allowMethods(map[string]http.Handler{
 		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleGetConsent)),
 		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handlePostConsent))),
+	}))
+	mux.Handle("/api/v1/integrations/github", allowMethods(map[string]http.Handler{
+		http.MethodGet:    s.requireUser(http.HandlerFunc(s.handleGetGitHub)),
+		http.MethodPut:    s.requireUser(requireJSON(http.HandlerFunc(s.handlePutGitHub))),
+		http.MethodPatch:  s.requireUser(requireJSON(http.HandlerFunc(s.handlePatchGitHub))),
+		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteGitHub)),
+	}))
+	mux.Handle("/api/v1/push/public-key", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handlePushPublicKey))))
+	mux.Handle("/api/v1/push/subscriptions", allowMethods(map[string]http.Handler{
+		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleListPushSubscriptions)),
+		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handleCreatePushSubscription))),
+	}))
+	mux.Handle("/api/v1/push/subscriptions/{id}", allow(http.MethodDelete, s.requireUser(http.HandlerFunc(s.handleDeletePushSubscription))))
+	mux.Handle("/api/v1/push/test", allow(http.MethodPost, s.requireUser(http.HandlerFunc(s.handlePushTest))))
+	mux.Handle("/api/v1/notification-settings", allowMethods(map[string]http.Handler{
+		http.MethodGet: s.requireUser(http.HandlerFunc(s.handleGetNotificationSettings)),
+		http.MethodPut: s.requireUser(requireJSON(http.HandlerFunc(s.handlePutNotificationSettings))),
 	}))
 	mux.Handle("/api/v1/oauth/connections", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleListConnections))))
 	mux.Handle("/api/v1/oauth/connections/{id}", allow(http.MethodDelete, s.requireUser(http.HandlerFunc(s.handleDeleteConnection))))
@@ -409,13 +446,21 @@ func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mt := mime.TypeByExtension(path.Ext(name))
+	if name == "manifest.webmanifest" {
+		mt = "application/manifest+json"
+	}
 	if mt == "" {
 		mt = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", mt)
-	if name == "index.html" {
+	switch name {
+	case "index.html":
 		w.Header().Set("Cache-Control", "no-store")
-	} else {
+	case "sw.js", "manifest.webmanifest":
+		// The service worker and the manifest keep their names across
+		// releases, so they must be revalidated.
+		w.Header().Set("Cache-Control", "no-cache")
+	default:
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))

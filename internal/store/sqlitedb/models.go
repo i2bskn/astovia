@@ -9,16 +9,24 @@ import (
 )
 
 type ActionItem struct {
-	ID        string
-	UserID    string
-	Content   string
-	Status    string
-	Note      sql.NullString
-	DueAt     sql.NullInt64
-	Refs      string
-	Version   int64
-	CreatedAt int64
-	UpdatedAt int64
+	ID         string
+	UserID     string
+	Content    string
+	Status     string
+	Note       sql.NullString
+	DueAt      sql.NullInt64
+	Refs       string
+	Version    int64
+	CreatedAt  int64
+	UpdatedAt  int64
+	Source     sql.NullString
+	SourceKey  sql.NullString
+	Tracking   int64
+	AutoReason sql.NullString
+	AutoRef    sql.NullString
+	AutoAt     sql.NullInt64
+	DetectedAt sql.NullInt64
+	TrackedAt  sql.NullInt64
 }
 
 type ApiToken struct {
@@ -28,6 +36,58 @@ type ApiToken struct {
 	TokenHash  string
 	CreatedAt  int64
 	LastUsedAt sql.NullInt64
+}
+
+type GithubConnection struct {
+	UserID               string
+	Generation           int64
+	TokenSealed          string
+	TokenLast4           string
+	Login                string
+	Scopes               string
+	ImmediateNotify      int64
+	Status               string
+	LastError            sql.NullString
+	FailureCount         int64
+	LastModified         sql.NullString
+	InitialImportPending int64
+	NextPollAt           int64
+	LastSyncedAt         sql.NullInt64
+	LastReconciledAt     sql.NullInt64
+	LastTrackedAt        sql.NullInt64
+	CreatedAt            int64
+	UpdatedAt            int64
+}
+
+type InstanceSecret struct {
+	Name      string
+	Value     string
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+type Notification struct {
+	ID           string
+	UserID       string
+	Kind         string
+	ActionItemID sql.NullString
+	DedupeKey    string
+	Title        string
+	Body         string
+	Url          string
+	ScheduledAt  int64
+	SentAt       sql.NullInt64
+	Attempts     int64
+	LastError    sql.NullString
+	CreatedAt    int64
+}
+
+type NotificationSetting struct {
+	UserID     string
+	Timezone   string
+	DigestHour int64
+	StaleDays  int64
+	UpdatedAt  int64
 }
 
 type OauthClient struct {
@@ -89,4 +149,15 @@ type User struct {
 	PasswordHash string
 	Disabled     int64
 	CreatedAt    int64
+}
+
+type WebPushSubscription struct {
+	ID         string
+	UserID     string
+	Endpoint   string
+	P256dh     string
+	Auth       string
+	Label      string
+	CreatedAt  int64
+	LastUsedAt sql.NullInt64
 }

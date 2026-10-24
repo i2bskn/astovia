@@ -16,10 +16,23 @@ export interface AuthState {
   error: string | null;
 }
 
+// APIError carries the HTTP status and, when the server sent one, the error
+// code of its JSON error body (for example github_token_invalid).
 export class APIError extends Error {
-  constructor(readonly status: number) {
+  constructor(readonly status: number, readonly code: string | null = null) {
     super('Request failed');
   }
+}
+
+async function errorCode(response: Response): Promise<string | null> {
+  try {
+    const data: unknown = await response.json();
+    if (typeof data === 'object' && data !== null && 'error' in data && typeof data.error === 'object' && data.error !== null &&
+      'code' in data.error && typeof data.error.code === 'string') return data.error.code;
+  } catch {
+    // Not a JSON error body.
+  }
+  return null;
 }
 
 class SupersededError extends Error {}
@@ -197,7 +210,7 @@ export async function request<T>(path: `/api/v1/${string}`, init?: RequestInit):
   }
   if (!response.ok) {
     if (response.status === 401) anonymous();
-    throw new APIError(response.status);
+    throw new APIError(response.status, await errorCode(response));
   }
   // 204 No Content has no body to parse.
   if (response.status === 204) return undefined as T;

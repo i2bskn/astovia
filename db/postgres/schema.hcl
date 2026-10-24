@@ -133,6 +133,39 @@ table "action_items" {
     type = bigint
     null = false
   }
+  column "source" {
+    type = text
+    null = true
+  }
+  column "source_key" {
+    type = text
+    null = true
+  }
+  column "tracking" {
+    type    = bigint
+    null    = false
+    default = 0
+  }
+  column "auto_reason" {
+    type = text
+    null = true
+  }
+  column "auto_ref" {
+    type = text
+    null = true
+  }
+  column "auto_at" {
+    type = bigint
+    null = true
+  }
+  column "detected_at" {
+    type = bigint
+    null = true
+  }
+  column "tracked_at" {
+    type = bigint
+    null = true
+  }
   primary_key {
     columns = [column.id]
   }
@@ -145,6 +178,16 @@ table "action_items" {
   }
   index "action_items_user_status_created_idx" {
     columns = [column.user_id, column.status, column.created_at, column.id]
+  }
+  index "action_items_user_source_key_key" {
+    unique  = true
+    columns = [column.user_id, column.source_key]
+  }
+  index "action_items_user_tracking_idx" {
+    columns = [column.user_id, column.source, column.tracking, column.status, column.tracked_at]
+  }
+  index "action_items_user_auto_idx" {
+    columns = [column.user_id, column.auto_at, column.id]
   }
 }
 table "api_tokens" {
@@ -349,5 +392,274 @@ table "oauth_tokens" {
   }
   index "oauth_tokens_user_expires_idx" {
     columns = [column.user_id, column.expires_at]
+  }
+}
+table "github_connections" {
+  schema = schema.public
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "generation" {
+    type = bigint
+    null = false
+  }
+  column "token_sealed" {
+    type = text
+    null = false
+  }
+  column "token_last4" {
+    type = text
+    null = false
+  }
+  column "login" {
+    type = text
+    null = false
+  }
+  column "scopes" {
+    type = text
+    null = false
+  }
+  column "immediate_notify" {
+    type    = bigint
+    null    = false
+    default = 1
+  }
+  column "status" {
+    type = text
+    null = false
+  }
+  column "last_error" {
+    type = text
+    null = true
+  }
+  column "failure_count" {
+    type    = bigint
+    null    = false
+    default = 0
+  }
+  column "last_modified" {
+    type = text
+    null = true
+  }
+  column "initial_import_pending" {
+    type = bigint
+    null = false
+  }
+  column "next_poll_at" {
+    type = bigint
+    null = false
+  }
+  column "last_synced_at" {
+    type = bigint
+    null = true
+  }
+  column "last_reconciled_at" {
+    type = bigint
+    null = true
+  }
+  column "last_tracked_at" {
+    type = bigint
+    null = true
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "updated_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.user_id]
+  }
+  foreign_key "github_connections_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "github_connections_status_next_poll_idx" {
+    columns = [column.status, column.next_poll_at]
+  }
+}
+table "web_push_subscriptions" {
+  schema = schema.public
+  column "id" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "endpoint" {
+    type = text
+    null = false
+  }
+  column "p256dh" {
+    type = text
+    null = false
+  }
+  column "auth" {
+    type = text
+    null = false
+  }
+  column "label" {
+    type    = text
+    null    = false
+    default = ""
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "last_used_at" {
+    type = bigint
+    null = true
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "web_push_subscriptions_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "web_push_subscriptions_endpoint_key" {
+    unique  = true
+    columns = [column.endpoint]
+  }
+  index "web_push_subscriptions_user_created_idx" {
+    columns = [column.user_id, column.created_at]
+  }
+}
+table "notification_settings" {
+  schema = schema.public
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "timezone" {
+    type = text
+    null = false
+  }
+  column "digest_hour" {
+    type = bigint
+    null = false
+  }
+  column "stale_days" {
+    type = bigint
+    null = false
+  }
+  column "updated_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.user_id]
+  }
+  foreign_key "notification_settings_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+}
+table "notifications" {
+  schema = schema.public
+  column "id" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "kind" {
+    type = text
+    null = false
+  }
+  column "action_item_id" {
+    type = text
+    null = true
+  }
+  column "dedupe_key" {
+    type = text
+    null = false
+  }
+  column "title" {
+    type = text
+    null = false
+  }
+  column "body" {
+    type = text
+    null = false
+  }
+  column "url" {
+    type = text
+    null = false
+  }
+  column "scheduled_at" {
+    type = bigint
+    null = false
+  }
+  column "sent_at" {
+    type = bigint
+    null = true
+  }
+  column "attempts" {
+    type    = bigint
+    null    = false
+    default = 0
+  }
+  column "last_error" {
+    type = text
+    null = true
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "notifications_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  foreign_key "notifications_action_item_id_fk" {
+    columns = [column.action_item_id]
+    ref_columns = [table.action_items.column.id]
+  }
+  index "notifications_user_dedupe_key" {
+    unique  = true
+    columns = [column.user_id, column.dedupe_key]
+  }
+  index "notifications_sent_scheduled_idx" {
+    columns = [column.sent_at, column.scheduled_at]
+  }
+  index "notifications_action_item_idx" {
+    columns = [column.action_item_id]
+  }
+  index "notifications_user_kind_created_idx" {
+    columns = [column.user_id, column.kind, column.created_at]
+  }
+}
+table "instance_secrets" {
+  schema = schema.public
+  column "name" {
+    type = text
+    null = false
+  }
+  column "value" {
+    type = text
+    null = false
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "updated_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.name]
   }
 }

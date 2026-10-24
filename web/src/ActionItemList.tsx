@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import { request } from './auth';
 import { createActionItemsClient, isConflict } from './actionItems';
 import type { ActionItem, ActionItemRef, ActionItemStatus } from './actionItems';
+import { autoReasonLabel, httpsURL } from './automation';
 
 const client = createActionItemsClient(request);
 
@@ -44,12 +45,14 @@ function RefLabel({ value }: { value: ActionItemRef }) {
 function ItemRow({ item, busy, onChange }: { item: ActionItem; busy: boolean; onChange: (item: ActionItem, status: ActionItemStatus) => void }) {
   return <li className="action-item">
     <div className="action-body">
-      <p className="action-content">{item.content}</p>
+      <p className="action-content">{item.source === 'github' ? <span className="source-badge">GitHub</span> : null}{item.content}</p>
       {item.note ? <p className="action-note">{item.note}</p> : null}
       <dl className="action-meta">
         {item.due_at ? <div><dt>関連日時</dt><dd>{formatDate(item.due_at)}</dd></div> : null}
         <div><dt>作成</dt><dd>{formatDate(item.created_at)}</dd></div>
+        {item.auto ? <div><dt>自動で完了</dt><dd>{autoReasonLabel(item.auto.reason)}（{formatDate(item.auto.at)}）</dd></div> : null}
       </dl>
+      {item.auto && httpsURL(item.auto.ref_url) ? <p className="auto-evidence"><a href={httpsURL(item.auto.ref_url) ?? undefined} rel="noopener noreferrer" target="_blank">根拠を開く</a></p> : null}
       {item.refs.length > 0 ? <ul className="action-refs" aria-label="参照">
         {item.refs.map((ref, index) => <li key={index}><RefLabel value={ref} /></li>)}
       </ul> : null}

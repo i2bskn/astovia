@@ -24,7 +24,13 @@ type bucket struct {
 }
 
 func newLoginLimiter() *loginLimiter {
-	return &loginLimiter{entries: make(map[string]bucket), now: time.Now, limit: 10, window: time.Minute, capacity: 4096}
+	return newKeyLimiter(10, time.Minute)
+}
+
+// newKeyLimiter returns a limiter that allows limit attempts per key in each
+// window. Keys are given to allowKey; allow derives them from the peer.
+func newKeyLimiter(limit int, window time.Duration) *loginLimiter {
+	return &loginLimiter{entries: make(map[string]bucket), now: time.Now, limit: limit, window: window, capacity: 4096}
 }
 
 // limiterKey returns the IPv4 address itself, or the /64 prefix for IPv6.
@@ -54,7 +60,12 @@ func limiterKey(remoteAddr string) string {
 // the limit. When the table is full, an entry is evicted instead of rejecting
 // new peers, so that filling the table cannot lock everyone out.
 func (l *loginLimiter) allow(remoteAddr string) bool {
-	key := limiterKey(remoteAddr)
+	return l.allowKey(limiterKey(remoteAddr))
+}
+
+// allowKey records an attempt for key, such as a user ID, and reports
+// whether it is within the limit.
+func (l *loginLimiter) allowKey(key string) bool {
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
