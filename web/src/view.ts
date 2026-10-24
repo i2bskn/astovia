@@ -1,21 +1,18 @@
-// The dashboard has no router: the view query parameter of /admin/ selects
-// the screen, and history.pushState / popstate move between them.
+// Screens of the dashboard. React Router serves them under the /admin
+// basename; path is relative to it.
 export type View = 'tasks' | 'auto' | 'settings';
 
-export const views: readonly { value: View; label: string }[] = [
-  { value: 'tasks', label: 'タスク' },
-  { value: 'auto', label: '自動で処理したもの' },
-  { value: 'settings', label: '設定' },
+export const basename = '/admin';
+
+export const views: readonly { value: View; label: string; path: string }[] = [
+  { value: 'tasks', label: 'タスク', path: '/' },
+  { value: 'auto', label: '自動で処理したもの', path: '/auto' },
+  { value: 'settings', label: '設定', path: '/settings' },
 ];
 
-// parseView reads the view from a location.search value. Unknown or missing
-// values show the tasks.
-export function parseView(search: string): View {
-  const value = new URLSearchParams(search).get('view');
-  return value === 'auto' || value === 'settings' ? value : 'tasks';
-}
-
-// viewPath returns the /admin/ URL of a view.
-export function viewPath(view: View): string {
-  return view === 'tasks' ? '/admin/' : `/admin/?view=${view}`;
+// viewURL returns the absolute path of a view, for links made outside the
+// router such as notifications.
+export function viewURL(view: View): string {
+  const path = views.find((v) => v.value === view)?.path ?? '/';
+  return path === '/' ? `${basename}/` : basename + path;
 }

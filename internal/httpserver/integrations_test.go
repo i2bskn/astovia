@@ -430,7 +430,7 @@ func testPushTestAPI(t *testing.T, driver string) {
 		t.Fatalf("queued: %+v %v", due, err)
 	}
 	n := due[0]
-	if n.Kind != store.NotificationTest || n.Title != "Astovia のテスト通知" || n.Body != "この端末で通知を受け取れます。" || n.URL != "/admin/?view=settings" || n.ActionItemID.Valid || !strings.HasPrefix(n.DedupeKey, "test:") {
+	if n.Kind != store.NotificationTest || n.Title != "Astovia のテスト通知" || n.Body != "この端末で通知を受け取れます。" || n.URL != "/admin/settings" || n.ActionItemID.Valid || !strings.HasPrefix(n.DedupeKey, "test:") {
 		t.Fatalf("test notification: %+v", n)
 	}
 }

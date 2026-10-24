@@ -1,4 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="18" fill="#285747"/>
-  <text x="32" y="45" text-anchor="middle" fill="#ffffff" font-family="Georgia, serif" font-style="italic" font-size="52">a</text>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Astovia"><g color="#5D53C7"><path d="M20 104L57 28Q64 14 71 28L108 104" fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/><path d="M21 65Q44 65 58 83Q64 91 70 83Q84 65 107 65" fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round"/></g></svg>

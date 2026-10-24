@@ -189,7 +189,7 @@ func TestEngineDigest(t *testing.T) {
 				next = &n
 			}
 		}
-		if next == nil || next.Title != "今日の未完了 0件" || next.Body != "自動で処理 4件／" || next.URL != "/admin/?view=auto" {
+		if next == nil || next.Title != "今日の未完了 0件" || next.Body != "自動で処理 4件／" || next.URL != "/admin/auto" {
 			t.Fatalf("second digest: %+v", next)
 		}
 
@@ -261,7 +261,7 @@ func TestDispatcher(t *testing.T) {
 		list := []store.Notification{
 			{ID: "n1", Kind: store.NotificationDetected, ActionItemID: sql.NullString{String: "open", Valid: true}, DedupeKey: "detected:open:1", Title: "レビュー依頼: o/r#1", Body: "b", URL: "/admin/", ScheduledAt: now, CreatedAt: now},
 			{ID: "n2", Kind: store.NotificationStale, ActionItemID: sql.NullString{String: "done", Valid: true}, DedupeKey: "stale:done:1", Title: "t", Body: "b", URL: "/admin/", ScheduledAt: now, CreatedAt: now},
-			{ID: "n3", Kind: store.NotificationDigest, DedupeKey: "digest:x", Title: "t", Body: "b", URL: "/admin/?view=auto", ScheduledAt: now, CreatedAt: now},
+			{ID: "n3", Kind: store.NotificationDigest, DedupeKey: "digest:x", Title: "t", Body: "b", URL: "/admin/auto", ScheduledAt: now, CreatedAt: now},
 			{ID: "n4", Kind: store.NotificationStale, ActionItemID: sql.NullString{String: "open", Valid: true}, DedupeKey: "stale:open:1", Title: "t", Body: "b", URL: "/admin/", ScheduledAt: now + 60, CreatedAt: now},
 		}
 		if err := f.s.EnqueueNotifications(ctx, "alice-id", list); err != nil {
@@ -302,7 +302,7 @@ func TestDispatcher(t *testing.T) {
 
 		// No subscription ends the notification.
 		ch.err = store.ErrNoSubscription
-		test := store.Notification{ID: "n5", Kind: store.NotificationTest, DedupeKey: "test:1", Title: "t", Body: "b", URL: "/admin/?view=settings", ScheduledAt: f.now.Unix(), CreatedAt: f.now.Unix()}
+		test := store.Notification{ID: "n5", Kind: store.NotificationTest, DedupeKey: "test:1", Title: "t", Body: "b", URL: "/admin/settings", ScheduledAt: f.now.Unix(), CreatedAt: f.now.Unix()}
 		if err := f.s.EnqueueNotifications(ctx, "alice-id", []store.Notification{test}); err != nil {
 			t.Fatal(err)
 		}

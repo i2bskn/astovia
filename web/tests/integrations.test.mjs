@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { autoReasonLabel, githubErrorMessage, githubStatusMessage, httpsURL } from '../.test-build/automation.js';
 import { createIntegrationsClient } from '../.test-build/integrations.js';
 import { base64URLToBytes, bytesToBase64URL, deviceLabel, isIOS, pushSupport, sameKey } from '../.test-build/notifications.js';
-import { parseView, viewPath } from '../.test-build/view.js';
+import { views, viewURL } from '../.test-build/view.js';
 
 test('automatic completion reasons have Japanese labels', () => {
   assert.equal(autoReasonLabel('github.review_submitted'), 'レビューを提出した');
@@ -35,15 +35,11 @@ test('GitHub messages', () => {
   assert.match(githubStatusMessage('error', null), /停止/);
 });
 
-test('the view query parameter selects the screen', () => {
-  assert.equal(parseView(''), 'tasks');
-  assert.equal(parseView('?view=auto'), 'auto');
-  assert.equal(parseView('?view=settings&x=1'), 'settings');
-  assert.equal(parseView('?view=unknown'), 'tasks');
-  assert.equal(parseView('?view=AUTO'), 'tasks');
-  assert.equal(viewPath('tasks'), '/admin/');
-  assert.equal(viewPath('auto'), '/admin/?view=auto');
-  assert.equal(viewPath('settings'), '/admin/?view=settings');
+test('each screen has a path under /admin', () => {
+  assert.deepEqual(views.map((v) => v.path), ['/', '/auto', '/settings']);
+  assert.equal(viewURL('tasks'), '/admin/');
+  assert.equal(viewURL('auto'), '/admin/auto');
+  assert.equal(viewURL('settings'), '/admin/settings');
 });
 
 const supported = { hasServiceWorker: true, hasPushManager: true, hasNotification: true, isIOS: false, standalone: false, permission: 'default' };

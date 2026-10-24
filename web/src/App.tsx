@@ -1,5 +1,6 @@
-import { useEffect, useId, useState, useSyncExternalStore } from 'react';
+import { useId, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
+import { Navigate, NavLink, Route, Routes, useMatch } from 'react-router';
 import { auth } from './auth';
 import ActionItemList from './ActionItemList';
 import APITokenList from './APITokenList';
@@ -8,15 +9,10 @@ import ConnectionList from './ConnectionList';
 import ConsentPage from './ConsentPage';
 import GitHubSettings from './GitHubSettings';
 import NotificationSettings from './NotificationSettings';
-import { parseView, viewPath, views } from './view';
-import type { View } from './view';
-
-// The OAuth consent page replaces the dashboard on this path. There is no
-// router; Vite and the Go server serve index.html for every /admin/ path.
-const consentPage = location.pathname === '/admin/oauth/authorize';
+import { views } from './view';
 
 function Brand() {
-  return <div className="brand" aria-label="Astovia"><span className="brand-mark" aria-hidden="true">a</span><span>Astovia</span></div>;
+  return <div className="brand"><img className="brand-logo" src="/admin/astovia-logo.svg" alt="Astovia" width={192} height={64} /></div>;
 }
 
 function LoginForm() {
@@ -63,38 +59,19 @@ function LoginForm() {
   </section>;
 }
 
-// useView follows the view query parameter, including the browser's back
-// and forward buttons.
-function useView(): [View, (view: View) => void] {
-  const [view, setView] = useState<View>(() => parseView(location.search));
-  useEffect(() => {
-    const onPop = () => setView(parseView(location.search));
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-  }, []);
-  function navigate(next: View): void {
-    if (next !== view) history.pushState(null, '', viewPath(next));
-    setView(next);
-  }
-  return [view, navigate];
-}
-
-function ViewNav({ view, onChange }: { view: View; onChange: (view: View) => void }) {
+// NavLink marks the current screen with aria-current="page".
+function ViewNav() {
   return <nav className="view-nav" aria-label="画面">
-    {views.map((v) => <a key={v.value} href={viewPath(v.value)} className="view-tab" aria-current={view === v.value ? 'page' : undefined}
-      onClick={(event) => {
-        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
-        event.preventDefault();
-        onChange(v.value);
-      }}>{v.label}</a>)}
+    {views.map((v) => <NavLink key={v.value} to={v.path} end className="view-tab">{v.label}</NavLink>)}
   </nav>;
 }
 
 export default function App() {
   const state = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
   const signedIn = state.status === 'authenticated' && state.user !== null;
+  // The OAuth consent page replaces the dashboard on this path.
+  const consentPage = useMatch('/oauth/authorize') !== null;
   const dashboard = signedIn && !consentPage;
-  const [view, setView] = useView();
 
   return <div className="app-shell">
     <header className="site-header"><Brand /><span className="instance-label">あなたの環境、あなたのInbox。</span></header>
@@ -106,15 +83,18 @@ export default function App() {
       {dashboard ? <>
         <div className="dashboard-heading"><div><div className="section-label">YOUR WORKSPACE</div><h1>こんにちは、<span className="user-email">{state.user?.email}</span></h1><p className="intro">Astoviaにログインしています。</p></div><button className="button secondary" disabled={state.busy === 'logout'} onClick={() => { void auth.logout(); }}>{state.busy === 'logout' ? 'ログアウト中…' : 'ログアウト'}</button></div>
         {state.error ? <p className="notice error" role="alert">{state.error}</p> : null}
-        <ViewNav view={view} onChange={setView} />
-        {view === 'tasks' ? <ActionItemList /> : null}
-        {view === 'auto' ? <AutoItemList /> : null}
-        {view === 'settings' ? <>
-          <GitHubSettings />
-          <NotificationSettings />
-          <APITokenList />
-          <ConnectionList />
-        </> : null}
+        <ViewNav />
+        <Routes>
+          <Route index element={<ActionItemList />} />
+          <Route path="auto" element={<AutoItemList />} />
+          <Route path="settings" element={<>
+            <GitHubSettings />
+            <NotificationSettings />
+            <APITokenList />
+            <ConnectionList />
+          </>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
         <p className="privacy-note"><span aria-hidden="true">◈</span> この画面は、ログインした本人のためのスペースです。</p>
       </> : null}
     </main>

@@ -144,7 +144,7 @@ func (e *Engine) digest(ctx context.Context, userID string, settings store.Notif
 	}
 	body, url := strings.Join(contents, "・"), "/admin/"
 	if auto > 0 {
-		body, url = fmt.Sprintf("自動で処理 %d件／", auto)+body, "/admin/?view=auto"
+		body, url = fmt.Sprintf("自動で処理 %d件／", auto)+body, "/admin/auto"
 	}
 	n, err := newNotification(store.NotificationDigest, key, fmt.Sprintf("今日の未完了 %d件", open), body, url, now.Unix())
 	return n, err == nil, err
