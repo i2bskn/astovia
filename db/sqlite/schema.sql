@@ -158,6 +158,22 @@ CREATE TABLE "github_connections" (
 );
 -- Create index "github_connections_status_next_poll_idx" to table: "github_connections"
 CREATE INDEX "github_connections_status_next_poll_idx" ON "github_connections" ("status", "next_poll_at");
+-- Create "ai_settings" table
+CREATE TABLE "ai_settings" (
+  "user_id" text NOT NULL,
+  "generation" integer NOT NULL,
+  "provider" text NOT NULL,
+  "model" text NOT NULL,
+  "api_key_sealed" text NOT NULL,
+  "key_last4" text NOT NULL,
+  "status" text NOT NULL,
+  "last_error" text NULL,
+  "activated_at" integer NOT NULL,
+  "created_at" integer NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "ai_settings_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
 -- Create "web_push_subscriptions" table
 CREATE TABLE "web_push_subscriptions" (
   "id" text NOT NULL,

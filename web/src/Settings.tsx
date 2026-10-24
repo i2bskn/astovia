@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useId, useState, useSyncExternalStore } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from 'react-router';
+import { aiStatus, createAIClient } from './ai';
+import AISettings from './AISettings';
 import { auth, request } from './auth';
 import APITokenList from './APITokenList';
 import { createAPITokensClient } from './apiTokens';
 import ConnectionList from './ConnectionList';
 import GitHubSettings from './GitHubSettings';
-import { BellIcon, ChevronLeftIcon, ChevronRightIcon, PlugIcon, SourceIcon, UserIcon } from './icons';
+import { BellIcon, ChevronLeftIcon, ChevronRightIcon, PlugIcon, SourceIcon, SparkleIcon, UserIcon } from './icons';
 import { createIntegrationsClient } from './integrations';
 import NotificationSettings from './NotificationSettings';
 import { createOAuthClient } from './oauth';
@@ -14,11 +16,13 @@ import { clientsStatus, devicesStatus, githubStatus, settingsPageAt, settingsPag
 import type { SettingsPage } from './settingsPages';
 
 const integrations = createIntegrationsClient(request);
+const ai = createAIClient(request);
 const oauth = createOAuthClient(request);
 const apiTokens = createAPITokensClient(request);
 
 const pageIcons: Record<SettingsPage, () => React.JSX.Element> = {
   integrations: () => <SourceIcon size={20} />,
+  ai: () => <SparkleIcon />,
   notifications: () => <BellIcon />,
   'ai-clients': () => <PlugIcon />,
   account: () => <UserIcon />,
@@ -56,12 +60,13 @@ function SettingsIndex({ email }: { email: string }) {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([integrations.getGitHub(), integrations.listPushDevices(), oauth.listConnections(), apiTokens.listAPITokens()])
-      .then(([github, devices, connections, tokens]) => {
+    void Promise.allSettled([integrations.getGitHub(), ai.getAI(), integrations.listPushDevices(), oauth.listConnections(), apiTokens.listAPITokens()])
+      .then(([github, aiState, devices, connections, tokens]) => {
         if (!active) return;
         // A page whose state could not be read keeps its summary.
         setStatus({
           integrations: github.status === 'fulfilled' ? githubStatus(github.value) : undefined,
+          ai: aiState.status === 'fulfilled' ? aiStatus(aiState.value) : undefined,
           notifications: devices.status === 'fulfilled' ? devicesStatus(devices.value) : undefined,
           'ai-clients': connections.status === 'fulfilled' && tokens.status === 'fulfilled' ? clientsStatus(connections.value, tokens.value) : undefined,
         });
@@ -94,7 +99,7 @@ export default function Settings({ email }: { email: string }) {
     <header className="page-header settings-header" data-page={page ?? undefined}>
       {page ? <Link className="settings-back" to="/settings"><ChevronLeftIcon />設定</Link> : null}
       <h1>設定</h1>
-      <p className="page-lead"><Phrased text="連携するサービス、通知、AI クライアントからの接続を管理します。" /></p>
+      <p className="page-lead"><Phrased text="連携するサービス、AI、通知、AI クライアントからの接続を管理します。" /></p>
     </header>
     <nav className="settings-tabs" aria-label="設定の項目">
       {settingsPages.map((p) => <NavLink key={p.value} className="settings-tab" to={`/settings/${p.path}`}>{pageIcons[p.value]()}{p.label}</NavLink>)}
@@ -102,6 +107,7 @@ export default function Settings({ email }: { email: string }) {
     <Routes>
       <Route index element={phone ? <SettingsIndex email={email} /> : <Navigate to="/settings/integrations" replace />} />
       <Route path="integrations" element={<GitHubSettings />} />
+      <Route path="ai" element={<AISettings />} />
       <Route path="notifications" element={<NotificationSettings />} />
       <Route path="ai-clients" element={<div className="settings-stack"><ConnectionList /><APITokenList /></div>} />
       <Route path="account" element={<AccountSettings email={email} />} />

@@ -13,7 +13,7 @@ function authorizationRequest(): string {
 }
 
 // ConsentPage asks the signed-in user to approve an AI client's
-// authorization request (/admin/oauth/authorize?request=...).
+// authorization request (/consent?request=...).
 export default function ConsentPage({ email }: { email: string }) {
   const [value] = useState(authorizationRequest);
   const [consent, setConsent] = useState<Consent | null>(null);

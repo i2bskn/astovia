@@ -97,6 +97,46 @@ func (q *Queries) CountPushSubscriptions(ctx context.Context, userID string) (in
 	return count, err
 }
 
+const createAISettings = `-- name: CreateAISettings :execrows
+INSERT INTO ai_settings (user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+ON CONFLICT (user_id) DO NOTHING
+`
+
+type CreateAISettingsParams struct {
+	UserID       string
+	Generation   int64
+	Provider     string
+	Model        string
+	ApiKeySealed string
+	KeyLast4     string
+	Status       string
+	LastError    sql.NullString
+	ActivatedAt  int64
+	CreatedAt    int64
+	UpdatedAt    int64
+}
+
+func (q *Queries) CreateAISettings(ctx context.Context, arg CreateAISettingsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, createAISettings,
+		arg.UserID,
+		arg.Generation,
+		arg.Provider,
+		arg.Model,
+		arg.ApiKeySealed,
+		arg.KeyLast4,
+		arg.Status,
+		arg.LastError,
+		arg.ActivatedAt,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const createAPIToken = `-- name: CreateAPIToken :exec
 INSERT INTO api_tokens (id,user_id,name,token_hash,created_at,last_used_at)
 VALUES ($1,$2,$3,$4,$5,NULL)
@@ -453,6 +493,15 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
 	return err
 }
 
+const deleteAISettings = `-- name: DeleteAISettings :exec
+DELETE FROM ai_settings WHERE user_id = $1
+`
+
+func (q *Queries) DeleteAISettings(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteAISettings, userID)
+	return err
+}
+
 const deleteAPIToken = `-- name: DeleteAPIToken :execrows
 DELETE FROM api_tokens WHERE id = $1 AND user_id = $2
 `
@@ -738,6 +787,30 @@ type ExtendOAuthGrantParams struct {
 func (q *Queries) ExtendOAuthGrant(ctx context.Context, arg ExtendOAuthGrantParams) error {
 	_, err := q.db.ExecContext(ctx, extendOAuthGrant, arg.ExpiresAt, arg.ID, arg.UserID)
 	return err
+}
+
+const getAISettings = `-- name: GetAISettings :one
+SELECT user_id, generation, provider, model, api_key_sealed, key_last4, status, last_error, activated_at, created_at, updated_at FROM ai_settings
+WHERE user_id = $1
+`
+
+func (q *Queries) GetAISettings(ctx context.Context, userID string) (AiSetting, error) {
+	row := q.db.QueryRowContext(ctx, getAISettings, userID)
+	var i AiSetting
+	err := row.Scan(
+		&i.UserID,
+		&i.Generation,
+		&i.Provider,
+		&i.Model,
+		&i.ApiKeySealed,
+		&i.KeyLast4,
+		&i.Status,
+		&i.LastError,
+		&i.ActivatedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getAPITokenByHash = `-- name: GetAPITokenByHash :one
@@ -1736,6 +1809,30 @@ func (q *Queries) ListTrackedActionItems(ctx context.Context, arg ListTrackedAct
 	return items, nil
 }
 
+const lockAISettings = `-- name: LockAISettings :one
+SELECT user_id, generation, provider, model, api_key_sealed, key_last4, status, last_error, activated_at, created_at, updated_at FROM ai_settings
+WHERE user_id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockAISettings(ctx context.Context, userID string) (AiSetting, error) {
+	row := q.db.QueryRowContext(ctx, lockAISettings, userID)
+	var i AiSetting
+	err := row.Scan(
+		&i.UserID,
+		&i.Generation,
+		&i.Provider,
+		&i.Model,
+		&i.ApiKeySealed,
+		&i.KeyLast4,
+		&i.Status,
+		&i.LastError,
+		&i.ActivatedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const lockActionItem = `-- name: LockActionItem :one
 SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at FROM action_items
 WHERE id = $1 AND user_id = $2 FOR UPDATE
@@ -1952,6 +2049,45 @@ func (q *Queries) MarkOAuthCodeUsed(ctx context.Context, arg MarkOAuthCodeUsedPa
 	return result.RowsAffected()
 }
 
+const replaceAISettings = `-- name: ReplaceAISettings :execrows
+UPDATE ai_settings SET generation = $1, provider = $2, model = $3, api_key_sealed = $4, key_last4 = $5, status = $6, last_error = $7, activated_at = $8, updated_at = $9
+WHERE user_id = $10 AND generation = $11
+`
+
+type ReplaceAISettingsParams struct {
+	Generation        int64
+	Provider          string
+	Model             string
+	ApiKeySealed      string
+	KeyLast4          string
+	Status            string
+	LastError         sql.NullString
+	ActivatedAt       int64
+	UpdatedAt         int64
+	UserID            string
+	CurrentGeneration int64
+}
+
+func (q *Queries) ReplaceAISettings(ctx context.Context, arg ReplaceAISettingsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, replaceAISettings,
+		arg.Generation,
+		arg.Provider,
+		arg.Model,
+		arg.ApiKeySealed,
+		arg.KeyLast4,
+		arg.Status,
+		arg.LastError,
+		arg.ActivatedAt,
+		arg.UpdatedAt,
+		arg.UserID,
+		arg.CurrentGeneration,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const replaceGitHubConnection = `-- name: ReplaceGitHubConnection :exec
 UPDATE github_connections SET generation = $1, token_sealed = $2, token_last4 = $3, login = $4, scopes = $5, immediate_notify = $6, status = $7, last_error = $8, failure_count = $9, last_modified = $10, initial_import_pending = $11, next_poll_at = $12, last_synced_at = $13, last_reconciled_at = $14, last_tracked_at = $15, updated_at = $16
 WHERE user_id = $17
@@ -2158,6 +2294,33 @@ type UntrackSourceActionItemsParams struct {
 func (q *Queries) UntrackSourceActionItems(ctx context.Context, arg UntrackSourceActionItemsParams) error {
 	_, err := q.db.ExecContext(ctx, untrackSourceActionItems, arg.UpdatedAt, arg.UserID, arg.Source)
 	return err
+}
+
+const updateAISettingsStatus = `-- name: UpdateAISettingsStatus :execrows
+UPDATE ai_settings SET status = $1, last_error = $2, updated_at = $3
+WHERE user_id = $4 AND generation = $5
+`
+
+type UpdateAISettingsStatusParams struct {
+	Status     string
+	LastError  sql.NullString
+	UpdatedAt  int64
+	UserID     string
+	Generation int64
+}
+
+func (q *Queries) UpdateAISettingsStatus(ctx context.Context, arg UpdateAISettingsStatusParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateAISettingsStatus,
+		arg.Status,
+		arg.LastError,
+		arg.UpdatedAt,
+		arg.UserID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const updateActionItem = `-- name: UpdateActionItem :execrows

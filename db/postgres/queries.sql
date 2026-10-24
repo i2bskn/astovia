@@ -177,6 +177,24 @@ DELETE FROM github_connections WHERE user_id = sqlc.arg(user_id);
 SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
 WHERE status = 'active' AND next_poll_at <= sqlc.arg(now) AND user_id IN (SELECT id FROM users WHERE disabled = 0)
 ORDER BY next_poll_at, user_id LIMIT sqlc.arg(page_size);
+-- name: GetAISettings :one
+SELECT user_id, generation, provider, model, api_key_sealed, key_last4, status, last_error, activated_at, created_at, updated_at FROM ai_settings
+WHERE user_id = sqlc.arg(user_id);
+-- name: LockAISettings :one
+SELECT user_id, generation, provider, model, api_key_sealed, key_last4, status, last_error, activated_at, created_at, updated_at FROM ai_settings
+WHERE user_id = sqlc.arg(user_id) FOR UPDATE;
+-- name: CreateAISettings :execrows
+INSERT INTO ai_settings (user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(generation),sqlc.arg(provider),sqlc.arg(model),sqlc.arg(api_key_sealed),sqlc.arg(key_last4),sqlc.arg(status),sqlc.arg(last_error),sqlc.arg(activated_at),sqlc.arg(created_at),sqlc.arg(updated_at))
+ON CONFLICT (user_id) DO NOTHING;
+-- name: ReplaceAISettings :execrows
+UPDATE ai_settings SET generation = sqlc.arg(generation), provider = sqlc.arg(provider), model = sqlc.arg(model), api_key_sealed = sqlc.arg(api_key_sealed), key_last4 = sqlc.arg(key_last4), status = sqlc.arg(status), last_error = sqlc.arg(last_error), activated_at = sqlc.arg(activated_at), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(current_generation);
+-- name: UpdateAISettingsStatus :execrows
+UPDATE ai_settings SET status = sqlc.arg(status), last_error = sqlc.arg(last_error), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation);
+-- name: DeleteAISettings :exec
+DELETE FROM ai_settings WHERE user_id = sqlc.arg(user_id);
 -- name: CreatePushSubscription :exec
 INSERT INTO web_push_subscriptions (id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at)
 VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(endpoint),sqlc.arg(p256dh),sqlc.arg(auth),sqlc.arg(label),sqlc.arg(created_at),NULL);

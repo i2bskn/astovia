@@ -108,7 +108,7 @@ func TestEngineStale(t *testing.T) {
 			got[n.DedupeKey] = n
 		}
 		old, older := got["stale:old:1"], got["stale:older:2"]
-		if len(got) != 2 || old.Title != "未対応が3日続いています" || old.Body != "content old" || old.ActionItemID.String != "old" || old.URL != "/admin/" || older.Title != "未対応が7日続いています" || old.Kind != store.NotificationStale {
+		if len(got) != 2 || old.Title != "未対応が3日続いています" || old.Body != "content old" || old.ActionItemID.String != "old" || old.URL != "/" || older.Title != "未対応が7日続いています" || old.Kind != store.NotificationStale {
 			t.Fatalf("stale notifications: %+v", got)
 		}
 		// With a shorter period, the same items reach a new period.
@@ -153,7 +153,7 @@ func TestEngineDigest(t *testing.T) {
 			t.Fatalf("digests: %+v", list)
 		}
 		d := list[0]
-		if d.UserID != "tokyo-id" || d.DedupeKey != "digest:2026-10-24" || d.Title != "今日の未完了 4件" || d.Body != "content t4・content t3・content t2" || d.URL != "/admin/" || d.ActionItemID.Valid {
+		if d.UserID != "tokyo-id" || d.DedupeKey != "digest:2026-10-24" || d.Title != "今日の未完了 4件" || d.Body != "content t4・content t3・content t2" || d.URL != "/" || d.ActionItemID.Valid {
 			t.Fatalf("digest: %+v", d)
 		}
 
@@ -189,7 +189,7 @@ func TestEngineDigest(t *testing.T) {
 				next = &n
 			}
 		}
-		if next == nil || next.Title != "今日の未完了 0件" || next.Body != "自動で処理 4件／" || next.URL != "/admin/auto" {
+		if next == nil || next.Title != "今日の未完了 0件" || next.Body != "自動で処理 4件／" || next.URL != "/auto" {
 			t.Fatalf("second digest: %+v", next)
 		}
 
@@ -259,10 +259,10 @@ func TestDispatcher(t *testing.T) {
 		f.item("alice", "open", "open", now)
 		f.item("alice", "done", "done", now)
 		list := []store.Notification{
-			{ID: "n1", Kind: store.NotificationDetected, ActionItemID: sql.NullString{String: "open", Valid: true}, DedupeKey: "detected:open:1", Title: "レビュー依頼: o/r#1", Body: "b", URL: "/admin/", ScheduledAt: now, CreatedAt: now},
-			{ID: "n2", Kind: store.NotificationStale, ActionItemID: sql.NullString{String: "done", Valid: true}, DedupeKey: "stale:done:1", Title: "t", Body: "b", URL: "/admin/", ScheduledAt: now, CreatedAt: now},
-			{ID: "n3", Kind: store.NotificationDigest, DedupeKey: "digest:x", Title: "t", Body: "b", URL: "/admin/auto", ScheduledAt: now, CreatedAt: now},
-			{ID: "n4", Kind: store.NotificationStale, ActionItemID: sql.NullString{String: "open", Valid: true}, DedupeKey: "stale:open:1", Title: "t", Body: "b", URL: "/admin/", ScheduledAt: now + 60, CreatedAt: now},
+			{ID: "n1", Kind: store.NotificationDetected, ActionItemID: sql.NullString{String: "open", Valid: true}, DedupeKey: "detected:open:1", Title: "レビュー依頼: o/r#1", Body: "b", URL: "/", ScheduledAt: now, CreatedAt: now},
+			{ID: "n2", Kind: store.NotificationStale, ActionItemID: sql.NullString{String: "done", Valid: true}, DedupeKey: "stale:done:1", Title: "t", Body: "b", URL: "/", ScheduledAt: now, CreatedAt: now},
+			{ID: "n3", Kind: store.NotificationDigest, DedupeKey: "digest:x", Title: "t", Body: "b", URL: "/auto", ScheduledAt: now, CreatedAt: now},
+			{ID: "n4", Kind: store.NotificationStale, ActionItemID: sql.NullString{String: "open", Valid: true}, DedupeKey: "stale:open:1", Title: "t", Body: "b", URL: "/", ScheduledAt: now + 60, CreatedAt: now},
 		}
 		if err := f.s.EnqueueNotifications(ctx, "alice-id", list); err != nil {
 			t.Fatal(err)
@@ -302,7 +302,7 @@ func TestDispatcher(t *testing.T) {
 
 		// No subscription ends the notification.
 		ch.err = store.ErrNoSubscription
-		test := store.Notification{ID: "n5", Kind: store.NotificationTest, DedupeKey: "test:1", Title: "t", Body: "b", URL: "/admin/settings/notifications", ScheduledAt: f.now.Unix(), CreatedAt: f.now.Unix()}
+		test := store.Notification{ID: "n5", Kind: store.NotificationTest, DedupeKey: "test:1", Title: "t", Body: "b", URL: "/settings/notifications", ScheduledAt: f.now.Unix(), CreatedAt: f.now.Unix()}
 		if err := f.s.EnqueueNotifications(ctx, "alice-id", []store.Notification{test}); err != nil {
 			t.Fatal(err)
 		}
@@ -412,7 +412,7 @@ func TestWebPushSend(t *testing.T) {
 func TestWebPushPayload(t *testing.T) {
 	// The payload is checked before encryption through the library's
 	// plaintext: decode what the channel marshals.
-	b, err := json.Marshal(pushPayload{Title: truncate(strings.Repeat("あ", 100), 80), Body: truncate(strings.Repeat("い", 300), 200), URL: "/admin/", Tag: "t"})
+	b, err := json.Marshal(pushPayload{Title: truncate(strings.Repeat("あ", 100), 80), Body: truncate(strings.Repeat("い", 300), 200), URL: "/", Tag: "t"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,6 +423,36 @@ func TestWebPushPayload(t *testing.T) {
 	for kind, want := range map[string]int{store.NotificationDetected: 3600, store.NotificationTest: 3600, store.NotificationStale: 21600, store.NotificationDigest: 43200} {
 		if ttl(kind) != want {
 			t.Fatalf("%s TTL %d", kind, ttl(kind))
+		}
+	}
+}
+
+// Notification URLs saved before the web UI moved from /admin to / are
+// rewritten, and anything that is not a same-origin path opens /.
+func TestClickURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"/":                             "/",
+		"/auto":                         "/auto",
+		"/settings/notifications":       "/settings/notifications",
+		"/admin":                        "/",
+		"/admin/":                       "/",
+		"/admin/auto":                   "/auto",
+		"/admin/settings/notifications": "/settings/notifications",
+		"/a%09b":                        "/a%09b",
+		"/admin//x":                     "/",
+		"/admin/\\x":                    "/",
+		"//x":                           "/",
+		"/\\x":                          "/",
+		"https://x":                     "/",
+		"":                              "/",
+		"auto":                          "/",
+		"/a\tb":                         "/",
+		"/a\nb":                         "/",
+		"/a\x7fb":                       "/",
+		"/admin/a\x00b":                 "/",
+	} {
+		if got := clickURL(in); got != want {
+			t.Errorf("clickURL(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

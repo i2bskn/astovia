@@ -29,6 +29,20 @@ type ActionItem struct {
 	TrackedAt  sql.NullInt64
 }
 
+type AiSetting struct {
+	UserID       string
+	Generation   int64
+	Provider     string
+	Model        string
+	ApiKeySealed string
+	KeyLast4     string
+	Status       string
+	LastError    sql.NullString
+	ActivatedAt  int64
+	CreatedAt    int64
+	UpdatedAt    int64
+}
+
 type ApiToken struct {
 	ID         string
 	UserID     string

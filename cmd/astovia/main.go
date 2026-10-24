@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
 	"github.com/i2bskn/astovia/internal/github"
@@ -92,14 +93,15 @@ func run(args []string) error {
 	}
 }
 
-// startWorkers starts the background loops of serve: GitHub synchronization,
-// the notification engine, the dispatcher and the cleanup of sent
-// notifications. They share the authentication service's clock. They stop
-// when ctx is canceled; the returned group finishes when they have returned.
+// startWorkers starts the background loops of serve: GitHub synchronization
+// (with the AI judging mentions), the notification engine, the dispatcher
+// and the cleanup of sent notifications. They share the authentication
+// service's clock. They stop when ctx is canceled; the returned group
+// finishes when they have returned.
 func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.Service) *sync.WaitGroup {
 	now := func() time.Time { return a.Now() }
 	box := secretbox.New(c.Secret)
-	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), Box: box, Now: now}
+	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: ai.New(), Box: box, Now: now}
 	engine := &notify.Engine{Store: s, Now: now}
 	vapid := &notify.VAPID{Store: s, Box: box, Now: now}
 	dispatcher := &notify.Dispatcher{Store: s, Channel: notify.NewWebPush(s, vapid, c.PublicURL, now), Now: now}

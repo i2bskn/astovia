@@ -50,6 +50,22 @@ CREATE UNIQUE INDEX "action_items_user_source_key_key" ON "action_items" ("user_
 CREATE INDEX "action_items_user_status_created_idx" ON "action_items" ("user_id", "status", "created_at", "id");
 -- Create index "action_items_user_tracking_idx" to table: "action_items"
 CREATE INDEX "action_items_user_tracking_idx" ON "action_items" ("user_id", "source", "tracking", "status", "tracked_at");
+-- Create "ai_settings" table
+CREATE TABLE "ai_settings" (
+  "user_id" text NOT NULL,
+  "generation" bigint NOT NULL,
+  "provider" text NOT NULL,
+  "model" text NOT NULL,
+  "api_key_sealed" text NOT NULL,
+  "key_last4" text NOT NULL,
+  "status" text NOT NULL,
+  "last_error" text NULL,
+  "activated_at" bigint NOT NULL,
+  "created_at" bigint NOT NULL,
+  "updated_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "ai_settings_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
+);
 -- Create "api_tokens" table
 CREATE TABLE "api_tokens" (
   "id" text NOT NULL,

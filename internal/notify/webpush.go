@@ -125,11 +125,7 @@ func (w *WebPush) Send(ctx context.Context, userID string, m Message) (int, erro
 	if err != nil {
 		return 0, err
 	}
-	url := m.URL
-	if !strings.HasPrefix(url, "/admin/") {
-		url = "/admin/"
-	}
-	payload, err := json.Marshal(pushPayload{Title: truncate(m.Title, 80), Body: truncate(m.Body, 200), URL: url, Tag: m.Tag})
+	payload, err := json.Marshal(pushPayload{Title: truncate(m.Title, 80), Body: truncate(m.Body, 200), URL: clickURL(m.URL), Tag: m.Tag})
 	if err != nil {
 		return 0, err
 	}
@@ -170,4 +166,24 @@ func (w *WebPush) Send(ctx context.Context, userID string, m Message) (int, erro
 		return 0, store.ErrNoSubscription
 	}
 	return 0, failure
+}
+
+// clickURL returns the path opened when a notification is clicked. URLs saved
+// before the web UI moved from /admin to / are rewritten, and anything that is
+// not a plain same-origin path becomes /.
+func clickURL(u string) string {
+	if u == "/admin" {
+		u = "/"
+	} else if rest, ok := strings.CutPrefix(u, "/admin/"); ok {
+		u = "/" + rest
+	}
+	if !strings.HasPrefix(u, "/") || strings.HasPrefix(u, "//") {
+		return "/"
+	}
+	for _, c := range u {
+		if c < 0x20 || c == 0x7f || c == '\\' {
+			return "/"
+		}
+	}
+	return u
 }

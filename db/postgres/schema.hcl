@@ -481,6 +481,60 @@ table "github_connections" {
     columns = [column.status, column.next_poll_at]
   }
 }
+table "ai_settings" {
+  schema = schema.public
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "generation" {
+    type = bigint
+    null = false
+  }
+  column "provider" {
+    type = text
+    null = false
+  }
+  column "model" {
+    type = text
+    null = false
+  }
+  column "api_key_sealed" {
+    type = text
+    null = false
+  }
+  column "key_last4" {
+    type = text
+    null = false
+  }
+  column "status" {
+    type = text
+    null = false
+  }
+  column "last_error" {
+    type = text
+    null = true
+  }
+  column "activated_at" {
+    type = bigint
+    null = false
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "updated_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.user_id]
+  }
+  foreign_key "ai_settings_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+}
 table "web_push_subscriptions" {
   schema = schema.public
   column "id" {

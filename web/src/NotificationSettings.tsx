@@ -56,13 +56,35 @@ function SupportMessage({ text }: { text: string }) {
   return end > 0 && end < text.length ? <><strong>{text.slice(0, end)}</strong><Phrased text={text.slice(end)} /></> : <Phrased text={text} />;
 }
 
+// removeLegacyRegistration removes the service worker registered with the
+// /admin/ scope before the UI moved to /, with its push subscription, so that
+// this browser does not receive each notification twice. Failures are
+// ignored: the server drops the old subscription once it is gone.
+async function removeLegacyRegistration(): Promise<void> {
+  try {
+    const legacyScope = `${location.origin}/admin/`;
+    for (const registration of await navigator.serviceWorker.getRegistrations()) {
+      if (registration.scope !== legacyScope) continue;
+      try {
+        await (await registration.pushManager.getSubscription())?.unsubscribe();
+      } catch {
+        // Ignored; unregister below still stops the old worker.
+      }
+      await registration.unregister();
+    }
+  } catch {
+    // Ignored; see above.
+  }
+}
+
 // subscribe registers this browser for Web Push. It must be called from a
 // user action: Notification.requestPermission is called first, before any
 // await, so that browsers treat it as user initiated.
 async function subscribe(): Promise<'granted' | 'denied'> {
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') return 'denied';
-  const registration = await navigator.serviceWorker.register('/admin/sw.js', { scope: '/admin/' });
+  await removeLegacyRegistration();
+  const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
   const key = base64URLToBytes(await client.getPushPublicKey());
   let subscription = await registration.pushManager.getSubscription();
   // A subscription made for another server key (after a key change) cannot

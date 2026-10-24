@@ -1,8 +1,6 @@
-// Screens of the dashboard. React Router serves them under the /admin
-// basename; path is relative to it.
+// Screens of the web UI. React Router serves them at the root; path is the
+// absolute path of the screen.
 export type View = 'tasks' | 'auto' | 'settings';
-
-export const basename = '/admin';
 
 // short is the label under an icon in the narrow menus.
 export const views: readonly { value: View; label: string; short: string; path: string }[] = [
@@ -14,6 +12,5 @@ export const views: readonly { value: View; label: string; short: string; path: 
 // viewURL returns the absolute path of a view, for links made outside the
 // router such as notifications.
 export function viewURL(view: View): string {
-  const path = views.find((v) => v.value === view)?.path ?? '/';
-  return path === '/' ? `${basename}/` : basename + path;
+  return views.find((v) => v.value === view)?.path ?? '/';
 }

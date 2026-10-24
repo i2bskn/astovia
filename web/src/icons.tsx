@@ -21,6 +21,7 @@ export const DismissIcon = ({ size = 16 }: IconProps) => <Icon size={size}><circ
 export const BellIcon = ({ size }: IconProps) => <Icon size={size}><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15z" /><path d="M10 20.5a2.2 2.2 0 0 0 4 0" /></Icon>;
 export const PlugIcon = ({ size }: IconProps) => <Icon size={size}><path d="M9 3.5V8M15 3.5V8" /><path d="M6.5 8h11v3a5.5 5.5 0 0 1-11 0z" /><path d="M12 16.5v4" /></Icon>;
 export const KeyIcon = ({ size }: IconProps) => <Icon size={size}><circle cx="8" cy="15" r="4" /><path d="M11 12l8.5-8.5M16 7l2.5 2.5M14 9l2 2" /></Icon>;
+export const SparkleIcon = ({ size }: IconProps) => <Icon size={size}><path d="M12 4l1.8 4.7L18.5 10.5l-4.7 1.8L12 17l-1.8-4.7L5.5 10.5l4.7-1.8z" /><path d="M18.5 16v4M16.5 18h4" /></Icon>;
 export const UserIcon = ({ size }: IconProps) => <Icon size={size}><circle cx="12" cy="8.5" r="3.5" /><path d="M5 20a7 7 0 0 1 14 0" /></Icon>;
 export const SourceIcon = ({ size = 14 }: IconProps) => <Icon size={size}><circle cx="6" cy="6" r="2" /><circle cx="6" cy="18" r="2" /><circle cx="18" cy="8" r="2" /><path d="M6 8v8M18 10a6 6 0 0 1-6 6H8" /></Icon>;
 export const ChevronRightIcon = ({ size = 18 }: IconProps) => <Icon size={size}><path d="M9.5 6l6 6-6 6" /></Icon>;

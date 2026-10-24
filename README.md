@@ -26,7 +26,7 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は「PostgreSQLを使用する」の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -54,7 +54,7 @@ make up
 make logs
 ```
 
-[http://localhost:5173/admin/](http://localhost:5173/admin/)を開いてログインしてください。ホストへ公開するのはViteの`127.0.0.1:5173`だけです。Goはコンテナ内の`0.0.0.0:8080`で待ち受け、Viteが`/auth`・`/api`・`/healthz`・`/mcp`・`/oauth`・`/.well-known`を転送します。`/admin/oauth/authorize`（OAuthの同意ページ）は管理画面として表示します。ブラウザからのOriginは変更せず、Go側の公開URLも`http://localhost:5173`にそろえます。`localhost`と`127.0.0.1`は異なるOriginのため、ブラウザでは`localhost`を使用してください。
+[http://localhost:5173/](http://localhost:5173/)を開いてログインしてください。ホストへ公開するのはViteの`127.0.0.1:5173`だけです。Goはコンテナ内の`0.0.0.0:8080`で待ち受け、Viteが`/auth`・`/api`・`/healthz`・`/mcp`・`/oauth`・`/.well-known`を転送します。`/consent`（OAuthの同意ページ）はWeb画面として表示します。ブラウザからのOriginは変更せず、Go側の公開URLも`http://localhost:5173`にそろえます。`localhost`と`127.0.0.1`は異なるOriginのため、ブラウザでは`localhost`を使用してください。
 
 停止する場合は次を実行します。コンテナは削除せずに停止します（`docker compose stop`）。
 
@@ -152,7 +152,7 @@ make user-disable USER_EMAIL=alice@example.com
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、未送信の通知をすべて削除します。ユーザー無効化はGitHub連携も削除します（パスワード再設定では残します。「GitHub連携と通知」を参照）。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）、未送信の通知をすべて削除します。ユーザー無効化はGitHub連携も削除します（パスワード再設定では残します。「GitHub連携と通知」を参照）。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## 認証と運用上の制約
 
@@ -165,7 +165,7 @@ make user-disable USER_EMAIL=alice@example.com
 - リバースプロキシを使用する場合は、`ASTOVIA_PUBLIC_URL`にHTTPSのOriginを設定します。パス、認証情報、クエリ、フラグメントは指定できません。プロキシでTLSを終端し、バックエンドへの直接接続を制限してください。HTTPの公開URLはループバック開発用途だけに限ります。
 - ホスト名はASCIIのDNS名か明示的なIPアドレスを使用します。国際化ドメイン名はpunycodeで指定してください。数値ホストの省略表記、スコープ付きIPv6、IPv4を埋め込んだIPv6は拒否します。DNS名の大文字・小文字、標準ポート、ポートの数値表記、IPv6の表記は設定読込時に正規化し、Origin検証とJWT issuerで共用します。以前の正規化されていないissuerで発行したトークンは再ログインが必要です。正規化済みの設定には影響しません。
 
-`/admin/`という名前によって、役割管理、共有Inbox、他ユーザーの非公開情報へのアクセス権が付くことはありません。この初期実装には本番デプロイの設定を含みません。
+Web画面は`/`（タスク）、`/auto`（自動で処理したもの）、`/settings`（設定）で開きます。以前の版の`/admin/`以下のURL（ブックマークや送信待ちの通知を含む）は、対応する新しいURLへリダイレクトします。Web画面で役割管理、共有Inbox、他ユーザーの非公開情報へのアクセス権が付くことはありません。この初期実装には本番デプロイの設定を含みません。
 
 ## APIトークン
 
@@ -223,7 +223,7 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 | `GET /.well-known/oauth-protected-resource` | 上と同じ内容。`/mcp`が唯一の保護リソースなので、ルートにフォールバックしたクライアントにも同じリソースを示します（RFC 9728のURL導出とは厳密には一致しません） |
 | `GET /.well-known/oauth-authorization-server` | 認可サーバーメタデータ。`issuer`は`ASTOVIA_PUBLIC_URL` |
 | `POST /oauth/register` | 動的クライアント登録（DCR） |
-| `GET /oauth/authorize` | 認可要求。同意は管理画面の`/admin/oauth/authorize`で行います |
+| `GET /oauth/authorize` | 認可要求。同意はWeb画面の`/consent`で行います |
 | `POST /oauth/token` | `authorization_code`と`refresh_token`グラント |
 
 - スコープは`mcp`（`/mcp`で対応事項を閲覧・作成・更新する）と`offline_access`（リフレッシュトークンを発行する）の2つです。`mcp`は必須で、省略すると`mcp`とみなします。
@@ -242,7 +242,7 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 
 ## GitHub連携と通知
 
-GitHubで自分宛てになったレビュー依頼と割り当てを対応事項として取り込み、PR／Issueの状態から完了を確認できたら根拠付きで自動完了にします。判定はGitHubの通知APIと検索APIに基づく規則だけで行い、AIは使いません。新しく見つけた対応事項、未対応が続いている対応事項、朝のまとめはWeb Pushで通知します。
+GitHubで自分宛てになったレビュー依頼と割り当てを対応事項として取り込み、PR／Issueの状態から完了を確認できたら根拠付きで自動完了にします。レビュー依頼と割り当ての判定はGitHubの通知APIと検索APIに基づく規則だけで行い、AIは使いません。自分へのメンションは、AIの設定がある場合だけ、AIが読んでやることがあるかを判断します（「メンションの検出」を参照）。新しく見つけた対応事項、未対応が続いている対応事項、朝のまとめはWeb Pushで通知します。
 
 ### GitHubトークンを登録する
 
@@ -252,32 +252,57 @@ GitHubで自分宛てになったレビュー依頼と割り当てを対応事�
 
 登録時に`GET /user`でトークンとスコープを確かめ、無効なトークン、`repo`のないトークン、fine-grained tokenは保存しません。トークンは`ASTOVIA_JWT_SECRET`から派生した鍵（AES-256-GCM）で暗号化して保存し、画面・APIには末尾4文字だけを表示します。
 
-- 取り込むのは、自分個人へのレビュー依頼（チーム宛ては対象外）と、Issue／PRへの自分の割り当てです。メンションやコメントは扱いません。接続した直後は、検索APIで現在開いているものを取り込みます（このときは通知しません）。以後は通知APIを60秒ごと（GitHubが指定する間隔）に読み、15分ごとに検索で取りこぼしを補います。
+- 取り込むのは、自分個人へのレビュー依頼（チーム宛ては対象外）と、Issue／PRへの自分の割り当てと、AIの設定がある場合の自分へのメンションです。接続した直後は、検索APIで現在開いているものを取り込みます（このときは通知しません）。以後は通知APIを60秒ごと（GitHubが指定する間隔）に読み、15分ごとに検索で取りこぼしを補います。
 - 取り込んだ対応事項は5分ごとにGitHubの状態を確認し、PRのマージ・クローズ、Issueのクローズ、レビューの提出、レビュー依頼の取り消し、割り当ての解除を確認したら自動で完了にします。「自動で処理したもの」画面で理由と根拠のリンクを確認でき、「未完了に戻す」と、その対応事項は以後自動では完了・再オープンされません。自動で完了したものに再びレビュー依頼・割り当てが来ると、未完了に戻して通知します。手動で完了・対象外にしたものは変更しません。
 - トークンが無効になると同期を止め、画面に表示します。トークンを更新すると再開します。GitHubの利用上限に達した場合は、解除される時刻まで待ってから自動で再開します。
 - 別のGitHubアカウントのトークンに付け替えた場合と、接続を解除した場合、それまでの対応事項は残し、自動処理の対象から外します。
 - パスワード再設定ではGitHub連携を削除しません。アカウントを乗っ取られていた可能性がある場合は、設定画面で連携を確認し、必要なら解除してトークンを登録し直してください（GitHub側でもトークンを削除してください）。
 
+### メンションの検出
+
+AIの設定（「AIの設定」を参照）がある場合、GitHubのIssueとPull Requestで自分が`@`メンションされた投稿を見つけ、その投稿と前後の文脈をAIに読ませて、自分がやることがあるかを判断させます。
+
+- やることがあると判断したものは、AIが書いたタスク文で対応事項にして通知します（「検出したらすぐ通知する」がオンの場合）。やることがないと判断したもの（お礼・報告だけ、ccとして名前を挙げただけ、自分が既に返信している等）は、理由付きで「自動で処理したもの」に残します。「未完了に戻す」で戻せます。メンションから作った対応事項は、今は自動では完了しません。
+- 対象は、Issue／PRの本文、コメント、レビュー、レビューコメントです。Discussion、Projectsのdraft issue、コミットへのコメント、チーム宛てのメンション（`@org/team`）は対象外です。コードブロック・インラインコード・引用行・HTMLコメントの中の`@`は数えません。自分の投稿も対象外です。
+- 対象にするのは、直近72時間以内で、かつGitHub連携の接続とAPIキーの登録の24時間前より後の投稿です（本文は作成時刻、コメントは更新時刻、レビューは提出時刻で判定します。後から本文を編集して足したメンションは対象外です）。1つのIssue／PRで読むのはコメント・レビュー・レビューコメントのそれぞれ新しい200件までで、それより前のメンションと文脈は扱いません。連携を解除して接続し直すと、直前24時間のメンションをもう一度判定して重複する場合があります。
+- AIに送るのは、リポジトリ名（非公開のものを含む）、Issue／PRのタイトルと本文、メンションした投稿と前の10件・後の3件の投稿の本文、投稿者のGitHubユーザー名と日時です。長い本文は途中で切ります。
+- AIを呼ぶのは1回の同期で3回までです。残りと、AIに一時的につながらなかったもの（混雑・上限・タイムアウト等）は次の同期で読み直します。2時間より古い投稿でAIにつながらなかった場合と、6時間以上読み直しが続いた場合は、「メンションを確認: …」という対応事項にします。通知APIの3ページを超える通知が一度に届いた場合、読み直す前に範囲から外れたメンションは取りこぼすことがあります。
+- APIキーが無効・残高不足・モデルを使えない場合は、その同期のメンションを「メンションを確認: …」にし、以後はAIの設定を直すまでメンションを扱いません。この間のメンションは、キーを直した後も処理されないことがあります。AIの設定が無い間に届いたメンションも、後から処理しません。
+
 ### 通知（Web Push）
 
 - 「設定」の「通知」で「この端末で通知を受け取る」を押すと、ブラウザの通知許可を求め、この端末を登録します。1ユーザーあたり20台まで登録できます。「テスト通知を送る」で届くか確認できます（1分に3回まで）。
 - Web PushはHTTPSのページでだけ使えます（`localhost`は例外）。iPhone／iPadはiOS 16.4以降で、共有メニューの「ホーム画面に追加」で追加したAstoviaから登録してください。
-- 通知の内容は、GitHubで新しく見つけた対応事項（「検出したらすぐ通知する」をオフにすると送りません）、作成から一定日数（既定3日）を過ぎても未完了の対応事項、毎日決まった時刻（既定8時）の朝のまとめ（未完了の件数と、前回以降に自動で処理した件数）です。時刻と日数とタイムゾーンは「通知」で変更できます。サーバーが止まっていて朝のまとめの時刻を過ぎた日は、まとめを送りません。
+- Web画面のURLが`/admin/`から`/`に変わりました。以前の版でホーム画面に追加していた場合は、いったん削除してから追加し直し、追加し直したAstoviaで「この端末で通知を受け取る」をもう一度押してください。ブラウザのまま使っている端末は、登録済みの通知が新しい画面を開くよう自動で切り替わります（「この端末で通知を受け取る」を押し直しても二重には届きません）。
+- 通知の内容は、GitHubで新しく見つけた対応事項（「検出したらすぐ通知する」をオフにすると送りません）、作成から一定日数（既定3日）を過ぎても未完了の対応事項、毎日決まった時刻（既定8時）の朝のまとめ（未完了の件数と、前回以降に自動で処理した件数。対応不要と判断したメンションも含みます）です。時刻と日数とタイムゾーンは「通知」で変更できます。サーバーが止まっていて朝のまとめの時刻を過ぎた日は、まとめを送りません。
 - VAPIDの鍵は初回に自動で作成し、DB（`instance_secrets`）に暗号化して保存します。VAPIDの連絡先（`sub`）には`ASTOVIA_PUBLIC_URL`がHTTPSならそのURLを、そうでなければ`mailto:webpush@localhost`を使います。後者はローカル開発用で、AppleのPushサービスでは送信に失敗する場合があります。
 - 送信先は、名前解決後のアドレスがグローバルなものだけです（プライベートアドレス、ループバック等には送りません）。送信に失敗した通知は最大4回まで再送し、Pushサービスが購読の終了を返した端末は登録を削除します。送信済みの通知は30日後に削除します。
 
 ### 運用上の注意
 
 - バックグラウンド処理（GitHubの同期、通知の判定と送信）は`serve`のプロセス内で動きます。**同じDBに対してAstoviaのプロセスを1つだけ起動してください。**複数のプロセスを起動すると、同じ通知を重複して送る場合があります。
-- `ASTOVIA_JWT_SECRET`を変更すると、保存したGitHubトークンとVAPIDの秘密鍵を復号できなくなります。GitHub連携は「保存したトークンを読み出せません」と表示して止まるため、トークンを登録し直してください。VAPIDの鍵は自動で作り直し、すべての端末の登録を削除するため、各端末で「この端末で通知を受け取る」をもう一度押してください。
+- `ASTOVIA_JWT_SECRET`を変更すると、保存したGitHubトークン、AIのAPIキーとVAPIDの秘密鍵を復号できなくなります。GitHub連携は「保存したトークンを読み出せません」と表示して止まるため、トークンを登録し直してください。AIの設定も「保存した API キーを読み出せません」と表示して止まるため、キーを登録し直してください。VAPIDの鍵は自動で作り直し、すべての端末の登録を削除するため、各端末で「この端末で通知を受け取る」をもう一度押してください。
+
+## AIの設定
+
+GitHubのメンションを読んで、自分がやることがあるかを判断するAIを、ユーザーごとに設定します。今の接続先はAnthropicだけです。
+
+1. [Anthropic ConsoleのAPIキーのページ](https://platform.claude.com/settings/keys)でAPIキーを作ります。
+2. 管理画面の「設定」→「AI」にキーを貼り付け、モデル（Claude Haiku 5.5（既定）、Claude Sonnet 5.5、Claude Opus 5.5）を選んで「保存」を押します。
+
+- 保存時に、そのキーで選んだモデルを使えるかをAnthropicのModels API（トークンを消費しません）で確かめます。キーは`ASTOVIA_JWT_SECRET`から派生した鍵で暗号化して保存し、画面・APIには末尾4文字だけを表示します。`ASTOVIA_JWT_SECRET`を変えるとキーを復号できなくなるため、登録し直してください。サーバーの環境変数（`ANTHROPIC_API_KEY`等）は使いません。
+- 判断のため、メンションのあったIssue／PRについて、リポジトリ名（非公開のものを含む）、タイトルと本文、コメントの本文、投稿者のGitHubユーザー名と日時がAnthropicに送られます。費用は登録したキーの組織に請求されます。利用量の集計や上限はありません。
+- AIが書いたタスク文と要約は外部の文章をもとにしています。画面ではテキストとして表示し、MCPでは他の対応事項と同じく`content`として返します。第三者がコメントに「対応不要」などと書くと、AIが対応不要と判断する場合があります。その結果は「自動で処理したもの」に残り、未完了に戻せます。
+- パスワード再設定とユーザー無効化では、AIの設定を削除します（乗っ取られていた間に登録されたキーで、本文が他人の組織へ送られ続けないようにするためです）。
 
 ## URLと応答
 
 | URL | 動作 |
 | --- | --- |
-| `GET /` | `/admin/`へリダイレクト |
+| `GET /`、`/auto`、`/settings`、`/settings/<page>`、`/consent` | 埋め込みWeb画面（`index.html`） |
+| `GET /assets/*`、`/favicon.ico`等 | 埋め込みWeb画面の静的ファイル（`/sw.js`、`/manifest.webmanifest`を含む）。存在しないファイルは404 |
+| `GET /admin/*` | 以前の版のURL。対応する新しいURLへ308でリダイレクト（不明なものは`/`へ）。`/admin/oauth/authorize`は`/consent`へ。`/admin/sw.js`は古い登録の更新用に`/sw.js`と同じ内容を返す |
 | `GET /healthz` | プロセスの稼働確認のみ。非公開情報は返さない |
-| `GET /admin/*` | 埋め込み管理画面。存在しないアセットは404 |
 | `POST /auth/login` | 本文は`{ "email": "alice@example.com", "password": "…" }` |
 | `POST /auth/refresh` | Cookieのトークンを更新。本文は`{}` |
 | `POST /auth/logout` | セッション失効とCookie削除。本文は`{}` |
@@ -297,6 +322,9 @@ GitHubで自分宛てになったレビュー依頼と割り当てを対応事�
 | `PUT /api/v1/integrations/github` | 本文`{token, immediate_notify?}`（16KiB以内）でトークンを登録・置き換える。無効なトークンは400`github_token_invalid`、`repo`がなければ400`github_scopes_missing`、GitHubに届かなければ503`github_unavailable`。Access JWTが必要 |
 | `PATCH /api/v1/integrations/github` | 本文`{immediate_notify}`だけを受け付ける。未接続は404。Access JWTが必要 |
 | `DELETE /api/v1/integrations/github` | 連携を解除し204を返す。未接続でも204。Access JWTが必要 |
+| `GET /api/v1/ai` | AIの設定。未設定は`{configured: false}`、設定済みは`{configured, provider, model, key_last4, status, last_error, updated_at}`。キー本体は返さない。Access JWTが必要 |
+| `PUT /api/v1/ai` | 本文`{api_key?, model}`（16KiB以内）でAPIキーとモデルを登録・変更する。`api_key`を省くと保存済みのキーでモデルだけを変える。保存前にAnthropicで確かめ、無効なキーは400`ai_key_invalid`、モデルを使えなければ400`ai_model_unavailable`、残高・支払いの問題は400`ai_billing`、Anthropicに届かなければ503`ai_unavailable`、別の要求で設定が変わっていれば409`ai_conflict`。Access JWTが必要 |
+| `DELETE /api/v1/ai` | AIの設定を削除し204を返す。未設定でも204。Access JWTが必要 |
 | `GET /api/v1/push/public-key` | VAPIDの公開鍵`{public_key}`。Access JWTが必要 |
 | `GET /api/v1/push/subscriptions` | 通知を受け取る端末の一覧`{subscriptions: [{id, label, created_at, last_used_at}]}`。Access JWTが必要 |
 | `POST /api/v1/push/subscriptions` | 本文`{endpoint, keys: {p256dh, auth}, label?, timezone?}`で端末を登録する。新規は201、登録済みの端末は200。20台に達していると409`too_many_subscriptions`。Access JWTが必要 |
@@ -307,7 +335,7 @@ GitHubで自分宛てになったレビュー依頼と割り当てを対応事�
 | `GET /.well-known/oauth-protected-resource/mcp` | MCPの保護リソースメタデータ（RFC 9728）。`/.well-known/oauth-protected-resource`も同じ内容 |
 | `GET /.well-known/oauth-authorization-server` | 認可サーバーのメタデータ（RFC 8414） |
 | `POST /oauth/register` | クライアント登録（RFC 7591）。`application/json`、64KiB以内。成功は201 |
-| `GET /oauth/authorize` | 認可要求。検証後に同意ページ`/admin/oauth/authorize`へ302 |
+| `GET /oauth/authorize` | 認可要求。検証後に同意ページ`/consent`へ302 |
 | `POST /oauth/token` | トークン発行（`authorization_code`／`refresh_token`）。`application/x-www-form-urlencoded`、64KiB以内 |
 | `POST /mcp` | MCP（Streamable HTTP、ステートレス）。OAuthのアクセストークンかAPIトークンが必要 |
 

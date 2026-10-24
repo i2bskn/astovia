@@ -11,6 +11,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"sort"
@@ -136,13 +137,13 @@ func testHTTP(t *testing.T, driver string) {
 	if w.Code != 401 {
 		t.Fatal("logout did not revoke access")
 	}
-	for _, p := range []string{"/api/nope", "/integrations/nope", "/admin/assets/missing.js", "/admin/missing.css"} {
+	for _, p := range []string{"/api/nope", "/api/v1/unknown", "/integrations/nope", "/assets/missing.js", "/missing.css", "/index.html", "/foo", "/settings/foo/bar"} {
 		w = request("GET", p, "", "", "", "", "")
 		if w.Code != 404 || strings.Contains(w.Body.String(), "<html>") {
 			t.Fatalf("fallback escaped: %s %d", p, w.Code)
 		}
 	}
-	for _, p := range []string{"/admin/", "/admin/connections"} {
+	for _, p := range []string{"/", "/auto", "/settings/foo", "/consent"} {
 		w = request("GET", p, "", "", "", "", "")
 		if w.Code != 200 || !strings.Contains(w.Body.String(), "<html>") {
 			t.Fatal(p, w.Code)
@@ -437,11 +438,8 @@ func TestRedirectsAndBearer(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := New(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}})
-	for path, status := range map[string]int{"/": http.StatusFound, "/admin": http.StatusMovedPermanently} {
-		w := serve(t, h, httptest.NewRequest("GET", path, nil))
-		if w.Code != status || w.Header().Get("Location") != "/admin/" {
-			t.Fatalf("%s: %d Location=%q", path, w.Code, w.Header().Get("Location"))
-		}
+	if w := serve(t, h, httptest.NewRequest("GET", "/admin", nil)); w.Code != http.StatusPermanentRedirect || w.Header().Get("Location") != "/" {
+		t.Fatalf("/admin: %d Location=%q", w.Code, w.Header().Get("Location"))
 	}
 	for _, v := range []string{"", "Token abc", "bearer abc", "Bearer", "Bearer ", "Basic YWxpY2U6cHc="} {
 		r := httptest.NewRequest("GET", "/api/v1/me", nil)
@@ -456,25 +454,105 @@ func TestRedirectsAndBearer(t *testing.T) {
 }
 
 func TestStaticAssets(t *testing.T) {
-	assets := fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}, "assets/app.js": {Data: []byte("void 0")}}
+	assets := fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}, "assets/app.js": {Data: []byte("void 0")}, "favicon.svg": {Data: []byte("<svg/>")}, ".env.js": {Data: []byte("secret")}, "LICENSE": {Data: []byte("text")}}
 	h := New(config.Config{PublicURL: "https://astovia.test"}, nil, assets)
-	w := serve(t, h, httptest.NewRequest("GET", "/admin/assets/app.js", nil))
+	w := serve(t, h, httptest.NewRequest("GET", "/assets/app.js", nil))
 	if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Type"), "javascript") || !strings.Contains(w.Header().Get("Cache-Control"), "immutable") || w.Body.String() != "void 0" {
 		t.Fatalf("app.js: %d %v", w.Code, w.Header())
 	}
-	for _, path := range []string{"/admin/", "/admin/some/route"} {
-		w = serve(t, h, httptest.NewRequest("GET", path, nil))
-		if w.Code != 200 || w.Body.String() != "<html>Astovia</html>" || w.Header().Get("Cache-Control") != "no-store" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {
-			t.Fatalf("%s: %d %v %s", path, w.Code, w.Header(), w.Body.String())
+	w = serve(t, h, httptest.NewRequest("HEAD", "/favicon.svg", nil))
+	if w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "image/svg+xml") || !strings.Contains(w.Header().Get("Cache-Control"), "immutable") {
+		t.Fatalf("favicon.svg: %d %v", w.Code, w.Header())
+	}
+	for _, path := range []string{"/", "/auto", "/auto/", "/settings", "/settings/", "/settings/notifications", "/settings/ai-clients/", "/settings/foo", "/consent", "/consent/"} {
+		for _, method := range []string{"GET", "HEAD"} {
+			w = serve(t, h, httptest.NewRequest(method, path, nil))
+			if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {
+				t.Fatalf("%s %s: %d %v", method, path, w.Code, w.Header())
+			}
+			if method == "GET" && w.Body.String() != "<html>Astovia</html>" {
+				t.Fatalf("%s %s: %s", method, path, w.Body.String())
+			}
 		}
 	}
-	w = serve(t, h, httptest.NewRequest("GET", "/admin/missing.js", nil))
-	if w.Code != 404 || errorCode(t, w) != "not_found" {
-		t.Fatalf("missing.js: %d %s", w.Code, w.Body.String())
+	for _, path := range []string{"/missing.js", "/index.html", "/.env.js", "/LICENSE", "/foo", "/assets", "/assets/", "/settings/foo/bar", "/settings/Foo", "/auto/x", "/consent/x", "/api/v1/unknown", "/some/route"} {
+		w = serve(t, h, httptest.NewRequest("GET", path, nil))
+		if w.Code != 404 || errorCode(t, w) != "not_found" {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+	}
+	for _, path := range []string{"/", "/auto", "/settings/notifications", "/assets/app.js", "/favicon.svg", "/admin", "/admin/auto"} {
+		w = serve(t, h, httptest.NewRequest("POST", path, nil))
+		if w.Code != 405 || w.Header().Get("Allow") != "GET, HEAD" || errorCode(t, w) != "method_not_allowed" {
+			t.Fatalf("POST %s: %d %v %s", path, w.Code, w.Header(), w.Body.String())
+		}
 	}
 	h = New(config.Config{PublicURL: "https://astovia.test"}, nil, fstest.MapFS{"assets/app.js": {Data: []byte("void 0")}})
-	w = serve(t, h, httptest.NewRequest("GET", "/admin/", nil))
+	w = serve(t, h, httptest.NewRequest("GET", "/", nil))
 	if w.Code != 404 || errorCode(t, w) != "not_found" {
 		t.Fatalf("missing index.html: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// The screens moved from /admin to /. Legacy URLs are redirected with 308
+// only to fixed or validated same-origin paths; anything else goes to /.
+func TestLegacyAdminRedirects(t *testing.T) {
+	assets := fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}, "assets/app.js": {Data: []byte("void 0")}, "favicon.svg": {Data: []byte("<svg/>")}, "sw.js": {Data: []byte("self")}}
+	h := New(config.Config{PublicURL: "https://astovia.test"}, nil, assets)
+	for path, want := range map[string]string{
+		"/admin":                        "/",
+		"/admin/":                       "/",
+		"/admin/auto":                   "/auto",
+		"/admin/auto/":                  "/auto",
+		"/admin/settings":               "/settings",
+		"/admin/settings/":              "/settings",
+		"/admin/settings/notifications": "/settings/notifications",
+		"/admin/settings/ai-clients/":   "/settings/ai-clients",
+		"/admin/settings/Foo":           "/",
+		"/admin/settings/a/b":           "/",
+		"/admin/settings/" + strings.Repeat("a", 33):       "/",
+		"/admin/oauth/authorize?request=a+b%2Fc&x=1":       "/consent?request=" + url.QueryEscape("a b/c"),
+		"/admin/oauth/authorize/?request=r1&request=r2":    "/consent?request=r1",
+		"/admin/oauth/authorize":                           "/consent",
+		"/admin/oauth/authorize?request=x&redirect=//evil": "/consent?request=x",
+		"/admin/assets/app.js":                             "/assets/app.js",
+		"/admin/favicon.svg":                               "/favicon.svg",
+		"/admin/missing.css":                               "/",
+		"/admin/assets/missing.js":                         "/",
+		"/admin/index.html":                                "/",
+		"/admin/connections":                               "/",
+		"/admin/auto?x=1":                                  "/auto",
+		"/admin/%5Cevil.example":                           "/",
+		"/admin/%09/evil.example":                          "/",
+	} {
+		for _, method := range []string{"GET", "HEAD"} {
+			w := serve(t, h, httptest.NewRequest(method, path, nil))
+			if w.Code != http.StatusPermanentRedirect || w.Header().Get("Location") != want {
+				t.Fatalf("%s %s: %d Location=%q, want %q", method, path, w.Code, w.Header().Get("Location"), want)
+			}
+		}
+	}
+	// ServeMux redirects non-clean paths first; whichever handler answers,
+	// the location must stay a same-origin path.
+	for _, path := range []string{"/admin//evil.example", "/admin/https://evil.example", "/admin/settings/%2F%2Fevil", "/admin/%5C%5Cevil.example", "/admin/..%2F..%2Fevil"} {
+		for hops := 0; ; hops++ {
+			w := serve(t, h, httptest.NewRequest("GET", path, nil))
+			if w.Code < 300 || w.Code > 399 {
+				break
+			}
+			loc := w.Header().Get("Location")
+			u, err := url.Parse(loc)
+			if err != nil || u.Scheme != "" || u.Host != "" || !strings.HasPrefix(loc, "/") || strings.HasPrefix(loc, "//") || strings.HasPrefix(loc, "/\\") || strings.ContainsAny(loc, "\\\t\n\r") {
+				t.Fatalf("%s: unsafe Location %q", path, loc)
+			}
+			if hops > 3 {
+				t.Fatalf("%s: redirect loop at %q", path, loc)
+			}
+			path = loc
+		}
+	}
+	w := serve(t, h, httptest.NewRequest("GET", "/admin/sw.js", nil))
+	if w.Code != 200 || w.Body.String() != "self" || w.Header().Get("Cache-Control") != "no-cache" || !strings.Contains(w.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("/admin/sw.js: %d %v", w.Code, w.Header())
 	}
 }

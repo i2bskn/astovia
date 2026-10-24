@@ -29,9 +29,12 @@ const (
 	errorBodyLimit = 64 << 10
 	// MinPollInterval is the shortest notification polling interval in
 	// seconds, also used when GitHub does not send X-Poll-Interval.
-	MinPollInterval     = 60
-	notificationPages   = 3
-	searchPages         = 2
+	MinPollInterval   = 60
+	notificationPages = 3
+	searchPages       = 2
+	// recentPages is how many of the last pages of comments and reviews
+	// RecentReviews, IssueComments and ReviewComments read.
+	recentPages         = 2
 	secondaryRetryDelay = 60 * time.Second
 )
 
@@ -85,6 +88,9 @@ func New(now func() time.Time) *Client {
 
 // Thread is the part of a notification thread the integration uses.
 type Thread struct {
+	// ID is the thread ID and UpdatedAt the time of its latest update.
+	ID          string
+	UpdatedAt   time.Time
 	Reason      string
 	SubjectType string
 	// SubjectURL is the API URL of the subject, or empty when it is null.
@@ -102,21 +108,41 @@ type Pull struct {
 }
 
 // Issue is the part of an issue (or of a pull request read through the
-// issues API) the integration uses.
+// issues API) the integration uses. Merged is set for a merged pull
+// request. Login is empty when the author was deleted.
 type Issue struct {
 	State     string
 	Title     string
 	HTMLURL   string
 	Assignees []string
 	IsPull    bool
+	Merged    bool
+	Body      string
+	Login     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Review is a pull request review. SubmittedAt is nil for pending reviews.
+// Login is empty when the author was deleted.
 type Review struct {
+	ID          int64
 	Login       string
+	Body        string
 	SubmittedAt *time.Time
 	HTMLURL     string
 	State       string
+}
+
+// Comment is an issue comment or a pull request review comment. Login is
+// empty when the author was deleted.
+type Comment struct {
+	ID        int64
+	Login     string
+	Body      string
+	HTMLURL   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // SearchItem is an issue or pull request found by SearchIssues. Owner and
@@ -399,8 +425,10 @@ func (c *Client) Notifications(ctx context.Context, token, lastModified string, 
 			return nil, "", 0, false, e
 		}
 		var list []struct {
-			Reason  string `json:"reason"`
-			Subject struct {
+			ID        string    `json:"id"`
+			UpdatedAt time.Time `json:"updated_at"`
+			Reason    string    `json:"reason"`
+			Subject   struct {
 				Type string  `json:"type"`
 				URL  *string `json:"url"`
 			} `json:"subject"`
@@ -409,7 +437,7 @@ func (c *Client) Notifications(ctx context.Context, token, lastModified string, 
 			return nil, "", 0, false, fmt.Errorf("github: invalid JSON: %w", e)
 		}
 		for _, t := range list {
-			th := Thread{Reason: t.Reason, SubjectType: t.Subject.Type}
+			th := Thread{ID: t.ID, UpdatedAt: t.UpdatedAt, Reason: t.Reason, SubjectType: t.Subject.Type}
 			if t.Subject.URL != nil {
 				th.SubjectURL = *t.Subject.URL
 			}
@@ -454,52 +482,155 @@ func (c *Client) Issue(ctx context.Context, token, owner, repo string, number in
 		return Issue{}, err
 	}
 	var i struct {
-		State       string          `json:"state"`
-		Title       string          `json:"title"`
-		HTMLURL     string          `json:"html_url"`
-		Assignees   []*userJSON     `json:"assignees"`
-		PullRequest json.RawMessage `json:"pull_request"`
+		State       string      `json:"state"`
+		Title       string      `json:"title"`
+		HTMLURL     string      `json:"html_url"`
+		Assignees   []*userJSON `json:"assignees"`
+		PullRequest *struct {
+			MergedAt *time.Time `json:"merged_at"`
+		} `json:"pull_request"`
+		Body      *string   `json:"body"`
+		User      *userJSON `json:"user"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
 	}
 	if _, err = c.getJSON(ctx, token, c.BaseURL+path+"/issues/"+strconv.Itoa(number), &i); err != nil {
 		return Issue{}, err
 	}
-	return Issue{State: i.State, Title: i.Title, HTMLURL: i.HTMLURL, Assignees: logins(i.Assignees), IsPull: len(i.PullRequest) > 0 && string(i.PullRequest) != "null"}, nil
+	out := Issue{State: i.State, Title: i.Title, HTMLURL: i.HTMLURL, Assignees: logins(i.Assignees), IsPull: i.PullRequest != nil, CreatedAt: i.CreatedAt, UpdatedAt: i.UpdatedAt}
+	out.Merged = i.PullRequest != nil && i.PullRequest.MergedAt != nil
+	if i.Body != nil {
+		out.Body = *i.Body
+	}
+	if i.User != nil {
+		out.Login = i.User.Login
+	}
+	return out, nil
 }
 
 // Reviews returns the reviews of a pull request on the last page of 100
 // (the newest ones), or on the first page when there is only one.
 func (c *Client) Reviews(ctx context.Context, token, owner, repo string, number int) ([]Review, error) {
+	return c.reviews(ctx, token, owner, repo, number, 1)
+}
+
+// RecentReviews returns the reviews of a pull request on the last two pages
+// of 100, oldest first.
+func (c *Client) RecentReviews(ctx context.Context, token, owner, repo string, number int) ([]Review, error) {
+	return c.reviews(ctx, token, owner, repo, number, recentPages)
+}
+
+func (c *Client) reviews(ctx context.Context, token, owner, repo string, number, pages int) ([]Review, error) {
 	path, err := c.repoPath(owner, repo)
 	if err != nil {
 		return nil, err
 	}
 	path += "/pulls/" + strconv.Itoa(number) + "/reviews"
 	type reviewJSON struct {
+		ID          int64      `json:"id"`
 		User        *userJSON  `json:"user"`
+		Body        *string    `json:"body"`
 		SubmittedAt *time.Time `json:"submitted_at"`
 		HTMLURL     string     `json:"html_url"`
 		State       string     `json:"state"`
 	}
 	var list []reviewJSON
-	r, err := c.getJSON(ctx, token, c.BaseURL+path+"?per_page=100", &list)
-	if err != nil {
+	if err = lastPages(ctx, c, token, path, pages, &list); err != nil {
 		return nil, err
-	}
-	if last, ok := c.pageLink(r, "last", path); ok {
-		list = nil
-		if _, err = c.getJSON(ctx, token, last, &list); err != nil {
-			return nil, err
-		}
 	}
 	out := make([]Review, 0, len(list))
 	for _, v := range list {
-		rv := Review{SubmittedAt: v.SubmittedAt, HTMLURL: v.HTMLURL, State: v.State}
+		rv := Review{ID: v.ID, SubmittedAt: v.SubmittedAt, HTMLURL: v.HTMLURL, State: v.State}
 		if v.User != nil {
 			rv.Login = v.User.Login
+		}
+		if v.Body != nil {
+			rv.Body = *v.Body
 		}
 		out = append(out, rv)
 	}
 	return out, nil
+}
+
+// IssueComments returns the comments of an issue or pull request on the
+// last two pages of 100, oldest first.
+func (c *Client) IssueComments(ctx context.Context, token, owner, repo string, number int) ([]Comment, error) {
+	return c.comments(ctx, token, owner, repo, "/issues/"+strconv.Itoa(number)+"/comments")
+}
+
+// ReviewComments returns the review comments of a pull request on the last
+// two pages of 100, oldest first.
+func (c *Client) ReviewComments(ctx context.Context, token, owner, repo string, number int) ([]Comment, error) {
+	return c.comments(ctx, token, owner, repo, "/pulls/"+strconv.Itoa(number)+"/comments")
+}
+
+func (c *Client) comments(ctx context.Context, token, owner, repo, suffix string) ([]Comment, error) {
+	path, err := c.repoPath(owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	var list []struct {
+		ID        int64     `json:"id"`
+		User      *userJSON `json:"user"`
+		Body      *string   `json:"body"`
+		HTMLURL   string    `json:"html_url"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if err = lastPages(ctx, c, token, path+suffix, recentPages, &list); err != nil {
+		return nil, err
+	}
+	out := make([]Comment, 0, len(list))
+	for _, v := range list {
+		cm := Comment{ID: v.ID, HTMLURL: v.HTMLURL, CreatedAt: v.CreatedAt, UpdatedAt: v.UpdatedAt}
+		if v.User != nil {
+			cm.Login = v.User.Login
+		}
+		if v.Body != nil {
+			cm.Body = *v.Body
+		}
+		out = append(out, cm)
+	}
+	return out, nil
+}
+
+// lastPages reads the last page of 100 of a list endpoint into out (a
+// pointer to a slice), or the last two pages oldest first when pages is 2.
+// The first page is read to learn the last one from its Link header; the
+// page before the last comes from the last page's prev link, or is the
+// first page itself. Every URL must pass pageLink, so the token is never
+// sent elsewhere.
+func lastPages[T any](ctx context.Context, c *Client, token, path string, pages int, out *[]T) error {
+	var first []T
+	r, err := c.getJSON(ctx, token, c.BaseURL+path+"?per_page=100", &first)
+	if err != nil {
+		return err
+	}
+	last, ok := c.pageLink(r, "last", path)
+	if !ok {
+		*out = first
+		return nil
+	}
+	var tail []T
+	lr, err := c.getJSON(ctx, token, last, &tail)
+	if err != nil {
+		return err
+	}
+	prev, ok := c.pageLink(lr, "prev", path)
+	if pages < 2 || !ok {
+		*out = tail
+		return nil
+	}
+	if u, e := url.Parse(prev); e == nil && u.Query().Get("page") == "1" {
+		*out = append(first, tail...)
+		return nil
+	}
+	var before []T
+	if _, err = c.getJSON(ctx, token, prev, &before); err != nil {
+		return err
+	}
+	*out = append(before, tail...)
+	return nil
 }
 
 // SearchIssues searches issues and pull requests, following up to two pages

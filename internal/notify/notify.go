@@ -11,7 +11,8 @@ import (
 // Message is one notification as handed to a channel.
 type Message struct {
 	Kind, Title, Body string
-	// URL is a path under /admin/ opened when the notification is clicked.
+	// URL is a same-origin path of the web UI (such as / or /auto) opened when
+	// the notification is clicked.
 	URL string
 	// Tag makes a newer notification replace an older one with the same
 	// tag on the device.

@@ -289,6 +289,26 @@ func (q postgresQueries) listDueGitHubConnections(ctx context.Context, now int64
 	}
 	return out, nil
 }
+func (q postgresQueries) aiSettings(ctx context.Context, userID string) (AISettings, error) {
+	row, err := q.q.GetAISettings(ctx, userID)
+	return fromPostgresAISetting(row), err
+}
+func (q postgresQueries) lockAISettings(ctx context.Context, userID string) (AISettings, error) {
+	row, err := q.q.LockAISettings(ctx, userID)
+	return fromPostgresAISetting(row), err
+}
+func (q postgresQueries) createAISettings(ctx context.Context, a AISettings) (int64, error) {
+	return q.q.CreateAISettings(ctx, db.CreateAISettingsParams{UserID: a.UserID, Generation: a.Generation, Provider: a.Provider, Model: a.Model, ApiKeySealed: a.APIKeySealed, KeyLast4: a.KeyLast4, Status: a.Status, LastError: a.LastError, ActivatedAt: a.ActivatedAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt})
+}
+func (q postgresQueries) replaceAISettings(ctx context.Context, a AISettings, currentGeneration int64) (int64, error) {
+	return q.q.ReplaceAISettings(ctx, db.ReplaceAISettingsParams{Generation: a.Generation, Provider: a.Provider, Model: a.Model, ApiKeySealed: a.APIKeySealed, KeyLast4: a.KeyLast4, Status: a.Status, LastError: a.LastError, ActivatedAt: a.ActivatedAt, UpdatedAt: a.UpdatedAt, UserID: a.UserID, CurrentGeneration: currentGeneration})
+}
+func (q postgresQueries) updateAISettingsStatus(ctx context.Context, userID string, generation int64, status string, lastError sql.NullString, now int64) (int64, error) {
+	return q.q.UpdateAISettingsStatus(ctx, db.UpdateAISettingsStatusParams{Status: status, LastError: lastError, UpdatedAt: now, UserID: userID, Generation: generation})
+}
+func (q postgresQueries) deleteAISettings(ctx context.Context, userID string) error {
+	return q.q.DeleteAISettings(ctx, userID)
+}
 func (q postgresQueries) createPushSubscription(ctx context.Context, p PushSubscription) error {
 	return q.q.CreatePushSubscription(ctx, db.CreatePushSubscriptionParams{ID: p.ID, UserID: p.UserID, Endpoint: p.Endpoint, P256dh: p.P256dh, Auth: p.Auth, Label: p.Label, CreatedAt: p.CreatedAt})
 }
@@ -401,4 +421,8 @@ func (postgresQueries) actionItems(rows []db.ActionItem, err error) ([]ActionIte
 		items = append(items, ActionItem(row))
 	}
 	return items, nil
+}
+
+func fromPostgresAISetting(row db.AiSetting) AISettings {
+	return AISettings{UserID: row.UserID, Generation: row.Generation, Provider: row.Provider, Model: row.Model, APIKeySealed: row.ApiKeySealed, KeyLast4: row.KeyLast4, Status: row.Status, LastError: row.LastError, ActivatedAt: row.ActivatedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }

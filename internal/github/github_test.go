@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -136,7 +137,7 @@ func TestNotifications(t *testing.T) {
 		if next != "" {
 			w.Header().Set("Link", `<`+base+`/notifications?all=true&page=`+next+`>; rel="next", <`+base+`/notifications?page=9>; rel="last"`)
 		}
-		_, _ = w.Write([]byte(`[{"reason":"review_requested","subject":{"type":"PullRequest","url":"` + base + `/repos/o/r/pulls/` + page + `1"}},{"reason":"mention","subject":{"type":"Issue","url":null}}]`))
+		_, _ = w.Write([]byte(`[{"reason":"review_requested","subject":{"type":"PullRequest","url":"` + base + `/repos/o/r/pulls/` + page + `1"}},{"id":"42","updated_at":"2026-10-24T09:30:00Z","reason":"mention","subject":{"type":"Issue","url":null}}]`))
 	})
 	base = c.BaseURL
 	threads, lm, interval, notModified, err := c.Notifications(context.Background(), "t", "", since)
@@ -144,7 +145,7 @@ func TestNotifications(t *testing.T) {
 		t.Fatalf("notifications: %v %v %d %q", err, notModified, interval, lm)
 	}
 	// Three pages at most.
-	if len(threads) != 6 || f.count() != 3 || threads[0] != (Thread{Reason: "review_requested", SubjectType: "PullRequest", SubjectURL: base + "/repos/o/r/pulls/1"}) || threads[1].SubjectURL != "" {
+	if len(threads) != 6 || f.count() != 3 || threads[0] != (Thread{Reason: "review_requested", SubjectType: "PullRequest", SubjectURL: base + "/repos/o/r/pulls/1"}) || threads[1].SubjectURL != "" || threads[1].ID != "42" || !threads[1].UpdatedAt.Equal(time.Date(2026, 10, 24, 9, 30, 0, 0, time.UTC)) {
 		t.Fatalf("threads: %+v requests=%d", threads, f.count())
 	}
 	q := f.requests[0].URL.Query()
@@ -274,5 +275,85 @@ func TestParseSubjectURL(t *testing.T) {
 		if got, valid := c.ParseSubjectURL(raw); valid {
 			t.Fatalf("%s accepted: %+v", raw, got)
 		}
+	}
+}
+
+// Comments and recent reviews come from the last two pages; the page before
+// the last is the first page itself when there are only two, and a link
+// outside the endpoint is not followed.
+func TestRecentPages(t *testing.T) {
+	var base string
+	comment := func(id int) string {
+		return `{"id":` + strconv.Itoa(id) + `,"user":{"login":"u"},"body":"b","html_url":"h","created_at":"2026-10-24T09:00:00Z","updated_at":"2026-10-24T09:00:00Z"}`
+	}
+	f, c := newFake(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		switch r.URL.Path {
+		case "/repos/o/r/issues/1/comments": // four pages
+			switch page {
+			case "":
+				w.Header().Set("Link", `<`+base+r.URL.Path+`?per_page=100&page=2>; rel="next", <`+base+r.URL.Path+`?per_page=100&page=4>; rel="last"`)
+			case "4":
+				w.Header().Set("Link", `<`+base+r.URL.Path+`?per_page=100&page=3>; rel="prev", <`+base+r.URL.Path+`?per_page=100&page=1>; rel="first"`)
+			}
+			n, _ := strconv.Atoi(page)
+			_, _ = w.Write([]byte(`[` + comment(max(n, 1)) + `]`))
+		case "/repos/o/r/pulls/1/comments": // two pages
+			switch page {
+			case "":
+				w.Header().Set("Link", `<`+base+r.URL.Path+`?per_page=100&page=2>; rel="next", <`+base+r.URL.Path+`?per_page=100&page=2>; rel="last"`)
+				_, _ = w.Write([]byte(`[` + comment(1) + `]`))
+			default:
+				w.Header().Set("Link", `<`+base+r.URL.Path+`?per_page=100&page=1>; rel="prev"`)
+				_, _ = w.Write([]byte(`[` + comment(2) + `,{"id":3,"user":null,"body":null}]`))
+			}
+		case "/repos/o/r/issues/9":
+			_, _ = w.Write([]byte(`{"state":"closed","title":"T","html_url":"h","body":"desc","user":{"login":"alice"},"created_at":"2026-10-24T08:00:00Z","updated_at":"2026-10-24T09:00:00Z","pull_request":{"url":"x","merged_at":"2026-10-24T09:00:00Z"}}`))
+		case "/repos/o/r/issues/10":
+			_, _ = w.Write([]byte(`{"state":"closed","title":"T","body":null,"user":null,"pull_request":{"url":"x","merged_at":null}}`))
+		case "/repos/o/r/pulls/2/comments": // one page
+			_, _ = w.Write([]byte(`[` + comment(9) + `]`))
+		case "/repos/o/r/pulls/1/reviews":
+			switch page {
+			case "":
+				w.Header().Set("Link", `<`+base+r.URL.Path+`?per_page=100&page=3>; rel="last"`)
+				_, _ = w.Write([]byte(`[{"id":1}]`))
+			case "3":
+				w.Header().Set("Link", `<https://evil.example`+r.URL.Path+`?per_page=100&page=2>; rel="prev"`)
+				_, _ = w.Write([]byte(`[{"id":3,"user":{"login":"a"},"body":"@x","submitted_at":"2026-10-24T09:00:00Z","state":"COMMENTED"}]`))
+			}
+		default:
+			w.WriteHeader(404)
+		}
+	})
+	base = c.BaseURL
+	ctx := context.Background()
+	ids := func(list []Comment) []int64 {
+		out := []int64{}
+		for _, c := range list {
+			out = append(out, c.ID)
+		}
+		return out
+	}
+	list, err := c.IssueComments(ctx, "t", "o", "r", 1)
+	if err != nil || !reflect.DeepEqual(ids(list), []int64{3, 4}) || f.count() != 3 || list[0].Login != "u" || list[0].Body != "b" || !list[0].UpdatedAt.Equal(time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("four pages: %v %v (%d requests)", ids(list), err, f.count())
+	}
+	if list, err = c.ReviewComments(ctx, "t", "o", "r", 1); err != nil || !reflect.DeepEqual(ids(list), []int64{1, 2, 3}) || f.count() != 5 || list[2].Login != "" || list[2].Body != "" {
+		t.Fatalf("two pages: %+v %v (%d requests)", list, err, f.count())
+	}
+	if list, err = c.ReviewComments(ctx, "t", "o", "r", 2); err != nil || !reflect.DeepEqual(ids(list), []int64{9}) || f.count() != 6 {
+		t.Fatalf("one page: %v %v", ids(list), err)
+	}
+	reviews, err := c.RecentReviews(ctx, "t", "o", "r", 1)
+	if err != nil || len(reviews) != 1 || reviews[0].ID != 3 || reviews[0].Body != "@x" || f.count() != 8 {
+		t.Fatalf("reviews with a foreign prev link: %+v %v (%d requests)", reviews, err, f.count())
+	}
+	i, err := c.Issue(ctx, "t", "o", "r", 9)
+	if err != nil || !i.IsPull || !i.Merged || i.Body != "desc" || i.Login != "alice" || !i.CreatedAt.Equal(time.Date(2026, 10, 24, 8, 0, 0, 0, time.UTC)) {
+		t.Fatalf("merged PR: %+v %v", i, err)
+	}
+	if i, err = c.Issue(ctx, "t", "o", "r", 10); err != nil || !i.IsPull || i.Merged || i.Body != "" || i.Login != "" {
+		t.Fatalf("closed PR: %+v %v", i, err)
 	}
 }

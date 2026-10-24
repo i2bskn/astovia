@@ -12,6 +12,7 @@ test('automatic completion reasons have Japanese labels', () => {
   assert.equal(autoReasonLabel('github.pr_closed'), 'PR がクローズされた');
   assert.equal(autoReasonLabel('github.issue_closed'), 'Issue がクローズされた');
   assert.equal(autoReasonLabel('github.unassigned'), '割り当てが外れた');
+  assert.equal(autoReasonLabel('github.mention_no_action'), '対応は不要と判断した');
   assert.equal(autoReasonLabel('slack.thread_resolved'), 'slack.thread_resolved');
   assert.equal(autoReasonLabel('toString'), 'toString');
 });
@@ -35,11 +36,11 @@ test('GitHub messages', () => {
   assert.match(githubStatusMessage('error', null), /停止/);
 });
 
-test('each screen has a path under /admin', () => {
+test('each screen has a path at the root', () => {
   assert.deepEqual(views.map((v) => v.path), ['/', '/auto', '/settings']);
-  assert.equal(viewURL('tasks'), '/admin/');
-  assert.equal(viewURL('auto'), '/admin/auto');
-  assert.equal(viewURL('settings'), '/admin/settings');
+  assert.equal(viewURL('tasks'), '/');
+  assert.equal(viewURL('auto'), '/auto');
+  assert.equal(viewURL('settings'), '/settings');
 });
 
 const supported = { hasServiceWorker: true, hasPushManager: true, hasNotification: true, isIOS: false, standalone: false, permission: 'default' };

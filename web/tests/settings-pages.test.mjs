@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { clientsStatus, devicesStatus, githubStatus, settingsPageAt, settingsPages } from '../.test-build/settingsPages.js';
 
-test('settings has four pages under /settings', () => {
-  assert.deepEqual(settingsPages.map((p) => p.path), ['integrations', 'notifications', 'ai-clients', 'account']);
+test('settings has five pages under /settings', () => {
+  assert.deepEqual(settingsPages.map((p) => p.path), ['integrations', 'ai', 'notifications', 'ai-clients', 'account']);
+  assert.equal(settingsPageAt('/settings/ai'), 'ai');
   assert.equal(settingsPageAt('/settings/notifications'), 'notifications');
   assert.equal(settingsPageAt('/settings/ai-clients/'), 'ai-clients');
   assert.equal(settingsPageAt('/settings'), null);

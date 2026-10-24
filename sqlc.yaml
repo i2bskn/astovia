@@ -92,6 +92,10 @@ sql:
             go_type:
               import: database/sql
               type: NullInt64
+          - column: ai_settings.last_error
+            go_type:
+              import: database/sql
+              type: NullString
           - column: web_push_subscriptions.last_used_at
             go_type:
               import: database/sql

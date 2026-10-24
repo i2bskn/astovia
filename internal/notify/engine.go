@@ -90,7 +90,7 @@ func (e *Engine) stale(ctx context.Context, userID string, settings store.Notifi
 	var list []store.Notification
 	for _, item := range items {
 		age := now - item.CreatedAt
-		n, err := newNotification(store.NotificationStale, fmt.Sprintf("stale:%s:%d", item.ID, age/period), fmt.Sprintf("未対応が%d日続いています", age/86400), item.Content, "/admin/", now)
+		n, err := newNotification(store.NotificationStale, fmt.Sprintf("stale:%s:%d", item.ID, age/period), fmt.Sprintf("未対応が%d日続いています", age/86400), item.Content, "/", now)
 		if err != nil {
 			return nil, err
 		}
@@ -142,9 +142,9 @@ func (e *Engine) digest(ctx context.Context, userID string, settings store.Notif
 	for _, item := range items {
 		contents = append(contents, item.Content)
 	}
-	body, url := strings.Join(contents, "・"), "/admin/"
+	body, url := strings.Join(contents, "・"), "/"
 	if auto > 0 {
-		body, url = fmt.Sprintf("自動で処理 %d件／", auto)+body, "/admin/auto"
+		body, url = fmt.Sprintf("自動で処理 %d件／", auto)+body, "/auto"
 	}
 	n, err := newNotification(store.NotificationDigest, key, fmt.Sprintf("今日の未完了 %d件", open), body, url, now.Unix())
 	return n, err == nil, err

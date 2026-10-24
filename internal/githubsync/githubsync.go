@@ -1,8 +1,9 @@
 // Package githubsync finds the user's GitHub review requests and assignments,
 // creates action items for them, and completes the items when GitHub shows
-// that they are done. Requests to GitHub are never made inside a database
-// transaction: SQLite has a single connection, and a transaction held during
-// a request would block the management screen.
+// that they are done. Mentions of the user are judged by the AI with the
+// user's own key (see mentions.go). Requests to GitHub and the AI are never
+// made inside a database transaction: SQLite has a single connection, and a
+// transaction held during a request would block the management screen.
 package githubsync
 
 import (
@@ -14,10 +15,12 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/github"
 	"github.com/i2bskn/astovia/internal/secretbox"
@@ -78,11 +81,18 @@ var searches = []struct{ kind, query string }{
 func TokenPurpose(userID string) string { return "github-token:" + userID }
 
 // Syncer synchronizes GitHub connections. It assumes a single process.
+// AI judges mentions; without it mentions are ignored.
 type Syncer struct {
 	Store  *store.Store
 	GitHub *github.Client
+	AI     *ai.Client
 	Box    *secretbox.Box
 	Now    func() time.Time
+
+	// mentionDone remembers threads whose mentions were all handled, so
+	// that an unchanged thread is not read from GitHub again.
+	mentionMu   sync.Mutex
+	mentionDone map[string]mentionRecord
 }
 
 // RunOnce synchronizes up to BatchSize due connections, one after another.
@@ -113,6 +123,26 @@ type run struct {
 	state  store.GitHubConnection
 	token  string
 	start  time.Time
+
+	// The mention stage. ai is the user's active AI settings, read at the
+	// first mention thread (aiChecked). retry is set when a mention must be
+	// read again by the next synchronization; overdue when LastSyncedAt has
+	// stayed behind for longer than mentionRetryLimit, so that it moves on
+	// and waiting mentions become confirmation tasks instead.
+	ai             *store.AISettings
+	aiChecked      bool
+	mentionThreads []mentionThread
+	mentionsDone   bool
+	retry          bool
+	overdue        bool
+	aiCalls        int
+	// aiFallbackOnly is set after the AI failed in a way that stops it for
+	// the user; aiStale when the settings were replaced during the
+	// synchronization; aiStopped when they were deleted or the key cannot
+	// be opened.
+	aiFallbackOnly bool
+	aiStale        bool
+	aiStopped      bool
 }
 
 // Sync synchronizes one connection and stores its new state. When the
@@ -182,11 +212,22 @@ func (r *run) save() {
 	}
 }
 
-// steps runs the initial import, notification polling, reconciliation and
-// tracking, recording progress in r.state. It returns the poll interval.
-func (r *run) steps() (int, error) {
-	interval := github.MinPollInterval
+// steps runs the initial import, notification polling, reconciliation,
+// tracking and the mention stage, recording progress in r.state. It returns
+// the poll interval. When collected mentions were not all handled,
+// LastSyncedAt and LastModified keep their previous values so that the
+// next synchronization reads the same notifications again (items are not
+// duplicated: their source keys are unique).
+func (r *run) steps() (interval int, err error) {
+	interval = github.MinPollInterval
 	start := r.start.Unix()
+	synced, modified := r.state.LastSyncedAt, r.state.LastModified
+	r.overdue = synced.Valid && start-synced.Int64 > int64(mentionRetryLimit/time.Second)
+	defer func() {
+		if r.mentionsPending() && !r.overdue {
+			r.state.LastSyncedAt, r.state.LastModified = synced, modified
+		}
+	}()
 	imported := false
 	if r.state.InitialImportPending == 1 {
 		imported = true
@@ -229,6 +270,9 @@ func (r *run) steps() (int, error) {
 			return interval, err
 		}
 		r.state.LastTrackedAt = nullInt(start)
+	}
+	if err = r.mentions(); err != nil {
+		return interval, err
 	}
 	return interval, nil
 }
@@ -281,8 +325,8 @@ func (r *run) search(notify bool) (bool, error) {
 	return complete, nil
 }
 
-// thread handles one notification thread. Only review requests to the user
-// and assignments are used; the subject must be an API URL under the base
+// thread handles one notification thread. Only review requests to the user,
+// assignments and mentions are used; the subject must be an API URL under the base
 // URL, otherwise the thread is ignored and the token is not sent anywhere.
 func (r *run) thread(t github.Thread) error {
 	ref, ok := r.s.GitHub.ParseSubjectURL(t.SubjectURL)
@@ -307,6 +351,10 @@ func (r *run) thread(t github.Thread) error {
 		if i.State == "open" && hasLogin(i.Assignees, r.conn.Login) {
 			return r.detect(kindAssign, ref, i.Title, i.HTMLURL, true, true)
 		}
+	case t.Reason == "mention" && ((t.SubjectType == "Issue" && ref.Kind == "issues") || (t.SubjectType == "PullRequest" && ref.Kind == "pulls")):
+		// Handled after tracking, so that a slow AI does not hold up the
+		// automatic completions.
+		return r.collectMention(t, ref)
 	}
 	return nil
 }
@@ -461,7 +509,7 @@ func detectedNotification(kind, name, title string, item store.ActionItem, again
 	}
 	return store.Notification{ID: id, Kind: store.NotificationDetected, ActionItemID: nullString(item.ID),
 		DedupeKey: "detected:" + item.ID + ":" + strconv.FormatInt(item.Version, 10),
-		Title:     label + ": " + name, Body: title, URL: "/admin/", ScheduledAt: now, CreatedAt: now}
+		Title:     label + ": " + name, Body: title, URL: "/", ScheduledAt: now, CreatedAt: now}
 }
 
 // decision is the outcome of checking one tracked item: an automatic

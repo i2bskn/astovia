@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import type { FormEvent } from 'react';
+import { Link } from 'react-router';
+import { aiNeedsSetup, createAIClient } from './ai';
 import { APIError, request } from './auth';
 import { dateTime } from './format';
 import { GITHUB_TOKEN_URL, githubErrorMessage, githubStatusMessage } from './automation';
@@ -8,6 +10,7 @@ import type { GitHubState } from './integrations';
 import Phrased from './Phrased';
 
 const client = createIntegrationsClient(request);
+const ai = createAIClient(request);
 
 function formatDate(value: string): string {
   return dateTime(value, new Date());
@@ -60,6 +63,9 @@ export default function GitHubSettings() {
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [replacing, setReplacing] = useState(false);
+  // aiMissing is set when mentions cannot be detected for want of AI
+  // settings; it stays unset when they could not be read.
+  const [aiMissing, setAIMissing] = useState(false);
   const headingID = useId();
   const toggleID = useId();
 
@@ -76,6 +82,12 @@ export default function GitHubSettings() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    let active = true;
+    ai.getAI().then((state) => { if (active) setAIMissing(aiNeedsSetup(state)); }, () => {});
+    return () => { active = false; };
+  }, []);
 
   async function connect(token: string): Promise<void> {
     setBusy(true);
@@ -118,7 +130,8 @@ export default function GitHubSettings() {
 
   return <section className="action-panel settings-panel" id="github" aria-labelledby={headingID}>
     <h2 id={headingID}>GitHub 連携</h2>
-    <p className="intro"><Phrased text="自分宛てのレビュー依頼と割り当てを見つけてタスクにし、PR や Issue が片付いたら自動で完了にします。" /></p>
+    <p className="intro"><Phrased text="自分宛てのレビュー依頼と割り当てを見つけてタスクにし、PR や Issue が片付いたら自動で完了にします。自分へのメンションは AI が読んで、やることがあればタスクにします。" /></p>
+    {aiMissing ? <p className="notice">メンションの検出には AI の設定が必要です。<Link to="/settings/ai">AI を設定する</Link></p> : null}
     {error ? <p className="notice error" role="alert">{error}</p> : null}
     {loading ? <p className="action-loading" aria-live="polite">読み込んでいます…</p> : null}
     {!loading && state && !state.connected ? <>

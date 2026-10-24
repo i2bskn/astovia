@@ -6,7 +6,7 @@ export default defineConfig(({ mode }) => {
   const apiURL = env.ASTOVIA_DEV_API_URL ?? 'http://localhost:8080';
 
   return {
-    base: '/admin/',
+    base: '/',
     plugins: [react()],
     server: {
       watch: { usePolling: env.ASTOVIA_DEV_POLLING === 'true' },

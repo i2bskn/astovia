@@ -166,7 +166,7 @@ func (a *oauthAPI) consentRequest(q url.Values) string {
 	a.t.Helper()
 	w := a.authorize(q)
 	loc, err := url.Parse(w.Header().Get("Location"))
-	if w.Code != 302 || err != nil || loc.Path != "/admin/oauth/authorize" || loc.Host != "" || loc.Query().Get("request") == "" {
+	if w.Code != 302 || err != nil || loc.Path != "/consent" || loc.Host != "" || loc.Query().Get("request") == "" {
 		a.t.Fatalf("authorize: %d %v %s", w.Code, w.Header(), w.Body.String())
 	}
 	return loc.Query().Get("request")

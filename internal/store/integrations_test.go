@@ -17,7 +17,7 @@ func githubItem(id, key string, created int64) store.ActionItem {
 }
 
 func notification(id, kind, key string, item string, scheduled int64) store.Notification {
-	n := store.Notification{ID: id, Kind: kind, DedupeKey: key, Title: "t", Body: "b", URL: "/admin/", ScheduledAt: scheduled, CreatedAt: scheduled}
+	n := store.Notification{ID: id, Kind: kind, DedupeKey: key, Title: "t", Body: "b", URL: "/", ScheduledAt: scheduled, CreatedAt: scheduled}
 	if item != "" {
 		n.ActionItemID = sql.NullString{String: item, Valid: true}
 	}
@@ -380,7 +380,7 @@ func testNotificationQueue(t *testing.T, driver string) {
 	if err := s.EnqueueNotifications(ctx, "alice-id", []store.Notification{notification("n0", store.NotificationDigest, "digest:x", "", 10)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateTestNotification(ctx, store.Notification{ID: "t0", UserID: "alice-id", Kind: store.NotificationTest, DedupeKey: "test:0", URL: "/admin/", ScheduledAt: 10, CreatedAt: 10}, "alice-session", tokenTestNow); !errors.Is(err, store.ErrNoSubscription) {
+	if err := s.CreateTestNotification(ctx, store.Notification{ID: "t0", UserID: "alice-id", Kind: store.NotificationTest, DedupeKey: "test:0", URL: "/", ScheduledAt: 10, CreatedAt: 10}, "alice-session", tokenTestNow); !errors.Is(err, store.ErrNoSubscription) {
 		t.Fatalf("test without subscription: %v", err)
 	}
 	for _, u := range []string{"alice", "bob"} {
@@ -515,5 +515,109 @@ func testChangeUserIntegrations(t *testing.T, driver string) {
 	check("bob", false, 0, false, true)
 	if due, err := s.DueGitHubConnections(ctx, tokenTestNow, 10); err != nil || len(due) != 1 || due[0].UserID != "alice-id" {
 		t.Fatalf("due connections: %+v %v", due, err)
+	}
+}
+
+func TestAISettings(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) { testAISettings(t, driver) })
+	}
+}
+
+func testAISettings(t *testing.T, driver string) {
+	ctx := context.Background()
+	s, _ := apiTokenFixture(t, driver)
+	in := store.AISettings{UserID: "alice-id", Provider: "anthropic", Model: "claude-haiku-5-5", APIKeySealed: "sealed-1", KeyLast4: "abcd"}
+
+	if _, err := s.AISettings(ctx, "alice-id"); !errors.Is(err, store.ErrAISettingsNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	a, err := s.SaveAISettings(ctx, in, 0, true, "alice-session", tokenTestNow)
+	if err != nil || a.Generation != 1 || a.Status != store.AIActive || a.LastError.Valid || a.ActivatedAt != tokenTestNow || a.CreatedAt != tokenTestNow {
+		t.Fatalf("create: %+v %v", a, err)
+	}
+	if got, err := s.AISettings(ctx, "alice-id"); err != nil || !reflect.DeepEqual(got, a) {
+		t.Fatalf("round trip: %+v %v", got, err)
+	}
+	if _, err = s.AISettings(ctx, "bob-id"); !errors.Is(err, store.ErrAISettingsNotFound) {
+		t.Fatalf("bob: %v", err)
+	}
+	// A save based on a stale read is rejected.
+	if _, err = s.SaveAISettings(ctx, in, 0, true, "alice-session", tokenTestNow); !errors.Is(err, store.ErrAIConflict) {
+		t.Fatalf("create twice: %v", err)
+	}
+	if _, err = s.SaveAISettings(ctx, in, 5, true, "alice-session", tokenTestNow); !errors.Is(err, store.ErrAIConflict) {
+		t.Fatalf("wrong generation: %v", err)
+	}
+	if _, err = s.SaveAISettings(ctx, store.AISettings{UserID: "bob-id", Provider: "anthropic", Model: "m", APIKeySealed: "x", KeyLast4: ""}, 0, true, "alice-session", tokenTestNow); !errors.Is(err, store.ErrUnauthorized) {
+		t.Fatalf("another user's session: %v", err)
+	}
+
+	// Status updates apply only to the generation that was read.
+	if ok, err := s.SetAIStatus(ctx, "alice-id", 1, store.AIError, sql.NullString{String: "key_invalid", Valid: true}, tokenTestNow+5); err != nil || !ok {
+		t.Fatalf("status: %v %v", ok, err)
+	}
+	// A model change keeps the key's activation time and resets the status.
+	in.Model = "claude-opus-5-5"
+	a, err = s.SaveAISettings(ctx, in, 1, false, "alice-session", tokenTestNow+10)
+	if err != nil || a.Generation != 2 || a.Model != "claude-opus-5-5" || a.Status != store.AIActive || a.LastError.Valid || a.ActivatedAt != tokenTestNow || a.CreatedAt != tokenTestNow || a.UpdatedAt != tokenTestNow+10 {
+		t.Fatalf("model change: %+v %v", a, err)
+	}
+	if ok, err := s.SetAIStatus(ctx, "alice-id", 1, store.AIError, sql.NullString{String: "billing", Valid: true}, tokenTestNow+20); err != nil || ok {
+		t.Fatalf("stale status: %v %v", ok, err)
+	}
+	if got, err := s.AISettings(ctx, "alice-id"); err != nil || got.Status != store.AIActive || got.LastError.Valid {
+		t.Fatalf("stale status written: %+v %v", got, err)
+	}
+	in.APIKeySealed, in.KeyLast4 = "sealed-2", "wxyz"
+	if a, err = s.SaveAISettings(ctx, in, 2, true, "alice-session", tokenTestNow+30); err != nil || a.Generation != 3 || a.ActivatedAt != tokenTestNow+30 || a.APIKeySealed != "sealed-2" {
+		t.Fatalf("new key: %+v %v", a, err)
+	}
+
+	// Deleting is idempotent and needs an active session.
+	if err = s.DeleteAISettings(ctx, "alice-id", "bob-session", tokenTestNow); !errors.Is(err, store.ErrUnauthorized) {
+		t.Fatalf("delete with another session: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err = s.DeleteAISettings(ctx, "alice-id", "alice-session", tokenTestNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = s.AISettings(ctx, "alice-id"); !errors.Is(err, store.ErrAISettingsNotFound) {
+		t.Fatalf("after delete: %v", err)
+	}
+	if ok, err := s.SetAIStatus(ctx, "alice-id", 3, store.AIError, sql.NullString{}, tokenTestNow); err != nil || ok {
+		t.Fatalf("status of deleted settings: %v %v", ok, err)
+	}
+}
+
+// Both a password reset and disabling the user remove the AI settings.
+func TestChangeUserAISettings(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := apiTokenFixture(t, driver)
+			for _, u := range []string{"alice", "bob"} {
+				if _, err := s.SaveAISettings(ctx, store.AISettings{UserID: u + "-id", Provider: "anthropic", Model: "claude-haiku-5-5", APIKeySealed: "s", KeyLast4: ""}, 0, true, u+"-session", tokenTestNow); err != nil {
+					t.Fatal(err)
+				}
+				saveConnection(t, s, u+"-id", u, nil)
+			}
+			if err := s.ChangeUser(ctx, "alice@example.com", "new", false, tokenTestNow); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AISettings(ctx, "alice-id"); !errors.Is(err, store.ErrAISettingsNotFound) {
+				t.Fatalf("after reset: %v", err)
+			}
+			if _, err := s.AISettings(ctx, "bob-id"); err != nil {
+				t.Fatalf("bob after alice's reset: %v", err)
+			}
+			if err := s.ChangeUser(ctx, "bob@example.com", "", true, tokenTestNow); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AISettings(ctx, "bob-id"); !errors.Is(err, store.ErrAISettingsNotFound) {
+				t.Fatalf("after disable: %v", err)
+			}
+		})
 	}
 }

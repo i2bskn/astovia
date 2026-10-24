@@ -430,7 +430,7 @@ func testPushTestAPI(t *testing.T, driver string) {
 		t.Fatalf("queued: %+v %v", due, err)
 	}
 	n := due[0]
-	if n.Kind != store.NotificationTest || n.Title != "Astovia のテスト通知" || n.Body != "この端末で通知を受け取れます。" || n.URL != "/admin/settings/notifications" || n.ActionItemID.Valid || !strings.HasPrefix(n.DedupeKey, "test:") {
+	if n.Kind != store.NotificationTest || n.Title != "Astovia のテスト通知" || n.Body != "この端末で通知を受け取れます。" || n.URL != "/settings/notifications" || n.ActionItemID.Valid || !strings.HasPrefix(n.DedupeKey, "test:") {
 		t.Fatalf("test notification: %+v", n)
 	}
 }
@@ -604,9 +604,10 @@ func testAutoActionItems(t *testing.T, driver string) {
 func TestServiceWorkerAndManifest(t *testing.T) {
 	api := newIntegrationAPI(t, "sqlite")
 	for path, want := range map[string][2]string{
-		"/admin/sw.js":                {"javascript", "no-cache"},
-		"/admin/manifest.webmanifest": {"application/manifest+json", "no-cache"},
-		"/admin/icon-192.png":         {"image/png", "public, max-age=31536000, immutable"},
+		"/sw.js":                {"javascript", "no-cache"},
+		"/admin/sw.js":          {"javascript", "no-cache"},
+		"/manifest.webmanifest": {"application/manifest+json", "no-cache"},
+		"/icon-192.png":         {"image/png", "public, max-age=31536000, immutable"},
 	} {
 		w := api.do("GET", path, "", "")
 		if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Type"), want[0]) || w.Header().Get("Cache-Control") != want[1] {

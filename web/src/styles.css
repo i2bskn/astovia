@@ -365,6 +365,8 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 /* ---------- Tablet ---------- */
 @media (max-width: 1023px) {
   .page { padding: 36px 28px 88px; }
+  /* Five tabs fit next to the open sidebar only without their icons. */
+  .settings-tab .icon { display: none; }
 }
 
 /* ---------- Phone: top bar + bottom tab bar ---------- */

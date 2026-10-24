@@ -21,8 +21,8 @@ const viewIcons: Record<View, () => React.JSX.Element> = {
 // The wordmark has a dark-ink and a light-ink variant for the color schemes.
 function Logo({ width = 132 }: { width?: number }) {
   return <picture className="logo">
-    <source srcSet="/admin/astovia-logo-dark.svg" media="(prefers-color-scheme: dark)" />
-    <img src="/admin/astovia-logo.svg" alt="Astovia" width={width} height={width / 3} />
+    <source srcSet="/astovia-logo-dark.svg" media="(prefers-color-scheme: dark)" />
+    <img src="/astovia-logo.svg" alt="Astovia" width={width} height={width / 3} />
   </picture>;
 }
 
@@ -96,7 +96,7 @@ function initialCollapsed(): boolean {
 function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boolean; onToggle: () => void }) {
   return <aside className="sidebar" aria-label="メニュー">
     <Link to="/" className="sidebar-brand" aria-label="Astovia タスク">
-      {collapsed ? <img className="sidebar-mark" src="/admin/favicon.svg" alt="" width={28} height={28} /> : <Logo />}
+      {collapsed ? <img className="sidebar-mark" src="/favicon.svg" alt="" width={28} height={28} /> : <Logo />}
     </Link>
     <nav className="sidebar-nav" aria-label="画面">
       {views.map((v) => <NavLink key={v.value} to={v.path} end={v.path === '/'} className="nav-item" title={collapsed ? v.label : undefined}>
@@ -189,7 +189,7 @@ export default function App() {
   const state = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
   const signedIn = state.status === 'authenticated' && state.user !== null;
   // The OAuth consent page replaces the workspace on this path.
-  const consentPage = useMatch('/oauth/authorize') !== null;
+  const consentPage = useMatch('/consent') !== null;
 
   if (signedIn && !consentPage) return <Workspace email={state.user?.email ?? ''} error={state.error} />;
 

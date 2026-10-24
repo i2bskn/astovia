@@ -32,13 +32,31 @@ type issueState struct {
 	HTMLURL   string
 	Assignees []string
 	IsPull    bool
+	Merged    bool
+	Body      string
+	Login     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type reviewState struct {
+	ID          int64
 	Login       string
+	Body        string
 	SubmittedAt *time.Time
 	HTMLURL     string
 	State       string
+}
+
+// commentState is an issue comment or a review comment. An empty Login is
+// a deleted user (null).
+type commentState struct {
+	ID        int64
+	Login     string
+	Body      string
+	HTMLURL   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type searchItem struct {
@@ -57,6 +75,7 @@ type fakeGitHub struct {
 	pulls    map[string]pullState
 	issues   map[string]issueState
 	reviews  map[string][]reviewState
+	comments map[string][]commentState
 	search   map[string][]searchItem
 	forced   map[string]int
 	headers  map[string]map[string]string
@@ -104,7 +123,17 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/"), "/reviews")
 		out := []map[string]any{}
 		for _, rv := range f.reviews[key] {
-			out = append(out, map[string]any{"user": map[string]string{"login": rv.Login}, "submitted_at": rv.SubmittedAt, "html_url": rv.HTMLURL, "state": rv.State})
+			out = append(out, map[string]any{"id": rv.ID, "user": map[string]string{"login": rv.Login}, "body": rv.Body, "submitted_at": rv.SubmittedAt, "html_url": rv.HTMLURL, "state": rv.State})
+		}
+		write(out)
+	case strings.HasSuffix(path, "/comments"):
+		out := []map[string]any{}
+		for _, c := range f.comments[strings.TrimPrefix(path, "/repos/")] {
+			v := map[string]any{"id": c.ID, "user": nil, "body": c.Body, "html_url": c.HTMLURL, "created_at": c.CreatedAt, "updated_at": c.UpdatedAt}
+			if c.Login != "" {
+				v["user"] = map[string]string{"login": c.Login}
+			}
+			out = append(out, v)
 		}
 		write(out)
 	case strings.Contains(path, "/pulls/"):
@@ -120,9 +149,13 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(404)
 			return
 		}
-		v := map[string]any{"state": i.State, "title": i.Title, "html_url": i.HTMLURL, "assignees": users(i.Assignees)}
+		v := map[string]any{"state": i.State, "title": i.Title, "html_url": i.HTMLURL, "assignees": users(i.Assignees), "body": i.Body, "user": map[string]string{"login": i.Login}, "created_at": i.CreatedAt, "updated_at": i.UpdatedAt}
 		if i.IsPull {
-			v["pull_request"] = map[string]any{"url": "x"}
+			pr := map[string]any{"url": "x", "merged_at": nil}
+			if i.Merged {
+				pr["merged_at"] = i.UpdatedAt
+			}
+			v["pull_request"] = pr
 		}
 		write(v)
 	default:
@@ -168,7 +201,7 @@ func newSyncTest(t *testing.T, driver string, immediate bool) *syncTest {
 	if err := s.Login(ctx, u, store.Session{ID: "sid", UserID: u.ID, ExpiresAt: st.now.Unix() + 86400*30, CreatedAt: st.now.Unix()}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: st.now.Unix()}); err != nil {
 		t.Fatal(err)
 	}
-	st.gh = &fakeGitHub{pulls: map[string]pullState{}, issues: map[string]issueState{}, reviews: map[string][]reviewState{}, search: map[string][]searchItem{}, forced: map[string]int{}, headers: map[string]map[string]string{}, threads: []map[string]any{}}
+	st.gh = &fakeGitHub{pulls: map[string]pullState{}, issues: map[string]issueState{}, reviews: map[string][]reviewState{}, comments: map[string][]commentState{}, search: map[string][]searchItem{}, forced: map[string]int{}, headers: map[string]map[string]string{}, threads: []map[string]any{}}
 	srv := httptest.NewServer(st.gh)
 	t.Cleanup(srv.Close)
 	st.gh.base = srv.URL
@@ -354,7 +387,7 @@ func TestNotificationDetection(t *testing.T) {
 		titles := map[string]bool{}
 		for _, n := range st.pending() {
 			titles[n.Title+"|"+n.Body] = true
-			if n.Kind != "detected" || n.URL != "/admin/" || !n.ActionItemID.Valid || !strings.HasPrefix(n.DedupeKey, "detected:"+n.ActionItemID.String+":") {
+			if n.Kind != "detected" || n.URL != "/" || !n.ActionItemID.Valid || !strings.HasPrefix(n.DedupeKey, "detected:"+n.ActionItemID.String+":") {
 				t.Fatalf("notification: %+v", n)
 			}
 		}

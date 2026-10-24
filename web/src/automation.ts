@@ -8,6 +8,7 @@ const reasonLabels: Readonly<Record<string, string>> = {
   'github.pr_closed': 'PR がクローズされた',
   'github.issue_closed': 'Issue がクローズされた',
   'github.unassigned': '割り当てが外れた',
+  'github.mention_no_action': '対応は不要と判断した',
 };
 
 // autoReasonLabel returns the Japanese label of an automatic completion

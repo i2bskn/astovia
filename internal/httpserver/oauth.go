@@ -378,7 +378,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		oauthUnavailable(w, r, err)
 		return
 	}
-	http.Redirect(w, r, "/admin/oauth/authorize?request="+url.QueryEscape(signed), http.StatusFound)
+	http.Redirect(w, r, "/consent?request="+url.QueryEscape(signed), http.StatusFound)
 }
 
 // redirectURL returns redirectURI with params, state and iss (RFC 9207).

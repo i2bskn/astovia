@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
 	"github.com/i2bskn/astovia/internal/github"
@@ -17,7 +18,9 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,8 +40,10 @@ type Server struct {
 	cimdLimiter     *loginLimiter
 	// fetchCIMD fetches a Client ID Metadata Document. Tests replace it.
 	fetchCIMD func(ctx context.Context, clientID string) (oauth.Document, error)
-	// github verifies GitHub tokens. Tests replace its base URL.
+	// github verifies GitHub tokens and ai API keys. Tests replace their
+	// base URLs.
 	github *github.Client
+	ai     *ai.Client
 	// box seals stored credentials, and vapid manages the Web Push key
 	// pair; both are the ones the background loops use as well.
 	box   *secretbox.Box
@@ -85,7 +90,7 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
-		github: github.New(now), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, pushTestLimiter: newKeyLimiter(3, time.Minute)}
+		github: github.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, pushTestLimiter: newKeyLimiter(3, time.Minute)}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -95,9 +100,6 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
 // instead of the ServeMux text responses.
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/{$}", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/admin/", http.StatusFound)
-	})))
 	mux.Handle("/healthz", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})))
@@ -131,6 +133,11 @@ func (s *Server) handler() http.Handler {
 		http.MethodPatch:  s.requireUser(requireJSON(http.HandlerFunc(s.handlePatchGitHub))),
 		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteGitHub)),
 	}))
+	mux.Handle("/api/v1/ai", allowMethods(map[string]http.Handler{
+		http.MethodGet:    s.requireUser(http.HandlerFunc(s.handleGetAI)),
+		http.MethodPut:    s.requireUser(requireJSON(http.HandlerFunc(s.handlePutAI))),
+		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteAI)),
+	}))
 	mux.Handle("/api/v1/push/public-key", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handlePushPublicKey))))
 	mux.Handle("/api/v1/push/subscriptions", allowMethods(map[string]http.Handler{
 		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleListPushSubscriptions)),
@@ -154,13 +161,9 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/oauth/token", allow(http.MethodPost, http.HandlerFunc(s.handleToken)))
 	// /mcp authenticates with API tokens and OAuth access tokens; see mcpAuth.
 	mux.Handle("/mcp", allow(http.MethodPost, s.mcpAuth(s.mcpHandler())))
-	mux.Handle("/admin", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
-	})))
-	mux.Handle("/admin/", allow(http.MethodGet, http.HandlerFunc(s.static)))
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		fail(w, 404, "not_found", "Not found.")
-	})
+	// The screens, the static files and the legacy /admin URLs are routed
+	// inside the catch-all so that unknown paths stay JSON 404s.
+	mux.HandleFunc("/", s.web)
 	return secureHeaders(mux)
 }
 
@@ -423,24 +426,125 @@ func (s *Server) authError(w http.ResponseWriter, r *http.Request, err error) {
 	log.Printf("auth: %s %s: %v", r.Method, r.URL.Path, err)
 	fail(w, 503, "unavailable", "Authentication is temporarily unavailable. Try again.")
 }
-func (s *Server) static(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/admin/")
-	if name == "" {
-		name = "index.html"
-	}
-	if !fs.ValidPath(name) {
-		fail(w, 404, "not_found", "Not found.")
+
+// pageName matches a settings page name such as "notifications".
+var pageName = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+// web serves the paths not matched by an API route: the screens rendered by
+// index.html, the embedded static files and the legacy /admin URLs. Anything
+// else is a JSON 404.
+func (s *Server) web(w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Path
+	if screenPath(p) {
+		if readOnly(w, r) {
+			s.serveAsset(w, "index.html")
+		}
 		return
 	}
-	data, e := fs.ReadFile(s.assets, name)
-	if e != nil {
-		if strings.HasPrefix(name, "assets/") || path.Ext(name) != "" {
-			fail(w, 404, "not_found", "Not found.")
+	if name, ok := s.staticName(p); ok {
+		if readOnly(w, r) {
+			s.serveAsset(w, name)
+		}
+		return
+	}
+	if p == "/admin" || strings.HasPrefix(p, "/admin/") {
+		if !readOnly(w, r) {
 			return
 		}
-		data, e = fs.ReadFile(s.assets, "index.html")
-		name = "index.html"
+		if p == "/admin/sw.js" {
+			// Service workers registered with the /admin/ scope update from
+			// this URL, so it serves the current worker instead of redirecting.
+			s.serveAsset(w, "sw.js")
+			return
+		}
+		http.Redirect(w, r, s.legacyLocation(r), http.StatusPermanentRedirect)
+		return
 	}
+	fail(w, 404, "not_found", "Not found.")
+}
+
+// readOnly rejects methods other than GET and HEAD with a JSON 405.
+func readOnly(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	w.Header().Set("Allow", "GET, HEAD")
+	fail(w, 405, "method_not_allowed", "Method not allowed.")
+	return false
+}
+
+// screenPath reports whether p is a screen of the web UI: /, /auto,
+// /settings, /settings/<page> or /consent, optionally with a trailing slash.
+func screenPath(p string) bool {
+	if p == "/" {
+		return true
+	}
+	p = strings.TrimSuffix(p, "/")
+	switch p {
+	case "/auto", "/settings", "/consent":
+		return true
+	}
+	page, ok := strings.CutPrefix(p, "/settings/")
+	return ok && pageName.MatchString(page)
+}
+
+// staticName returns the embedded file served at p: a file under assets/ or
+// a file with an extension at the root, other than index.html and dot files.
+func (s *Server) staticName(p string) (string, bool) {
+	name, ok := strings.CutPrefix(p, "/")
+	if !ok || name == "index.html" || !fs.ValidPath(name) {
+		return "", false
+	}
+	for _, c := range name {
+		if c < 0x20 || c == 0x7f || c == '\\' {
+			return "", false
+		}
+	}
+	for _, elem := range strings.Split(name, "/") {
+		if strings.HasPrefix(elem, ".") {
+			return "", false
+		}
+	}
+	if !strings.HasPrefix(name, "assets/") && (strings.Contains(name, "/") || path.Ext(name) == "") {
+		return "", false
+	}
+	info, err := fs.Stat(s.assets, name)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return name, true
+}
+
+// legacyLocation returns where a legacy /admin URL moved. The location is
+// built only from fixed paths and validated values so that it is always a
+// same-origin path; anything unknown goes to /.
+func (s *Server) legacyLocation(r *http.Request) string {
+	rest := strings.TrimPrefix(r.URL.Path, "/admin")
+	switch strings.TrimSuffix(rest, "/") {
+	case "":
+		return "/"
+	case "/auto":
+		return "/auto"
+	case "/settings":
+		return "/settings"
+	case "/oauth/authorize":
+		if v := r.URL.Query().Get("request"); v != "" {
+			return "/consent?request=" + url.QueryEscape(v)
+		}
+		return "/consent"
+	}
+	if page, ok := strings.CutPrefix(strings.TrimSuffix(rest, "/"), "/settings/"); ok && pageName.MatchString(page) {
+		return "/settings/" + page
+	}
+	if name, ok := s.staticName(rest); ok {
+		return "/" + name
+	}
+	return "/"
+}
+
+// serveAsset writes the embedded file name, or a JSON 404 when it is missing.
+func (s *Server) serveAsset(w http.ResponseWriter, name string) {
+	data, e := fs.ReadFile(s.assets, name)
 	if e != nil {
 		fail(w, 404, "not_found", "Not found.")
 		return
