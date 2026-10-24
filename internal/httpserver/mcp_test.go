@@ -15,6 +15,12 @@ import (
 
 const toolsListBody = `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
 
+// The WWW-Authenticate challenges of /mcp for PublicURL https://astovia.test.
+const (
+	mcpNoToken      = `Bearer resource_metadata="https://astovia.test/.well-known/oauth-protected-resource/mcp", scope="mcp"`
+	mcpInvalidToken = `Bearer error="invalid_token", resource_metadata="https://astovia.test/.well-known/oauth-protected-resource/mcp", scope="mcp"`
+)
+
 // mcpPost sends a tools/list request to h without the SDK client.
 func mcpPost(t *testing.T, h http.Handler, bearer, origin, host string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -166,10 +172,10 @@ func TestMCPHTTP(t *testing.T) {
 	if w := api.do("DELETE", "/api/v1/api-tokens/"+deleted.ID, api.alice, ""); w.Code != 204 {
 		t.Fatal(w.Code)
 	}
-	for name, bearer := range map[string]string{"none": "", "malformed": "ast_x", "unknown": "ast_" + strings.Repeat("A", 43), "access JWT": api.alice, "deleted": deleted.Token} {
-		challenge := `Bearer error="invalid_token"`
+	for name, bearer := range map[string]string{"none": "", "malformed": "ast_x", "unknown": "ast_" + strings.Repeat("A", 43), "access JWT": api.alice, "deleted": deleted.Token, "unknown OAuth": "aso_" + strings.Repeat("A", 43), "OAuth refresh": "asr_" + strings.Repeat("A", 43)} {
+		challenge := mcpInvalidToken
 		if bearer == "" {
-			challenge = "Bearer"
+			challenge = mcpNoToken
 		}
 		w := mcpPost(t, api.handler, bearer, "", "")
 		if w.Code != 401 || w.Header().Get("WWW-Authenticate") != challenge || errorCode(t, w) != "unauthorized" || w.Header().Get("Cache-Control") != "no-store" {
@@ -178,7 +184,7 @@ func TestMCPHTTP(t *testing.T) {
 	}
 	r := httptest.NewRequest("POST", "/mcp", strings.NewReader(toolsListBody))
 	r.Header.Set("Authorization", "Basic YWxpY2U6cHc=")
-	if w := serve(t, api.handler, r); w.Code != 401 || w.Header().Get("WWW-Authenticate") != "Bearer" {
+	if w := serve(t, api.handler, r); w.Code != 401 || w.Header().Get("WWW-Authenticate") != mcpNoToken {
 		t.Fatalf("Basic: %d", w.Code)
 	}
 
@@ -245,7 +251,7 @@ func TestMCPHTTP(t *testing.T) {
 	if err := api.store.ChangeUser(context.Background(), "bob@example.com", "", true, api.now.Unix()); err != nil {
 		t.Fatal(err)
 	}
-	if w := mcpPost(t, api.handler, bobTok, "", ""); w.Code != 401 || w.Header().Get("WWW-Authenticate") != `Bearer error="invalid_token"` {
+	if w := mcpPost(t, api.handler, bobTok, "", ""); w.Code != 401 || w.Header().Get("WWW-Authenticate") != mcpInvalidToken {
 		t.Fatalf("disabled user: %d", w.Code)
 	}
 

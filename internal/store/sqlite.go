@@ -119,3 +119,101 @@ func (q sqliteQueries) touchAPIToken(ctx context.Context, id string, now, before
 func (q sqliteQueries) deleteUserAPITokens(ctx context.Context, userID string) error {
 	return q.q.DeleteUserAPITokens(ctx, userID)
 }
+func (q sqliteQueries) oauthClient(ctx context.Context, clientID string) (OAuthClient, error) {
+	row, err := q.q.GetOAuthClient(ctx, clientID)
+	if err != nil {
+		return OAuthClient{}, err
+	}
+	uris, err := decodeRedirectURIs(row.RedirectUris)
+	if err != nil {
+		return OAuthClient{}, err
+	}
+	return OAuthClient{ClientID: row.ClientID, Kind: row.Kind, Name: row.Name, RedirectURIs: uris, AuthMethod: row.AuthMethod, SecretHash: row.SecretHash, MetadataExpiresAt: row.MetadataExpiresAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}, nil
+}
+func (q sqliteQueries) createOAuthClient(ctx context.Context, c OAuthClient, secretHash sql.NullString) error {
+	uris, err := encodeRedirectURIs(c.RedirectURIs)
+	if err != nil {
+		return err
+	}
+	return q.q.CreateOAuthClient(ctx, db.CreateOAuthClientParams{ClientID: c.ClientID, Kind: c.Kind, Name: c.Name, RedirectUris: uris, AuthMethod: c.AuthMethod, SecretHash: secretHash, MetadataExpiresAt: c.MetadataExpiresAt, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt})
+}
+func (q sqliteQueries) upsertCIMDClient(ctx context.Context, c OAuthClient) error {
+	uris, err := encodeRedirectURIs(c.RedirectURIs)
+	if err != nil {
+		return err
+	}
+	return q.q.UpsertCIMDClient(ctx, db.UpsertCIMDClientParams{ClientID: c.ClientID, Name: c.Name, RedirectUris: uris, MetadataExpiresAt: c.MetadataExpiresAt, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt})
+}
+func (q sqliteQueries) createOAuthGrant(ctx context.Context, g OAuthGrant) error {
+	return q.q.CreateOAuthGrant(ctx, db.CreateOAuthGrantParams{ID: g.ID, UserID: g.UserID, ClientID: g.ClientID, ClientName: g.ClientName, Scope: g.Scope, Resource: g.Resource, RedirectUri: g.RedirectURI, CodeHash: g.CodeHash, CodeChallenge: g.CodeChallenge, CodeExpiresAt: g.CodeExpiresAt, CreatedAt: g.CreatedAt, ExpiresAt: g.ExpiresAt})
+}
+func (q sqliteQueries) oauthGrantByCode(ctx context.Context, codeHash string) (OAuthGrant, error) {
+	row, err := q.q.GetOAuthGrantByCode(ctx, codeHash)
+	return q.grant(row), err
+}
+func (q sqliteQueries) lockOAuthGrantByCode(ctx context.Context, codeHash, userID string) (OAuthGrant, error) {
+	row, err := q.q.LockOAuthGrantByCode(ctx, db.LockOAuthGrantByCodeParams{CodeHash: codeHash, UserID: userID})
+	return q.grant(row), err
+}
+func (q sqliteQueries) oauthGrant(ctx context.Context, userID, id string) (OAuthGrant, error) {
+	row, err := q.q.GetOAuthGrant(ctx, db.GetOAuthGrantParams{ID: id, UserID: userID})
+	return q.grant(row), err
+}
+func (q sqliteQueries) markOAuthCodeUsed(ctx context.Context, userID, id string, now int64) (int64, error) {
+	return q.q.MarkOAuthCodeUsed(ctx, db.MarkOAuthCodeUsedParams{CodeUsedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id, UserID: userID})
+}
+func (q sqliteQueries) extendOAuthGrant(ctx context.Context, userID, id string, expiresAt int64) error {
+	return q.q.ExtendOAuthGrant(ctx, db.ExtendOAuthGrantParams{ExpiresAt: expiresAt, ID: id, UserID: userID})
+}
+func (q sqliteQueries) listOAuthGrants(ctx context.Context, userID string, now int64) ([]OAuthGrant, error) {
+	rows, err := q.q.ListOAuthGrants(ctx, db.ListOAuthGrantsParams{UserID: userID, Now: now})
+	if err != nil {
+		return nil, err
+	}
+	grants := make([]OAuthGrant, 0, len(rows))
+	for _, row := range rows {
+		grants = append(grants, q.grant(row))
+	}
+	return grants, nil
+}
+func (q sqliteQueries) deleteOAuthGrant(ctx context.Context, userID, id string) (int64, error) {
+	return q.q.DeleteOAuthGrant(ctx, db.DeleteOAuthGrantParams{ID: id, UserID: userID})
+}
+func (q sqliteQueries) touchOAuthGrant(ctx context.Context, userID, id string, now, before int64) error {
+	return q.q.TouchOAuthGrant(ctx, db.TouchOAuthGrantParams{LastUsedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id, UserID: userID, TouchedBefore: sql.NullInt64{Int64: before, Valid: true}})
+}
+func (q sqliteQueries) deleteExpiredOAuthGrants(ctx context.Context, userID string, now int64) error {
+	return q.q.DeleteExpiredOAuthGrants(ctx, db.DeleteExpiredOAuthGrantsParams{UserID: userID, Now: now})
+}
+func (q sqliteQueries) deleteUserOAuthGrants(ctx context.Context, userID string) error {
+	return q.q.DeleteUserOAuthGrants(ctx, userID)
+}
+func (q sqliteQueries) createOAuthToken(ctx context.Context, t OAuthToken) error {
+	return q.q.CreateOAuthToken(ctx, db.CreateOAuthTokenParams{TokenHash: t.Hash, Kind: t.Kind, GrantID: t.GrantID, UserID: t.UserID, CreatedAt: t.CreatedAt, ExpiresAt: t.ExpiresAt})
+}
+func (q sqliteQueries) oauthTokenByHash(ctx context.Context, hash string) (OAuthToken, error) {
+	row, err := q.q.GetOAuthTokenByHash(ctx, hash)
+	return q.token(row), err
+}
+func (q sqliteQueries) lockOAuthTokenByHash(ctx context.Context, hash, userID string) (OAuthToken, error) {
+	row, err := q.q.LockOAuthTokenByHash(ctx, db.LockOAuthTokenByHashParams{TokenHash: hash, UserID: userID})
+	return q.token(row), err
+}
+func (q sqliteQueries) deleteOAuthToken(ctx context.Context, userID, hash string) (int64, error) {
+	return q.q.DeleteOAuthToken(ctx, db.DeleteOAuthTokenParams{TokenHash: hash, UserID: userID})
+}
+func (q sqliteQueries) deleteGrantOAuthTokens(ctx context.Context, userID, grantID string) error {
+	return q.q.DeleteGrantOAuthTokens(ctx, db.DeleteGrantOAuthTokensParams{GrantID: grantID, UserID: userID})
+}
+func (q sqliteQueries) deleteExpiredOAuthTokens(ctx context.Context, userID string, now int64) error {
+	return q.q.DeleteExpiredOAuthTokens(ctx, db.DeleteExpiredOAuthTokensParams{UserID: userID, Now: now})
+}
+func (q sqliteQueries) deleteUserOAuthTokens(ctx context.Context, userID string) error {
+	return q.q.DeleteUserOAuthTokens(ctx, userID)
+}
+func (sqliteQueries) grant(row db.OauthGrant) OAuthGrant {
+	return OAuthGrant{ID: row.ID, UserID: row.UserID, ClientID: row.ClientID, ClientName: row.ClientName, Scope: row.Scope, Resource: row.Resource, RedirectURI: row.RedirectUri, CodeHash: row.CodeHash, CodeChallenge: row.CodeChallenge, CodeExpiresAt: row.CodeExpiresAt, CodeUsedAt: row.CodeUsedAt, CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt, LastUsedAt: row.LastUsedAt}
+}
+func (sqliteQueries) token(row db.OauthToken) OAuthToken {
+	return OAuthToken{Hash: row.TokenHash, Kind: row.Kind, GrantID: row.GrantID, UserID: row.UserID, CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt}
+}

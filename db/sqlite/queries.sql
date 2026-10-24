@@ -64,3 +64,59 @@ UPDATE api_tokens SET last_used_at = sqlc.arg(last_used_at)
 WHERE id = sqlc.arg(id) AND (last_used_at IS NULL OR last_used_at < sqlc.arg(touched_before));
 -- name: DeleteUserAPITokens :exec
 DELETE FROM api_tokens WHERE user_id = sqlc.arg(user_id);
+-- name: GetOAuthClient :one
+SELECT client_id, kind, name, redirect_uris, auth_method, secret_hash, metadata_expires_at, created_at, updated_at FROM oauth_clients
+WHERE client_id = sqlc.arg(client_id);
+-- name: CreateOAuthClient :exec
+INSERT INTO oauth_clients (client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at)
+VALUES (sqlc.arg(client_id),sqlc.arg(kind),sqlc.arg(name),sqlc.arg(redirect_uris),sqlc.arg(auth_method),sqlc.arg(secret_hash),sqlc.arg(metadata_expires_at),sqlc.arg(created_at),sqlc.arg(updated_at));
+-- name: UpsertCIMDClient :exec
+INSERT INTO oauth_clients (client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at)
+VALUES (sqlc.arg(client_id),'cimd',sqlc.arg(name),sqlc.arg(redirect_uris),'none',NULL,sqlc.arg(metadata_expires_at),sqlc.arg(created_at),sqlc.arg(updated_at))
+ON CONFLICT (client_id) DO UPDATE SET name = excluded.name, redirect_uris = excluded.redirect_uris, metadata_expires_at = excluded.metadata_expires_at, updated_at = excluded.updated_at;
+-- name: CreateOAuthGrant :exec
+INSERT INTO oauth_grants (id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(client_id),sqlc.arg(client_name),sqlc.arg(scope),sqlc.arg(resource),sqlc.arg(redirect_uri),sqlc.arg(code_hash),sqlc.arg(code_challenge),sqlc.arg(code_expires_at),NULL,sqlc.arg(created_at),sqlc.arg(expires_at),NULL);
+-- name: GetOAuthGrantByCode :one
+SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
+WHERE code_hash = sqlc.arg(code_hash);
+-- name: LockOAuthGrantByCode :one
+SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
+WHERE code_hash = sqlc.arg(code_hash) AND user_id = sqlc.arg(user_id);
+-- name: GetOAuthGrant :one
+SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: MarkOAuthCodeUsed :execrows
+UPDATE oauth_grants SET code_used_at = sqlc.arg(code_used_at)
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND code_used_at IS NULL;
+-- name: ExtendOAuthGrant :exec
+UPDATE oauth_grants SET expires_at = sqlc.arg(expires_at) WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: ListOAuthGrants :many
+SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
+WHERE user_id = sqlc.arg(user_id) AND code_used_at IS NOT NULL AND expires_at > sqlc.arg(now)
+ORDER BY created_at DESC, id DESC;
+-- name: DeleteOAuthGrant :execrows
+DELETE FROM oauth_grants WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: TouchOAuthGrant :exec
+UPDATE oauth_grants SET last_used_at = sqlc.arg(last_used_at)
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND (last_used_at IS NULL OR last_used_at < sqlc.arg(touched_before));
+-- name: DeleteExpiredOAuthGrants :exec
+DELETE FROM oauth_grants WHERE user_id = sqlc.arg(user_id) AND expires_at <= sqlc.arg(now);
+-- name: DeleteUserOAuthGrants :exec
+DELETE FROM oauth_grants WHERE user_id = sqlc.arg(user_id);
+-- name: CreateOAuthToken :exec
+INSERT INTO oauth_tokens (token_hash,kind,grant_id,user_id,created_at,expires_at)
+VALUES (sqlc.arg(token_hash),sqlc.arg(kind),sqlc.arg(grant_id),sqlc.arg(user_id),sqlc.arg(created_at),sqlc.arg(expires_at));
+-- name: GetOAuthTokenByHash :one
+SELECT token_hash, kind, grant_id, user_id, created_at, expires_at FROM oauth_tokens WHERE token_hash = sqlc.arg(token_hash);
+-- name: LockOAuthTokenByHash :one
+SELECT token_hash, kind, grant_id, user_id, created_at, expires_at FROM oauth_tokens
+WHERE token_hash = sqlc.arg(token_hash) AND user_id = sqlc.arg(user_id);
+-- name: DeleteOAuthToken :execrows
+DELETE FROM oauth_tokens WHERE token_hash = sqlc.arg(token_hash) AND user_id = sqlc.arg(user_id);
+-- name: DeleteGrantOAuthTokens :exec
+DELETE FROM oauth_tokens WHERE grant_id = sqlc.arg(grant_id) AND user_id = sqlc.arg(user_id);
+-- name: DeleteExpiredOAuthTokens :exec
+DELETE FROM oauth_tokens WHERE user_id = sqlc.arg(user_id) AND expires_at <= sqlc.arg(now);
+-- name: DeleteUserOAuthTokens :exec
+DELETE FROM oauth_tokens WHERE user_id = sqlc.arg(user_id);

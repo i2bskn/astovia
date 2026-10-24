@@ -15,6 +15,8 @@ export default defineConfig(({ mode }) => {
         '/api': { target: apiURL, changeOrigin: false },
         '/healthz': { target: apiURL, changeOrigin: false },
         '/mcp': { target: apiURL, changeOrigin: false },
+        '/.well-known': { target: apiURL, changeOrigin: false },
+        '/oauth': { target: apiURL, changeOrigin: false },
       },
     },
   };

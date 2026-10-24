@@ -3,6 +3,12 @@ import type { FormEvent } from 'react';
 import { auth } from './auth';
 import ActionItemList from './ActionItemList';
 import APITokenList from './APITokenList';
+import ConnectionList from './ConnectionList';
+import ConsentPage from './ConsentPage';
+
+// The OAuth consent page replaces the dashboard on this path. There is no
+// router; Vite and the Go server serve index.html for every /admin/ path.
+const consentPage = location.pathname === '/admin/oauth/authorize';
 
 function Brand() {
   return <div className="brand" aria-label="Astovia"><span className="brand-mark" aria-hidden="true">a</span><span>Astovia</span></div>;
@@ -55,18 +61,21 @@ function LoginForm() {
 export default function App() {
   const state = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
   const signedIn = state.status === 'authenticated' && state.user !== null;
+  const dashboard = signedIn && !consentPage;
 
   return <div className="app-shell">
     <header className="site-header"><Brand /><span className="instance-label">あなたの環境、あなたのInbox。</span></header>
-    <main className={signedIn ? 'main-content dashboard' : 'main-content'}>
+    <main className={dashboard ? 'main-content dashboard' : 'main-content'}>
       {state.status === 'loading' ? <section className="status-card" aria-live="polite" aria-busy="true"><span className="loading-dot" aria-hidden="true" /><p>ログイン状態を確認しています…</p></section> : null}
       {state.status === 'unavailable' ? <section className="status-card" aria-labelledby="connection-heading"><h1 id="connection-heading">接続を確認してください</h1><p className="intro" role="alert">{state.error}</p><button className="button primary" onClick={() => auth.retry()}>もう一度接続する<span aria-hidden="true">↻</span></button></section> : null}
       {state.status === 'anonymous' ? <LoginForm /> : null}
-      {signedIn ? <>
+      {signedIn && consentPage ? <ConsentPage email={state.user?.email ?? ''} /> : null}
+      {dashboard ? <>
         <div className="dashboard-heading"><div><div className="section-label">YOUR WORKSPACE</div><h1>こんにちは、<span className="user-email">{state.user?.email}</span></h1><p className="intro">Astoviaにログインしています。</p></div><button className="button secondary" disabled={state.busy === 'logout'} onClick={() => { void auth.logout(); }}>{state.busy === 'logout' ? 'ログアウト中…' : 'ログアウト'}</button></div>
         {state.error ? <p className="notice error" role="alert">{state.error}</p> : null}
         <ActionItemList />
         <APITokenList />
+        <ConnectionList />
         <p className="privacy-note"><span aria-hidden="true">◈</span> この画面は、ログインした本人のためのスペースです。</p>
       </> : null}
     </main>

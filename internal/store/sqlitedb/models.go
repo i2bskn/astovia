@@ -30,6 +30,44 @@ type ApiToken struct {
 	LastUsedAt sql.NullInt64
 }
 
+type OauthClient struct {
+	ClientID          string
+	Kind              string
+	Name              string
+	RedirectUris      string
+	AuthMethod        string
+	SecretHash        sql.NullString
+	MetadataExpiresAt sql.NullInt64
+	CreatedAt         int64
+	UpdatedAt         int64
+}
+
+type OauthGrant struct {
+	ID            string
+	UserID        string
+	ClientID      string
+	ClientName    string
+	Scope         string
+	Resource      string
+	RedirectUri   string
+	CodeHash      string
+	CodeChallenge string
+	CodeExpiresAt int64
+	CodeUsedAt    sql.NullInt64
+	CreatedAt     int64
+	ExpiresAt     int64
+	LastUsedAt    sql.NullInt64
+}
+
+type OauthToken struct {
+	TokenHash string
+	Kind      string
+	GrantID   string
+	UserID    string
+	CreatedAt int64
+	ExpiresAt int64
+}
+
 type RefreshToken struct {
 	Hash       string
 	SessionID  string

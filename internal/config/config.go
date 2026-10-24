@@ -62,7 +62,7 @@ func canonicalOrigin(raw string) (string, bool, error) {
 			return "", false, errors.New("ASTOVIA_PUBLIC_URL does not support scoped or IPv4-mapped IPv6 hosts, or bracketed IPv4")
 		}
 		host = ip.String()
-	} else if !validDNSHost(host) {
+	} else if !ValidDNSHost(host) {
 		return "", false, errors.New("ASTOVIA_PUBLIC_URL requires an ASCII DNS/punycode hostname or an explicit IP address")
 	}
 	if u.Scheme == "http" && host != "localhost" && (ipErr != nil || !ip.IsLoopback()) {
@@ -91,7 +91,10 @@ func canonicalOrigin(raw string) (string, bool, error) {
 	return u.Scheme + "://" + authority, u.Scheme == "https", nil
 }
 
-func validDNSHost(host string) bool {
+// ValidDNSHost reports whether host is a lower-case ASCII DNS name (punycode for
+// international names) that cannot be read as a numeric IPv4 shorthand.
+// internal/oauth uses it for client and redirect URI hosts as well.
+func ValidDNSHost(host string) bool {
 	name := strings.TrimSuffix(host, ".")
 	if name == "" || len(name) > 253 {
 		return false

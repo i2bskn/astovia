@@ -85,6 +85,21 @@ input:disabled, textarea:disabled { background: #f6f7f4; }
 .token-created-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .token-created-label { font-size: 12px; color: #5d6d64; }
 .danger { color: #8c342b; border-color: #f0d1c7; }
+.consent-card { width: min(520px, calc(100vw - 48px)); background: #fff; border: 1px solid #dce3da; border-radius: 20px; box-shadow: 0 16px 50px -32px #324a3c50; padding: 40px; min-width: 0; }
+.consent-card h1 { font-size: 22px; overflow-wrap: anywhere; }
+.consent-client { font-weight: 700; }
+.consent-facts { margin: 20px 0 0; display: grid; gap: 8px; font-size: 14px; }
+.consent-facts div { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; }
+.consent-facts dt { color: #6b7971; }
+.consent-facts dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.consent-note { display: block; font-weight: 400; color: #5d6d64; font-size: 13px; }
+.consent-warning { margin-top: 12px; color: #8c5a2b; font-size: 13px; overflow-wrap: anywhere; }
+.consent-subheading { margin-top: 24px; font-size: 14px; font-weight: 600; }
+.consent-scopes { margin: 8px 0 0; padding-left: 20px; font-size: 14px; }
+.consent-account { margin: 20px 0; color: #5d6d64; font-size: 13px; overflow-wrap: anywhere; }
+.consent-actions { display: flex; gap: 12px; }
+.consent-actions .button { flex: 1; }
+.inline-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: #f2f6ed; border: 1px solid #d9e2d2; border-radius: 4px; padding: 1px 4px; overflow-wrap: anywhere; }
 .privacy-note { display: flex; gap: 8px; margin-top: 20px; color: #7b877e; font-size: 11px; }
 @media (max-width: 767px) {
   .site-header { padding: 24px; }
@@ -105,5 +120,8 @@ input:disabled, textarea:disabled { background: #f6f7f4; }
   .desktop-break { display: none; }
   .action-panel { padding: 22px 18px; }
   .add-button { justify-self: stretch; width: 100%; }
+  .consent-card { padding: 30px 24px; }
+  .consent-actions { flex-direction: column; }
+  .consent-facts div { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

@@ -266,7 +266,7 @@ func TestAPITokensAfterPasswordReset(t *testing.T) {
 			expectStatus(t, api.do("POST", "/api/v1/api-tokens", api.alice, `{"name":"after reset"}`), 401, "unauthorized")
 			expectStatus(t, api.do("GET", "/api/v1/action-items", alices.Token, ""), 401, "unauthorized")
 			w := mcpPost(t, api.handler, alices.Token, "", "")
-			if w.Code != 401 || w.Header().Get("WWW-Authenticate") != `Bearer error="invalid_token"` {
+			if w.Code != 401 || w.Header().Get("WWW-Authenticate") != mcpInvalidToken {
 				t.Fatalf("/mcp after reset: %d %v", w.Code, w.Header())
 			}
 			if list, err := api.store.ListAPITokens(context.Background(), "alice-id"); err != nil || len(list) != 0 {

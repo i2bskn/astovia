@@ -28,6 +28,22 @@ sql:
             go_type:
               import: database/sql
               type: NullInt64
+          - column: oauth_clients.secret_hash
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: oauth_clients.metadata_expires_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: oauth_grants.code_used_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: oauth_grants.last_used_at
+            go_type:
+              import: database/sql
+              type: NullInt64
   - engine: postgresql
     schema: db/postgres/schema.sql
     queries: db/postgres/queries.sql

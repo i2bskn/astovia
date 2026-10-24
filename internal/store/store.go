@@ -99,6 +99,27 @@ type queries interface {
 	deleteAPIToken(ctx context.Context, userID, id string) (int64, error)
 	touchAPIToken(ctx context.Context, id string, now, before int64) error
 	deleteUserAPITokens(ctx context.Context, userID string) error
+	oauthClient(ctx context.Context, clientID string) (OAuthClient, error)
+	createOAuthClient(ctx context.Context, c OAuthClient, secretHash sql.NullString) error
+	upsertCIMDClient(ctx context.Context, c OAuthClient) error
+	createOAuthGrant(ctx context.Context, g OAuthGrant) error
+	oauthGrantByCode(ctx context.Context, codeHash string) (OAuthGrant, error)
+	lockOAuthGrantByCode(ctx context.Context, codeHash, userID string) (OAuthGrant, error)
+	oauthGrant(ctx context.Context, userID, id string) (OAuthGrant, error)
+	markOAuthCodeUsed(ctx context.Context, userID, id string, now int64) (int64, error)
+	extendOAuthGrant(ctx context.Context, userID, id string, expiresAt int64) error
+	listOAuthGrants(ctx context.Context, userID string, now int64) ([]OAuthGrant, error)
+	deleteOAuthGrant(ctx context.Context, userID, id string) (int64, error)
+	touchOAuthGrant(ctx context.Context, userID, id string, now, before int64) error
+	deleteExpiredOAuthGrants(ctx context.Context, userID string, now int64) error
+	deleteUserOAuthGrants(ctx context.Context, userID string) error
+	createOAuthToken(ctx context.Context, t OAuthToken) error
+	oauthTokenByHash(ctx context.Context, hash string) (OAuthToken, error)
+	lockOAuthTokenByHash(ctx context.Context, hash, userID string) (OAuthToken, error)
+	deleteOAuthToken(ctx context.Context, userID, hash string) (int64, error)
+	deleteGrantOAuthTokens(ctx context.Context, userID, grantID string) error
+	deleteExpiredOAuthTokens(ctx context.Context, userID string, now int64) error
+	deleteUserOAuthTokens(ctx context.Context, userID string) error
 }
 type Store struct {
 	db     *sql.DB
@@ -138,7 +159,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -199,7 +220,15 @@ func (s *Store) ChangeUser(ctx context.Context, email, hash string, disable bool
 		}
 		// API tokens have no expiry, so a token issued from a stolen access
 		// token must not survive the password reset that recovers the account.
-		return q.deleteUserAPITokens(ctx, u.ID)
+		// OAuth connections are granted from a session as well and go with it.
+		// Tokens are deleted before grants because they reference them.
+		if e = q.deleteUserAPITokens(ctx, u.ID); e != nil {
+			return e
+		}
+		if e = q.deleteUserOAuthTokens(ctx, u.ID); e != nil {
+			return e
+		}
+		return q.deleteUserOAuthGrants(ctx, u.ID)
 	})
 }
 func (s *Store) Login(ctx context.Context, verified User, session Session, refresh Refresh) error {

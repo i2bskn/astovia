@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/i2bskn/astovia/internal/oauth"
 	"github.com/i2bskn/astovia/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"net/http"
+	"strings"
 )
 
 // mcpInstructions is sent to MCP clients on initialize.
@@ -33,7 +35,7 @@ func (s *Server) mcpHandler() http.Handler {
 		Stateless:           true,
 		JSONResponse:        true,
 		MaxRequestBodyBytes: mcpBodyLimit,
-		// /mcp requires a Bearer API token and never reads cookies, so a page
+		// /mcp requires a Bearer token and never reads cookies, so a page
 		// reached through DNS rebinding has no credential to pass the check.
 		// Requests with an Origin header (from browsers) are rejected by
 		// mcpAuth unless it equals PublicURL. The SDK's own protection would
@@ -81,7 +83,8 @@ func (w *noStoreWriter) FlushError() error {
 func (w *noStoreWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // mcpAuth guards /mcp: it rejects foreign browser origins and requires an
-// API token. Access JWTs are not accepted here.
+// API token ("ast_") or an OAuth access token ("aso_"). Access JWTs are not
+// accepted here.
 func (s *Server) mcpAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// MCP clients outside a browser do not send Origin. When it is
@@ -95,7 +98,16 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 			s.mcpAuthError(w, r, store.ErrUnauthorized, false)
 			return
 		}
-		u, err := s.auth.AuthenticateAPIToken(r.Context(), token)
+		var u store.User
+		var err error
+		switch {
+		case strings.HasPrefix(token, "ast_"):
+			u, err = s.auth.AuthenticateAPIToken(r.Context(), token)
+		case strings.HasPrefix(token, "aso_"):
+			u, err = s.auth.AuthenticateOAuthAccess(r.Context(), token)
+		default:
+			err = store.ErrUnauthorized
+		}
 		if err != nil {
 			s.mcpAuthError(w, r, err, true)
 			return
@@ -104,15 +116,16 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 	})
 }
 
-// mcpAuthError is authError with the WWW-Authenticate challenge on 401.
-// Following RFC 6750 section 3.1, the invalid_token error code is added only
-// when a bearer token was presented; a request without one gets the bare
-// challenge.
+// mcpAuthError is authError with the WWW-Authenticate challenge on 401. The
+// challenge points to the protected resource metadata (RFC 9728) and the
+// scope to request, which MCP clients use to start the OAuth flow. Following
+// RFC 6750 section 3.1, the invalid_token error code is added only when a
+// bearer token was presented.
 func (s *Server) mcpAuthError(w http.ResponseWriter, r *http.Request, err error, presented bool) {
 	if errors.Is(err, store.ErrUnauthorized) {
-		challenge := "Bearer"
+		challenge := `Bearer resource_metadata="` + s.cfg.PublicURL + protectedResourcePath + `", scope="` + oauth.ScopeMCP + `"`
 		if presented {
-			challenge = `Bearer error="invalid_token"`
+			challenge = `Bearer error="invalid_token", resource_metadata="` + s.cfg.PublicURL + protectedResourcePath + `", scope="` + oauth.ScopeMCP + `"`
 		}
 		w.Header().Set("WWW-Authenticate", challenge)
 	}

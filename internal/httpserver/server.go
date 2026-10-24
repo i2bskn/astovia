@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
+	"github.com/i2bskn/astovia/internal/oauth"
 	"github.com/i2bskn/astovia/internal/store"
 	"io"
 	"io/fs"
@@ -27,6 +28,12 @@ type Server struct {
 	auth    *auth.Service
 	assets  fs.FS
 	limiter *loginLimiter
+	// registerLimiter limits OAuth client registrations and cimdLimiter
+	// metadata document fetches, per peer like limiter.
+	registerLimiter *loginLimiter
+	cimdLimiter     *loginLimiter
+	// fetchCIMD fetches a Client ID Metadata Document. Tests replace it.
+	fetchCIMD func(ctx context.Context, clientID string) (oauth.Document, error)
 }
 
 // userResponse is the public representation of a user.
@@ -52,9 +59,13 @@ func New(c config.Config, a *auth.Service, assets fs.FS) http.Handler {
 }
 
 // newServer builds a Server without wrapping it, so tests in this package can
-// adjust the limiter before calling handler.
+// adjust the limiters and the CIMD fetcher before calling handler.
 func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
-	return &Server{cfg: c, auth: a, assets: assets, limiter: newLoginLimiter()}
+	cimd := oauth.NewCIMDClient()
+	return &Server{cfg: c, auth: a, assets: assets, limiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
+		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
+			return oauth.FetchCIMD(ctx, cimd, clientID)
+		}}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -90,7 +101,21 @@ func (s *Server) handler() http.Handler {
 		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handleCreateAPIToken))),
 	}))
 	mux.Handle("/api/v1/api-tokens/{id}", allow(http.MethodDelete, s.requireUser(http.HandlerFunc(s.handleDeleteAPIToken))))
-	// /mcp authenticates with API tokens only; see mcpAuth.
+	mux.Handle("/api/v1/oauth/consent", allowMethods(map[string]http.Handler{
+		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleGetConsent)),
+		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handlePostConsent))),
+	}))
+	mux.Handle("/api/v1/oauth/connections", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleListConnections))))
+	mux.Handle("/api/v1/oauth/connections/{id}", allow(http.MethodDelete, s.requireUser(http.HandlerFunc(s.handleDeleteConnection))))
+	// OAuth authorization server and protected resource metadata. Errors
+	// raised inside the /oauth/* handlers use the RFC 6749 format.
+	mux.Handle("/.well-known/oauth-protected-resource", allow(http.MethodGet, http.HandlerFunc(s.handleProtectedResourceMetadata)))
+	mux.Handle("/.well-known/oauth-protected-resource/mcp", allow(http.MethodGet, http.HandlerFunc(s.handleProtectedResourceMetadata)))
+	mux.Handle("/.well-known/oauth-authorization-server", allow(http.MethodGet, http.HandlerFunc(s.handleAuthorizationServerMetadata)))
+	mux.Handle("/oauth/register", allow(http.MethodPost, http.HandlerFunc(s.handleRegister)))
+	mux.Handle("/oauth/authorize", allow(http.MethodGet, http.HandlerFunc(s.handleAuthorize)))
+	mux.Handle("/oauth/token", allow(http.MethodPost, http.HandlerFunc(s.handleToken)))
+	// /mcp authenticates with API tokens and OAuth access tokens; see mcpAuth.
 	mux.Handle("/mcp", allow(http.MethodPost, s.mcpAuth(s.mcpHandler())))
 	mux.Handle("/admin", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
@@ -107,7 +132,7 @@ func secureHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
-		if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/mcp" {
+		if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/oauth/") || r.URL.Path == "/mcp" {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)

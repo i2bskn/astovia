@@ -1,6 +1,6 @@
 # Astovia
 
-Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在は、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存と、本人の対応事項の作成・一覧・状態変更（管理画面とREST API）、APIトークン、APIトークンで認証するMCPエンドポイントを実装しています。MCPのOAuth、外部サービス連携、AI抽出は**まだ実装していません**。
+Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在は、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存と、本人の対応事項の作成・一覧・状態変更（管理画面とREST API）、APIトークン、MCPエンドポイントと、AIクライアントがURLだけで接続できるMCP用のOAuth認可サーバーを実装しています。外部サービス連携、AI抽出は**まだ実装していません**。
 
 ## Dockerでローカル開発する
 
@@ -26,7 +26,7 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は「PostgreSQLを使用する」の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブルやAPIトークンの`api_tokens`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -54,7 +54,7 @@ make up
 make logs
 ```
 
-[http://localhost:5173/admin/](http://localhost:5173/admin/)を開いてログインしてください。ホストへ公開するのはViteの`127.0.0.1:5173`だけです。Goはコンテナ内の`0.0.0.0:8080`で待ち受け、Viteが`/auth`・`/api`・`/healthz`・`/mcp`を転送します。ブラウザからのOriginは変更せず、Go側の公開URLも`http://localhost:5173`にそろえます。`localhost`と`127.0.0.1`は異なるOriginのため、ブラウザでは`localhost`を使用してください。
+[http://localhost:5173/admin/](http://localhost:5173/admin/)を開いてログインしてください。ホストへ公開するのはViteの`127.0.0.1:5173`だけです。Goはコンテナ内の`0.0.0.0:8080`で待ち受け、Viteが`/auth`・`/api`・`/healthz`・`/mcp`・`/oauth`・`/.well-known`を転送します。`/admin/oauth/authorize`（OAuthの同意ページ）は管理画面として表示します。ブラウザからのOriginは変更せず、Go側の公開URLも`http://localhost:5173`にそろえます。`localhost`と`127.0.0.1`は異なるOriginのため、ブラウザでは`localhost`を使用してください。
 
 停止する場合は次を実行します。コンテナは削除せずに停止します（`docker compose stop`）。
 
@@ -152,7 +152,7 @@ make user-disable USER_EMAIL=alice@example.com
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンをすべて削除します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）をすべて削除します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## 認証と運用上の制約
 
@@ -174,11 +174,33 @@ APIトークンは、AIクライアントや外部プログラムが本人の対
 - 管理画面の「API トークン」で名前（1〜100文字）を付けて発行します。トークン（`ast_`で始まる47文字）は発行した直後に一度だけ表示し、再表示できません。DBには検証用のハッシュだけを保存します。
 - 1ユーザーあたり50件まで発行できます。有効期限はなく、管理画面で削除すると即座に失効します。一覧には名前、作成日時、最終使用日時（1分単位で記録）を表示します。
 - パスワード再設定とユーザー無効化を行うと、そのユーザーのAPIトークンはすべて削除されます。
+- AIクライアントの接続にはOAuth（次の「MCP」「OAuth」を参照）を推奨します。APIトークンは、OAuthに対応していないクライアントやスクリプトのための補助手段です。
 - 使える範囲は`/mcp`と`/api/v1/action-items*`だけです。`/api/v1/me`とトークン管理（`/api/v1/api-tokens*`）はAPIトークンでは呼べず、管理画面のログイン（Access JWT）が必要です。発行時はログイン中のセッションが有効かをDB上で再確認します。
 
 ## MCP
 
-`/mcp`はMCPのStreamable HTTPエンドポイントです。ステートレスで、`POST`だけを受け付けます（`GET`／`DELETE`は405。SSEストリームとセッションは提供しません）。認証は`Authorization: Bearer <APIトークン>`で、Access JWTは受け付けません。認証できない場合は401と`WWW-Authenticate: Bearer`を返します。トークンを送ったうえで無効だった場合は`WWW-Authenticate: Bearer error="invalid_token"`です。
+`/mcp`はMCPのStreamable HTTPエンドポイントです。ステートレスで、`POST`だけを受け付けます（`GET`／`DELETE`は405。SSEストリームとセッションは提供しません）。
+
+AIクライアントは、URLを入力するだけでOAuthによる認可を経て接続できます。トークンを手で貼る必要はありません。URLは`ASTOVIA_PUBLIC_URL`に`/mcp`を付けたものです（開発環境（Docker）では`http://localhost:5173/mcp`）。管理画面の「接続中の AI クライアント」にも表示します。
+
+- Claude Code: 次のコマンドで追加し、Claude Codeの中で`/mcp`を実行して認証します。ブラウザでAstoviaの同意ページが開くので、ログインして「許可する」を押してください。
+
+  ```sh
+  claude mcp add --transport http astovia https://astovia.example.com/mcp
+  ```
+
+- Claude（Web・Desktop）のカスタムコネクタやChatGPT: コネクタのURLに`<ASTOVIA_PUBLIC_URL>/mcp`を入力します。これらはAnthropic・OpenAIのサーバーからAstoviaへ接続するため、インターネットから到達できるHTTPSの公開URLが必要です。ローカル開発環境（`http://localhost:5173`）には接続できません。
+
+APIトークンも引き続き使えます。OAuthに対応していないクライアントでは、管理画面で発行したトークンを`Authorization: Bearer <APIトークン>`で送ってください。
+
+```sh
+claude mcp add --transport http astovia http://localhost:5173/mcp --header "Authorization: Bearer ast_..."
+```
+
+認証は`Authorization: Bearer`で、OAuthのアクセストークン（`aso_`で始まる）かAPIトークン（`ast_`で始まる）を受け付けます。Access JWTとOAuthのリフレッシュトークンは受け付けません。認証できない場合は401と次の`WWW-Authenticate`を返します。MCPクライアントはこれを手がかりにOAuthを始めます。
+
+- トークンがない場合: `Bearer resource_metadata="<ASTOVIA_PUBLIC_URL>/.well-known/oauth-protected-resource/mcp", scope="mcp"`
+- トークンを送ったうえで無効だった場合: `Bearer error="invalid_token", resource_metadata="…", scope="mcp"`
 
 提供するツールは次の4つです。操作対象は常にトークンの持ち主の対応事項で、入力の検証とエラーの内容はREST APIと同じです。検証エラーや存在しない項目は、ツール結果のエラー（`isError`、本文は`<code>: <message>`）として返します。
 
@@ -189,13 +211,34 @@ APIトークンは、AIクライアントや外部プログラムが本人の対
 | `action_items_get` | `id`で1件返す |
 | `action_items_update` | `id`と、RESTの更新本文と同じキー（`version`を含む）で更新する |
 
-Claude Codeでは次のように接続します。開発環境（Docker）では`http://localhost:5173/mcp`、本番では`ASTOVIA_PUBLIC_URL`に`/mcp`を付けたURLを指定します。管理画面でトークンを発行すると、トークンを埋め込んだ接続例を表示します。
+ブラウザ以外のMCPクライアントは`Origin`ヘッダーを送らないため、そのまま受け付けます。`Origin`ヘッダーがある場合は、`ASTOVIA_PUBLIC_URL`と完全一致しない限り403で拒否します（DNSリバインディング対策）。`/mcp`はCookieを使わないため、トークンを持たないWebページからは認証を通りません。
 
-```sh
-claude mcp add --transport http astovia http://localhost:5173/mcp --header "Authorization: Bearer ast_..."
-```
+## OAuth
 
-ブラウザ以外のMCPクライアントは`Origin`ヘッダーを送らないため、そのまま受け付けます。`Origin`ヘッダーがある場合は、`ASTOVIA_PUBLIC_URL`と完全一致しない限り403で拒否します（DNSリバインディング対策）。`/mcp`はCookieを使わないため、トークンを持たないWebページからは認証を通りません。MCPのOAuth（認可サーバー、クライアント登録）には未対応で、今後追加する予定です。
+Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2.1の認可コード方式（PKCE S256必須）だけに対応し、OpenID Connect、トークンの失効・イントロスペクションのエンドポイント、JWT形式のトークンは提供しません。
+
+| エンドポイント | 内容 |
+| --- | --- |
+| `GET /.well-known/oauth-protected-resource/mcp` | 保護リソースメタデータ。`resource`は`<ASTOVIA_PUBLIC_URL>/mcp`、`authorization_servers`は`ASTOVIA_PUBLIC_URL` |
+| `GET /.well-known/oauth-protected-resource` | 上と同じ内容。`/mcp`が唯一の保護リソースなので、ルートにフォールバックしたクライアントにも同じリソースを示します（RFC 9728のURL導出とは厳密には一致しません） |
+| `GET /.well-known/oauth-authorization-server` | 認可サーバーメタデータ。`issuer`は`ASTOVIA_PUBLIC_URL` |
+| `POST /oauth/register` | 動的クライアント登録（DCR） |
+| `GET /oauth/authorize` | 認可要求。同意は管理画面の`/admin/oauth/authorize`で行います |
+| `POST /oauth/token` | `authorization_code`と`refresh_token`グラント |
+
+- スコープは`mcp`（`/mcp`で対応事項を閲覧・作成・更新する）と`offline_access`（リフレッシュトークンを発行する）の2つです。`mcp`は必須で、省略すると`mcp`とみなします。
+- 有効期間: 同意画面へ渡す認可要求は10分、認可コードは60秒で1回限りです。アクセストークンは、`offline_access`がある場合は1時間、ない場合は7日です（ChatGPTは`offline_access`を要求しないため、毎時の再接続を避けます）。リフレッシュトークンは90日で、使うたびに新しいトークンへ交換（ローテーション）し、そこから90日に延長します。交換済みのリフレッシュトークンは使えません。
+- トークン、認可コード、クライアントシークレットはDBにハッシュだけを保存します。発行済みの認可コードをもう一度使うと（PKCEの検証を通った場合）、そのコードから発行したトークンをすべて失効させます。
+- クライアントは2通りの方法で識別します。Client ID Metadata Document（CIMD）では、`client_id`がクライアント自身のHTTPSのURLで、Astoviaがその文書を取得して名前とリダイレクトURIを確認します（Claudeが使用）。動的クライアント登録（DCR）では、`/oauth/register`で`dcr_`で始まる`client_id`を発行します。`token_endpoint_auth_method`は`none`／`client_secret_basic`（既定）／`client_secret_post`です。CIMDのクライアントは常に`none`として扱います。
+- リダイレクトURIは1クライアント8件まで、各512文字以内で、HTTPSか、ループバック（`localhost`、`127.0.0.1`等、`[::1]`）のHTTPに限ります。カスタムスキーム、フラグメント、認証情報付きのURLは登録できません。ホスト名は小文字のASCII（国際化ドメインはpunycode）かIPアドレスです。認可時はリダイレクトURIを完全一致で照合し、ループバックのHTTPだけはポート番号の違いを無視します（Claude Codeは毎回異なるポートで待ち受けます）。`localhost`と`127.0.0.1`は別のホストとして扱います。トークン要求のリダイレクトURIは認可要求と完全一致が必要です。
+- CIMDの取得は`/oauth/authorize`のときだけ行い、`Cache-Control: max-age`に従って（既定1時間、最長24時間）DBにキャッシュします。取得先は名前解決後のIPアドレスで判定し、ループバック、プライベート、リンクローカル、CGNAT等の公開されていないアドレスへは接続しません。タイムアウトは5秒、本文は64KiBまでで、リダイレクトには従いません。プロキシの環境変数は使いません。トークンの発行・更新はDBの行だけを使い、文書を取得し直しません。
+- DCRの登録とCIMDの取得は、ログインと同じく接続元IPごとに1分間で10回までです。リバースプロキシ配下では、全員がプロキシのIPとしてまとめて数えられます。CIMDの取得が制限を超えた場合、期限切れのキャッシュがあればそれを使います。
+- 同意ページは、クライアント名、CIMDなら発行元のホスト（DCRでは名前を確認していない旨）、許可後の戻り先のホスト、許可する内容、ログイン中のメールアドレスを表示します。同意は管理画面にログインしているブラウザだけが行えます。
+- 接続中のAIクライアントは管理画面の「接続中の AI クライアント」に一覧表示し、削除するとそのトークンは即座に使えなくなります。パスワード再設定とユーザー無効化でも、そのユーザーの接続はすべて削除されます。
+- OAuthのアクセストークンは`/mcp`だけで使えます。`/api/v1/*`には使えません。
+- トークンは発行時の`ASTOVIA_PUBLIC_URL`に結び付きます。`ASTOVIA_PUBLIC_URL`を変更すると、既存の接続は使えなくなり、AIクライアントから接続し直す必要があります。
+- 期限切れの認可とトークンの行は、そのユーザーが新しく接続・トークンを交換するときに削除します。クライアント登録（`oauth_clients`）の行は削除しません。DCRの登録とCIMDの取得により、接続元IPごとに1分間で最大10件ずつ増える可能性があります。
+- `/oauth/*`の処理内で返すエラーは`{"error": "...", "error_description": "..."}`の形式です。メソッドの誤り（405）と存在しないURL（404）は、他のURLと同じ`{error: {code, message}}`です。
 
 ## URLと応答
 
@@ -215,11 +258,20 @@ claude mcp add --transport http astovia http://localhost:5173/mcp --header "Auth
 | `GET /api/v1/api-tokens` | 本人のAPIトークンの一覧`{items: [{id, name, created_at, last_used_at}]}`。トークン本体は含まない。Access JWTが必要 |
 | `POST /api/v1/api-tokens` | APIトークンを発行し201を返す。本文は`{name}`（4KiB以内）。応答の`token`は一度だけ返す。50件に達していると409。Access JWTが必要 |
 | `DELETE /api/v1/api-tokens/{id}` | APIトークンを削除し204を返す。他のユーザーのトークンと存在しないトークンは404。Access JWTが必要 |
-| `POST /mcp` | MCP（Streamable HTTP、ステートレス）。APIトークンが必要 |
+| `GET /api/v1/oauth/consent?request=…` | 同意ページの表示内容`{client_name, client_kind, client_host, redirect_host, redirect_loopback, scopes, expires_at}`。Access JWTが必要。無効・期限切れの要求は400 |
+| `POST /api/v1/oauth/consent` | 本文`{request, approve}`（16KiB以内）で許可・拒否し、`{redirect_url}`を返す。Access JWTが必要 |
+| `GET /api/v1/oauth/connections` | 接続中のAIクライアントの一覧`{items: [{id, client_name, client_host, scopes, created_at, last_used_at, expires_at}]}`。Access JWTが必要 |
+| `DELETE /api/v1/oauth/connections/{id}` | 接続を削除し204を返す。そのトークンは即座に使えなくなる。他のユーザーの接続と存在しない接続は404。Access JWTが必要 |
+| `GET /.well-known/oauth-protected-resource/mcp` | MCPの保護リソースメタデータ（RFC 9728）。`/.well-known/oauth-protected-resource`も同じ内容 |
+| `GET /.well-known/oauth-authorization-server` | 認可サーバーのメタデータ（RFC 8414） |
+| `POST /oauth/register` | クライアント登録（RFC 7591）。`application/json`、64KiB以内。成功は201 |
+| `GET /oauth/authorize` | 認可要求。検証後に同意ページ`/admin/oauth/authorize`へ302 |
+| `POST /oauth/token` | トークン発行（`authorization_code`／`refresh_token`）。`application/x-www-form-urlencoded`、64KiB以内 |
+| `POST /mcp` | MCP（Streamable HTTP、ステートレス）。OAuthのアクセストークンかAPIトークンが必要 |
 
 LoginとRefreshは`{access_token, expires_in, user: {id, email}}`を返します。
 
-対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at}`で、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。エラーは`{error: {code, message}}`です。認証・非公開API・MCPの応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
+対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at}`で、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。エラーは`{error: {code, message}}`です（`/oauth/*`の処理内で返すエラーだけは、OAuthの形式`{error, error_description}`です）。認証・非公開API・MCP・`/oauth/*`の応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
 
 ## コード生成と検証
 
