@@ -23,3 +23,5 @@ export const PlugIcon = ({ size }: IconProps) => <Icon size={size}><path d="M9 3
 export const KeyIcon = ({ size }: IconProps) => <Icon size={size}><circle cx="8" cy="15" r="4" /><path d="M11 12l8.5-8.5M16 7l2.5 2.5M14 9l2 2" /></Icon>;
 export const UserIcon = ({ size }: IconProps) => <Icon size={size}><circle cx="12" cy="8.5" r="3.5" /><path d="M5 20a7 7 0 0 1 14 0" /></Icon>;
 export const SourceIcon = ({ size = 14 }: IconProps) => <Icon size={size}><circle cx="6" cy="6" r="2" /><circle cx="6" cy="18" r="2" /><circle cx="18" cy="8" r="2" /><path d="M6 8v8M18 10a6 6 0 0 1-6 6H8" /></Icon>;
+export const ChevronRightIcon = ({ size = 18 }: IconProps) => <Icon size={size}><path d="M9.5 6l6 6-6 6" /></Icon>;
+export const ChevronLeftIcon = ({ size = 18 }: IconProps) => <Icon size={size}><path d="M14.5 6l-6 6 6 6" /></Icon>;

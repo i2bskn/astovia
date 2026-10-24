@@ -3,14 +3,12 @@ import type { FormEvent } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch } from 'react-router';
 import { auth } from './auth';
 import ActionItemList from './ActionItemList';
-import APITokenList from './APITokenList';
 import AutoItemList from './AutoItemList';
-import ConnectionList from './ConnectionList';
 import ConsentPage from './ConsentPage';
-import GitHubSettings from './GitHubSettings';
-import { AutoIcon, BellIcon, KeyIcon, PlugIcon, SettingsIcon, SidebarIcon, SourceIcon, TasksIcon, UserIcon } from './icons';
-import NotificationSettings from './NotificationSettings';
+import { AutoIcon, SettingsIcon, SidebarIcon, TasksIcon } from './icons';
 import Phrased from './Phrased';
+import Settings from './Settings';
+import { settingsPageAt, settingsPages } from './settingsPages';
 import { views } from './view';
 import type { View } from './view';
 
@@ -101,12 +99,12 @@ function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boo
       {collapsed ? <img className="sidebar-mark" src="/admin/favicon.svg" alt="" width={28} height={28} /> : <Logo />}
     </Link>
     <nav className="sidebar-nav" aria-label="画面">
-      {views.map((v) => <NavLink key={v.value} to={v.path} end className="nav-item" title={collapsed ? v.label : undefined}>
+      {views.map((v) => <NavLink key={v.value} to={v.path} end={v.path === '/'} className="nav-item" title={collapsed ? v.label : undefined}>
         {viewIcons[v.value]()}<span className="nav-label">{collapsed ? v.short : v.label}</span>
       </NavLink>)}
     </nav>
     <div className="sidebar-foot">
-      <Link to="/settings#account" className="nav-item sidebar-account" title={email}>
+      <Link to="/settings/account" className="nav-item sidebar-account" title={email}>
         <span className="avatar" aria-hidden="true">{email.slice(0, 1).toUpperCase()}</span>
         {collapsed ? <span className="nav-label">アカウント</span> : <span className="nav-label account-email"><span className="sr-only">アカウント: </span>{email}</span>}
       </Link>
@@ -120,38 +118,22 @@ function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boo
 // TabBar replaces the sidebar on phones, where it sits under the thumb.
 function TabBar() {
   return <nav className="tabbar" aria-label="画面">
-    {views.map((v) => <NavLink key={v.value} to={v.path} end className="tab-item">
+    {views.map((v) => <NavLink key={v.value} to={v.path} end={v.path === '/'} className="tab-item">
       {viewIcons[v.value]()}<span>{v.short}</span>
     </NavLink>)}
   </nav>;
-}
-
-function AccountSettings({ email }: { email: string }) {
-  const state = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
-  const headingID = useId();
-  return <section className="action-panel settings-panel" id="account" aria-labelledby={headingID}>
-    <h2 id={headingID}>アカウント</h2>
-    <div className="account-row">
-      <span className="avatar large" aria-hidden="true">{email.slice(0, 1).toUpperCase()}</span>
-      <p className="account-row-email"><span className="sr-only">ログイン中: </span>{email}</p>
-      <button className="button secondary" type="button" disabled={state.busy === 'logout'} onClick={() => { void auth.logout(); }}>{state.busy === 'logout' ? 'ログアウト中…' : 'ログアウト'}</button>
-    </div>
-  </section>;
 }
 
 function PageHeader({ title, lead }: { title: string; lead: string }) {
   return <header className="page-header"><h1>{title}</h1><p className="page-lead"><Phrased text={lead} /></p></header>;
 }
 
-const settingsSections = [
-  { id: 'github', label: 'GitHub 連携', icon: <SourceIcon size={16} /> },
-  { id: 'notifications', label: '通知', icon: <BellIcon size={16} /> },
-  { id: 'connections', label: 'AI クライアント', icon: <PlugIcon size={16} /> },
-  { id: 'tokens', label: 'API トークン', icon: <KeyIcon size={16} /> },
-  { id: 'account', label: 'アカウント', icon: <UserIcon size={16} /> },
-];
-
 const titles: Record<string, string> = { '/': 'タスク', '/auto': '自動で処理したもの', '/settings': '設定' };
+
+function titleAt(pathname: string): string | undefined {
+  const page = settingsPages.find((p) => p.value === settingsPageAt(pathname));
+  return page ? `${page.label}の設定` : titles[pathname];
+}
 
 function Workspace({ email, error }: { email: string; error: string | null }) {
   const [collapsed, setCollapsed] = useState(initialCollapsed);
@@ -163,7 +145,7 @@ function Workspace({ email, error }: { email: string; error: string | null }) {
     const target = location.hash ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null;
     if (target) target.scrollIntoView();
     else window.scrollTo(0, 0);
-    const title = titles[location.pathname];
+    const title = titleAt(location.pathname);
     document.title = title ? `${title} – Astovia` : 'Astovia';
   }, [location.pathname, location.hash]);
 
@@ -194,19 +176,7 @@ function Workspace({ email, error }: { email: string; error: string | null }) {
             <PageHeader title="自動で処理したもの" lead="連携先の状態を見て、Astovia が自動で片付けたタスクです。間違っていたら未完了に戻してください。戻したものは、以後自動では処理しません。" />
             <AutoItemList />
           </>} />
-          <Route path="settings" element={<>
-            <PageHeader title="設定" lead="連携するサービス、通知、AI クライアントからの接続を管理します。" />
-            <nav className="settings-nav" aria-label="設定の項目">
-              {settingsSections.map((s) => <Link key={s.id} to={`#${s.id}`}>{s.icon}{s.label}</Link>)}
-            </nav>
-            <div className="settings-stack">
-              <GitHubSettings />
-              <NotificationSettings />
-              <ConnectionList />
-              <APITokenList />
-              <AccountSettings email={email} />
-            </div>
-          </>} />
+          <Route path="settings/*" element={<Settings email={email} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>

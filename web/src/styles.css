@@ -296,9 +296,21 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 .toast-action:hover { background: color-mix(in srgb, var(--bg) 24%, transparent); }
 
 /* ---------- Settings ---------- */
-.settings-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: -8px 0 24px; }
-.settings-nav a { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); color: var(--ink-2); font-size: 13px; font-weight: 600; text-decoration: none; }
-.settings-nav a:hover { border-color: var(--accent); color: var(--accent-ink); }
+.settings-tabs { display: flex; gap: 4px; margin: -8px 0 24px; border-bottom: 1px solid var(--line); }
+.settings-tab { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; margin-bottom: -1px; padding: 8px 14px; border-bottom: 2px solid transparent; color: var(--ink-2); font-size: 14px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.settings-tab:hover { color: var(--ink); }
+.settings-tab[aria-current='page'] { border-bottom-color: var(--accent); color: var(--accent-ink); }
+.settings-tab[aria-current='page'] .icon { color: var(--accent); }
+.settings-back { display: none; }
+.settings-list { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: clip; }
+.settings-list li + li { border-top: 1px solid var(--line); }
+.settings-link { display: flex; align-items: center; gap: 14px; min-height: 68px; padding: 12px 14px 12px 16px; color: var(--ink); text-decoration: none; }
+.settings-link:active { background: var(--surface-2); }
+.settings-link-icon { display: grid; place-items: center; flex-shrink: 0; width: 36px; height: 36px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); }
+.settings-link-body { display: grid; flex: 1; min-width: 0; }
+.settings-link-label { font-size: 15px; font-weight: 700; }
+.settings-link-status { color: var(--ink-2); font-size: 13px; overflow-wrap: anywhere; }
+.settings-link > .icon { flex-shrink: 0; color: var(--ink-3); }
 .settings-stack { display: grid; gap: 20px; }
 .action-panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 28px; min-width: 0; scroll-margin-top: 24px; }
 .action-panel h2 { font-size: 18px; font-weight: 700; line-height: 1.5; }
@@ -387,11 +399,10 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
   .task-auto .task-actions { grid-column: 2 / 4; grid-row: 5; flex-direction: row; justify-content: flex-start; align-items: center; width: auto; margin: 10px 0 0 -2px; gap: 8px; }
   .task-auto .task-time { grid-column: 2 / 4; }
   .field-grid { grid-template-columns: minmax(0, 1fr); }
-  html { scroll-padding-top: 124px; }
-  .action-panel { scroll-margin-top: 124px; }
-  .settings-nav { position: sticky; top: calc(56px + env(safe-area-inset-top)); z-index: 20; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: -8px -16px 16px; padding: 8px 16px; background: color-mix(in srgb, var(--bg) 94%, transparent); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
-  .settings-nav a { flex-shrink: 0; }
-  .settings-nav { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); padding-right: 40px; }
+  .settings-tabs { display: none; }
+  .settings-header[data-page] { margin: -8px 0 8px; }
+  .settings-header[data-page] h1, .settings-header[data-page] .page-lead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .settings-back { display: inline-flex; align-items: center; gap: 2px; min-height: 44px; margin-left: -6px; padding: 0 10px 0 2px; color: var(--accent-ink); font-size: 15px; font-weight: 600; text-decoration: none; }
   .task-mark { margin-left: 4px; }
   .composer-row .button { padding: 10px 14px; }
   .composer-note, .composer-foot { padding-left: 10px; }

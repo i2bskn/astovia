@@ -302,7 +302,7 @@ func TestDispatcher(t *testing.T) {
 
 		// No subscription ends the notification.
 		ch.err = store.ErrNoSubscription
-		test := store.Notification{ID: "n5", Kind: store.NotificationTest, DedupeKey: "test:1", Title: "t", Body: "b", URL: "/admin/settings", ScheduledAt: f.now.Unix(), CreatedAt: f.now.Unix()}
+		test := store.Notification{ID: "n5", Kind: store.NotificationTest, DedupeKey: "test:1", Title: "t", Body: "b", URL: "/admin/settings/notifications", ScheduledAt: f.now.Unix(), CreatedAt: f.now.Unix()}
 		if err := f.s.EnqueueNotifications(ctx, "alice-id", []store.Notification{test}); err != nil {
 			t.Fatal(err)
 		}
