@@ -1,6 +1,205 @@
 # Astovia
 
-Astoviaは、会話から生まれる対応事項を保存する、セルフホストの統合Inboxです。現在は、埋め込み管理画面、パスワードログイン、ユーザーごとに分離したセッション、SQLite／PostgreSQLによる保存と、本人の対応事項の作成・一覧・状態変更（管理画面とREST API）、APIトークン、MCPエンドポイントと、AIクライアントがURLだけで接続できるMCP用のOAuth認可サーバー、GitHub連携（レビュー依頼・割り当ての検出と自動完了）、Web Push通知を実装しています。GitHub以外の外部サービス連携、AI抽出は**まだ実装していません**。
+Astoviaは、「忘れてた！」を防ぐためのセルフホストのタスク管理です。Web画面でタスクを管理し、スマホなどへWeb Pushで通知します。GitHub連携では、レビュー依頼と割り当てを取り込んで、PR／Issueの状態から自動で完了にします。自分へのメンションは、AI（Anthropic）が読んでやることがあるものだけをタスクにします。AIクライアントや外部プログラムからは、REST APIとMCP（OAuthで接続）で操作できます。保存先はSQLiteかPostgreSQLです。GitHub以外の外部サービス連携は**まだ実装していません**。
+
+使ってみる場合は「本番で動かす」を、開発する場合は「Dockerでローカル開発する」を読んでください。
+
+## 本番で動かす
+
+### 公開イメージ
+
+GitHub Container Registryで次の2つのイメージを公開しています。どちらもlinux/amd64とlinux/arm64に対応しています。
+
+| イメージ | 内容 |
+| --- | --- |
+| `ghcr.io/i2bskn/astovia` | アプリ本体（画面を埋め込んだ単一バイナリ。`8080`番ポートでHTTPを待ち受けます） |
+| `ghcr.io/i2bskn/astovia-migrate` | スキーマ適用用。Atlas Community Editionと、そのバージョンのスキーマ定義を含みます |
+
+タグは`X.Y.Z`、`X.Y`（その系列の最新）、`latest`（最新の安定版）です。**本番では`X.Y.Z`を指定し、アプリとmigrateは同じバージョンにそろえてください。**
+
+### 共通の前提
+
+- HTTPSで公開してください。Web PushとCookieの`Secure`属性にHTTPSが必要です。`ASTOVIA_PUBLIC_URL`には利用者がブラウザで開くHTTPSのOrigin（例: `https://astovia.example.com`）を設定します。
+- 同じDBに対して動かすプロセスは1つだけにしてください（「運用上の注意」を参照）。オートスケールや、デプロイ時に新旧のコンテナが並行して動く構成では、通知が重複する場合があります。
+- `ASTOVIA_JWT_SECRET`は`openssl rand -base64 32`で一度だけ生成し、保管してください。変更すると、保存したGitHubトークン、AIのAPIキー、VAPIDの秘密鍵を復号できなくなります（「運用上の注意」を参照）。
+- アプリは起動時にスキーマを更新しません。初回と、バージョンを更新するたびに、migrateイメージでスキーマを適用してください。適用前にアプリを起動すると「database schema is not initialized or incompatible」と表示して終了します。
+- `.env`の値に`$`を含む場合は、値全体をシングルクォートで囲んでください（Composeはシングルクォートの中を展開しません）。接続文字列のパスワードに`@`、`:`、`/`、`?`、`#`、`%`等を含む場合はURLエンコードしてください。`.env`は`chmod 600`にしてください。
+
+### VPSで動かす（SQLite＋Caddy）
+
+Docker Composeが動き、80番と443番のポートを外部から受け付けるサーバーと、そのサーバーを指すドメインのA／AAAAレコードが必要です。CaddyがHTTPSの証明書を自動で取得し、アプリへ転送します。アプリのポートは外部へ公開しません。
+
+1. 作業用のディレクトリを作り、使うバージョンのタグから設定ファイルを取得します（`vX.Y.Z`は使うバージョンに置き換えてください）。
+
+   ```sh
+   mkdir astovia && cd astovia
+   for f in compose.yaml Caddyfile .env.example; do
+     curl -fsSLO "https://raw.githubusercontent.com/i2bskn/astovia/vX.Y.Z/deploy/$f"
+   done
+   ```
+
+2. `.env`を作成し、値を設定します。
+
+   ```sh
+   cp .env.example .env
+   chmod 600 .env
+   openssl rand -base64 32   # ASTOVIA_JWT_SECRETに設定する値
+   ```
+
+   `ASTOVIA_VERSION`には先頭の`v`を付けないバージョン（例: `0.1.0`）を、`ASTOVIA_DOMAIN`にはホスト名だけ（`https://`、ポート、パスを付けない。例: `astovia.example.com`）を、`ASTOVIA_JWT_SECRET`には生成した値を設定します。
+
+3. スキーマを適用します。Atlasが表示する変更計画を確認してから承認してください。
+
+   ```sh
+   docker compose run --rm migrate
+   ```
+
+4. 初期ユーザーを作成します。パスワードは画面に表示されない対話入力で設定します。
+
+   ```sh
+   docker compose run --rm app users create --email you@example.com
+   ```
+
+5. 起動し、`https://<ASTOVIA_DOMAIN>/`を開いてログインします。
+
+   ```sh
+   docker compose up -d
+   ```
+
+DBは名前付きボリューム`astovia-data`に保存します。ユーザーの追加・パスワード再設定・無効化は`docker compose run --rm app users ...`で行います（「ユーザーを管理する」を参照）。Caddyを経由するため、ログインのレート制限はCaddyのIPにまとめて数えられます（「認証と運用上の制約」を参照）。
+
+#### バックアップと復元（VPS）
+
+アプリを止めてから、ボリュームの内容をホストのユーザーでコピーします。止めた状態ならSQLiteのファイルをそのままコピーしても整合します。
+
+```sh
+docker compose stop app
+mkdir -p -m 700 backups
+docker run --rm --user "$(id -u):$(id -g)" -v astovia-data:/data:ro -v "$PWD/backups:/backups" alpine:3.22.2 \
+  sh -c 'umask 077 && d=$(date +%Y%m%d%H%M%S) && mkdir "/backups/$d" && cp -R /data/. "/backups/$d"/ && echo "backups/$d"'
+```
+
+最後に表示された`backups/<日時>`へ、設定ファイルもコピーします。
+
+```sh
+cp compose.yaml Caddyfile .env backups/<日時>/
+```
+
+バックアップにはパスワードのハッシュと暗号化した秘密が含まれ、`.env`には`ASTOVIA_JWT_SECRET`が含まれます。暗号化した値は同じ`ASTOVIA_JWT_SECRET`がないと復元後に読めないため、DBと`.env`を一緒に保管してください。ディレクトリはパーミッション700のまま保管し、サーバーの外へ持ち出す場合も同じように扱ってください。
+
+復元はアプリを止めてから行います。
+
+```sh
+docker compose stop app
+docker run --rm -v astovia-data:/data -v "$PWD/backups/<日時>:/restore:ro" alpine:3.22.2 \
+  sh -c 'rm -f /data/astovia.db /data/astovia.db-journal /data/astovia.db-wal /data/astovia.db-shm && cp /restore/astovia.db* /data/ && chown -R 1000:1000 /data && chmod 755 /data && chmod 644 /data/astovia.db*'
+```
+
+前のバージョンに戻す場合は、`compose.yaml`、`Caddyfile`、`.env`もバックアップ内のものに戻してから`docker compose up -d`を実行します。
+
+**前のバージョンに戻すときに、古いバージョンのmigrateを実行しないでください。**新しいバージョンで追加した列やテーブルを削除する計画になり、承認するとデータを失います。戻すときは、更新前に取ったバックアップを復元してから、前のバージョンのアプリを起動してください。
+
+#### 更新する（VPS）
+
+1. 新しいバージョンのタグから`compose.yaml`、`Caddyfile`、`.env.example`を別名で取得し（例: `curl -fsSL -o compose.yaml.new https://raw.githubusercontent.com/i2bskn/astovia/vX.Y.Z/deploy/compose.yaml`）、手元のファイルとの差分を確認して反映します。必須の環境変数が増えた場合は`.env`にも追加します。
+2. アプリを止めます: `docker compose stop app`
+3. 「バックアップと復元（VPS）」の手順でバックアップを取ります。
+4. `.env`の`ASTOVIA_VERSION`を新しいバージョンに変更します。
+5. スキーマを適用します: `docker compose run --rm migrate`（変更計画を確認してから承認してください）
+6. 起動します: `docker compose up -d`
+
+### コンテナサービスと外部PostgreSQLで動かす
+
+Lightsailのコンテナサービスのようなコンテナの実行環境と、Supabaseのような外部のPostgreSQLで動かす場合の設定です。アプリのイメージ`ghcr.io/i2bskn/astovia:X.Y.Z`に次の環境変数を設定します。
+
+| 環境変数 | 値 |
+| --- | --- |
+| `ASTOVIA_DB_DRIVER` | `postgres` |
+| `ASTOVIA_DB_DSN` | PostgreSQLの接続URL（例: `postgres://USER:PASSWORD@HOST:5432/postgres?sslmode=require`） |
+| `ASTOVIA_JWT_SECRET` | `openssl rand -base64 32`で生成した値 |
+| `ASTOVIA_PUBLIC_URL` | サービスが割り当てたHTTPSのURL、またはカスタムドメインのURL |
+
+- コンテナのポートは`8080`（HTTP）です。TLSはサービス側で終端してください。ヘルスチェックのパスは`/healthz`です。
+- インスタンス数は常に1にしてください。GitHubの同期と通知はプロセス内で動くため、リクエストがない間もCPUが動く構成が必要です。リクエストのない間に停止したりCPUを絞ったりする構成では、通知が止まったり遅れたりします。
+- URLが作成後に決まるサービスでは、URLが決まってから`ASTOVIA_PUBLIC_URL`を設定して再デプロイしてください。
+
+スキーマは手元のDockerから適用します。Atlasが変更計画の計算に使う使い捨てのPostgreSQL（本番のDBとは別）もコンテナで起動します。
+
+1. 作業用のディレクトリで、使うバージョンのタグから`compose.migrate-postgres.yaml`を取得します。
+
+   ```sh
+   curl -fsSLO https://raw.githubusercontent.com/i2bskn/astovia/vX.Y.Z/deploy/compose.migrate-postgres.yaml
+   ```
+
+2. 同じディレクトリに`.env`を作成し（`chmod 600`）、次を設定します。
+
+   ```sh
+   ASTOVIA_VERSION=X.Y.Z
+   ASTOVIA_MIGRATE_URL=postgres://USER:PASSWORD@HOST:5432/postgres?sslmode=require
+   # 本番のPostgreSQLのメジャーバージョン（既定17）
+   ASTOVIA_DEV_POSTGRES=17
+   ```
+
+3. スキーマを適用します。Atlasが表示する変更計画を確認してから承認してください。適用対象は`public`スキーマだけです。計画が`public`以外のスキーマに触れていないことも確認してください。
+
+   ```sh
+   docker compose -f compose.migrate-postgres.yaml run --rm migrate
+   docker compose -f compose.migrate-postgres.yaml down
+   ```
+
+この`.env`は本番DBの認証情報を含みます。使い終えたら削除するか、パーミッション600のまま保管してください。
+
+初期ユーザーは手元のDockerから作成します。接続URLはシェルの環境変数に設定し、`-e ASTOVIA_DB_DSN`の形で渡します（コマンドラインに直接書かないでください）。
+
+```sh
+docker run --rm -it -e ASTOVIA_DB_DRIVER=postgres -e ASTOVIA_DB_DSN ghcr.io/i2bskn/astovia:X.Y.Z users create --email you@example.com
+```
+
+#### バックアップと復元（外部PostgreSQL）
+
+`public`スキーマのテーブルだけを対象に、`pg_dump`のコンテナでバックアップします。`ASTOVIA_DB_DSN`はシェルの環境変数に設定しておいてください。以下の`postgres:17-alpine`の`17`は本番のPostgreSQLのメジャーバージョンに合わせてください（新しい`pg_dump`のダンプは、古いサーバーへ復元できない場合があります）。
+
+```sh
+(umask 077 && docker run --rm -e ASTOVIA_DB_DSN postgres:17-alpine \
+  sh -c 'pg_dump --table="public.*" --format=custom --no-owner --no-privileges "$ASTOVIA_DB_DSN"' \
+  > astovia-$(date +%Y%m%d%H%M%S).dump)
+```
+
+復元では、`public`スキーマのテーブルをすべて削除してから、ダンプの内容を入れ直します。削除と入れ直しは1つのトランザクションで行い、途中で失敗した場合は何も変更しません。`public`スキーマ自体と権限の設定、他のスキーマには触れません。
+
+```sh
+docker run --rm -i -e ASTOVIA_DB_DSN -v "$PWD/astovia-<日時>.dump:/backup.dump:ro" postgres:17-alpine sh -c '
+  pg_restore --no-owner --no-privileges --file=/tmp/restore.sql /backup.dump &&
+  psql "$ASTOVIA_DB_DSN" --single-transaction -v ON_ERROR_STOP=1 --quiet --output=/dev/null --file=- --file=/tmp/restore.sql' <<'SQL'
+SET client_min_messages = warning;
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+    EXECUTE format('DROP TABLE IF EXISTS public.%I CASCADE', r.tablename);
+  END LOOP;
+END $$;
+SQL
+echo "exit code: $?"
+```
+
+終了コードが0であることを確認してから、前のバージョンのアプリをデプロイしてください。0以外の場合、DBは復元前のままです。原因を解決するまで前のバージョンをデプロイしないでください。VPSの場合と同じく、**前のバージョンに戻すときに古いバージョンのmigrateは実行しないでください。**本番で使う前に、別のDB（Supabaseなら別のプロジェクト）で復元を一度試してください。Supabaseの自動バックアップがあるプランでも、復元できる単位がプランによって異なるため、更新前には上の手順でバックアップを取ることを勧めます。
+
+#### 更新する（外部PostgreSQL）
+
+1. コンテナサービスでアプリを止めます（サービスを無効にする、またはインスタンス数を0にする）。古いアプリが新しいスキーマで動き続けることと、デプロイ中に新旧が並行して動いて通知が重複することを避けるためです。
+2. 「バックアップと復元（外部PostgreSQL）」の手順でバックアップを取ります。
+3. 新しいバージョンのタグから`compose.migrate-postgres.yaml`を取得し、`.env`の`ASTOVIA_VERSION`を新しいバージョンにして、スキーマを適用します（変更計画を確認してから承認してください）。
+4. コンテナサービスのイメージを新しい`X.Y.Z`に変更してデプロイし、再開します。
+5. 失敗して戻す場合は、古いバージョンのmigrateを実行せず、バックアップを復元してから前のバージョンをデプロイします。
+
+#### Supabaseを使う場合
+
+- Astovia専用のプロジェクトを作成してください。
+- Data APIをオフにしてください。AstoviaはRow Level Securityを使わないため、オンのままだと`public`のテーブルをAPIキーで読める状態になる場合があります。
+- 接続にはSupavisorのsessionモード（ポート5432）の接続文字列を使ってください。transactionモード（ポート6543）はプリペアドステートメントを使えないため使用できません。
+- スキーマの適用時は、Atlasの計画が`public`以外のスキーマ（`auth`、`storage`等）に触れていないことを確認してから承認してください。
+- `ASTOVIA_DEV_POSTGRES`と、バックアップ・復元に使う`postgres`イメージのメジャーバージョンを、プロジェクトのPostgreSQLに合わせてください。
 
 ## Dockerでローカル開発する
 
@@ -74,7 +273,7 @@ docker compose up -d --build
 
 この構成はローカル開発用です。本番公開の設定やデプロイは含みません。スキーマの適用は引き続きAtlasで明示的に行い、ホットリロードではDBを更新しません。
 
-`Dockerfile`の既定の最終段は、画面を埋め込んだ静的バイナリとCA証明書だけを含む非root実行の`scratch`イメージです。`docker build -t astovia .`で作成できます。ローカルComposeは、この最終段ではなく開発専用の`development`／`frontend-development`段を使用します。
+`Dockerfile`の既定の最終段は、画面を埋め込んだ静的バイナリとCA証明書だけを含む非root実行の`scratch`イメージです。`docker build -t astovia .`で作成できます。ローカルComposeは、この最終段ではなく開発専用の`development`／`frontend-development`段を使用します。`migrate`段は公開用のスキーマ適用イメージです（「本番で動かす」を参照）。
 
 ## ネイティブバイナリをビルドする
 
@@ -116,7 +315,7 @@ Docker起動手順で同じDBとユーザーを作成済みの場合、作成操
 
 ## PostgreSQLを使用する
 
-以下はアプリを直接起動する場合の設定です。`compose.yaml`はSQLiteを使用する構成です。この手順ではホスト側のAtlas CLIを使用します。
+以下はアプリを直接起動する場合の設定です。`compose.yaml`はSQLiteを使用する構成です。この手順ではホスト側のAtlas CLIを使用します。コンテナで動かす場合は「本番で動かす」を参照してください。
 
 `ASTOVIA_DB_DRIVER=postgres`と、PostgreSQLの接続URLを`ASTOVIA_DB_DSN`へ明示的に設定します。PostgreSQLの接続先を省略してもSQLiteへは切り替わりません。起動やユーザー操作の前に、同じ接続先へAtlasで`db/postgres/schema.hcl`を適用してください。
 
@@ -165,7 +364,7 @@ make user-disable USER_EMAIL=alice@example.com
 - リバースプロキシを使用する場合は、`ASTOVIA_PUBLIC_URL`にHTTPSのOriginを設定します。パス、認証情報、クエリ、フラグメントは指定できません。プロキシでTLSを終端し、バックエンドへの直接接続を制限してください。HTTPの公開URLはループバック開発用途だけに限ります。
 - ホスト名はASCIIのDNS名か明示的なIPアドレスを使用します。国際化ドメイン名はpunycodeで指定してください。数値ホストの省略表記、スコープ付きIPv6、IPv4を埋め込んだIPv6は拒否します。DNS名の大文字・小文字、標準ポート、ポートの数値表記、IPv6の表記は設定読込時に正規化し、Origin検証とJWT issuerで共用します。以前の正規化されていないissuerで発行したトークンは再ログインが必要です。正規化済みの設定には影響しません。
 
-Web画面は`/`（タスク）、`/auto`（自動で処理したもの）、`/settings`（設定）で開きます。以前の版の`/admin/`以下のURL（ブックマークや送信待ちの通知を含む）は、対応する新しいURLへリダイレクトします。Web画面で役割管理、共有Inbox、他ユーザーの非公開情報へのアクセス権が付くことはありません。この初期実装には本番デプロイの設定を含みません。
+Web画面は`/`（タスク）、`/auto`（自動で処理したもの）、`/settings`（設定）で開きます。以前の版の`/admin/`以下のURL（ブックマークや送信待ちの通知を含む）は、対応する新しいURLへリダイレクトします。Web画面で役割管理、共有Inbox、他ユーザーの非公開情報へのアクセス権が付くことはありません。本番での動かし方は「本番で動かす」を参照してください。
 
 ## APIトークン
 
@@ -363,6 +562,23 @@ make check
 ```sh
 docker compose -f compose.test.yaml stop postgres
 ```
+
+## リリース
+
+メンテナー向けの手順です。
+
+1. `make check`が通ることを確認します。
+2. タグを作成します: `git tag vX.Y.Z`
+3. タグをpushします: `git push origin vX.Y.Z`
+
+タグのpushで`release`ワークフローが動き、`ghcr.io/i2bskn/astovia-migrate`、`ghcr.io/i2bskn/astovia`の順に2つのイメージ（linux/amd64・linux/arm64）を公開します。テストはワークフローでは実行しません。
+
+- タグは`vMAJOR.MINOR.PATCH`の形式です。プレリリースは`v0.2.0-rc.1`のように`-`以降を付け、`X.Y.Z-…`のタグだけを公開します（`X.Y`と`latest`は付けません）。
+- 安定版は`X.Y.Z`に加え、同じ`X.Y`の中で最大のときだけ`X.Y`を、すべての安定版の中で最大のときだけ`latest`を更新します。古い系列のパッチを公開しても`latest`は動きません。
+- mainに含まれないコミットのタグと、形式に合わないタグ（`vtest`、`v1.2`等）は、何も公開せずに失敗します。
+- タグは1つずつpushし、前のタグのワークフローが終わってから次のタグをpushしてください。一度に4つ以上のタグをpushするとワークフローが起動しません。また、ワークフローは1つずつ順に実行し、待機できるのは1件だけです。待機中に次の実行が来ると、待機中の実行は取り消されます。取り消された実行はGitHubのActionsの画面から再実行してください。
+- 失敗した場合は、同じ実行を再実行してください（同じタグを上書きします）。
+- 初回の公開後に一度だけ、GitHubのパッケージ設定で`astovia`と`astovia-migrate`の2つのパッケージをpublicにしてください（公開直後はprivateです）。
 
 ## 不具合報告・要望
 

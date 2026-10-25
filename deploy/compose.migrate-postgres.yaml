@@ -1,0 +1,30 @@
+# Applies the schema to an external PostgreSQL (for example Supabase).
+#   docker compose -f compose.migrate-postgres.yaml run --rm migrate
+#   docker compose -f compose.migrate-postgres.yaml down
+# The dev service is a disposable database that Atlas uses to compute the plan;
+# it is never the production database.
+name: astovia-migrate
+services:
+  dev:
+    # Match the major version of the production PostgreSQL.
+    image: postgres:${ASTOVIA_DEV_POSTGRES:-17}-alpine
+    environment:
+      POSTGRES_USER: atlas
+      POSTGRES_PASSWORD: atlas
+      POSTGRES_DB: atlas
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  migrate:
+    image: ghcr.io/i2bskn/astovia-migrate:${ASTOVIA_VERSION:?set ASTOVIA_VERSION}
+    command: ["schema", "apply", "--env", "postgres"]
+    environment:
+      ASTOVIA_MIGRATE_URL: ${ASTOVIA_MIGRATE_URL:?set ASTOVIA_MIGRATE_URL}
+      ASTOVIA_MIGRATE_DEV_URL: postgres://atlas:atlas@dev:5432/atlas?sslmode=disable
+    depends_on:
+      dev:
+        condition: service_healthy

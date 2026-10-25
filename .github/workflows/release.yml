@@ -1,0 +1,121 @@
+# Publishes the app and migrate images to GHCR for a v* tag on main.
+# No third-party actions are used; the runner's git and docker CLI do the work.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions: {}
+# One release at a time, across all tags.
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Clone
+        # Anonymous clone; this requires the repository to be public.
+        run: |
+          set -euo pipefail
+          git clone --no-checkout "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" src
+          git -C src checkout --detach "$GITHUB_SHA"
+
+      - name: Compute image tags
+        working-directory: src
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'
+          stable='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$TAG" =~ $semver ]]; then
+            echo "::error::tag must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-PRERELEASE"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::the tagged commit is not on main"
+            exit 1
+          fi
+          version="${TAG#v}"
+          tags=("$version")
+          if [[ "$TAG" =~ $stable ]]; then
+            minor="${version%.*}"
+            # Move X.Y and latest only for the highest stable tag at this time,
+            # so a patch to an older line or a re-run never moves them back.
+            # Tags off main are never published, so they do not count.
+            all_stable="$(git tag --list 'v*' --merged origin/main | grep -E "$stable" || true)"
+            highest_minor="$(printf '%s\n' "$all_stable" | grep -E "^v${minor%%.*}\.${minor#*.}\." | sort -V | tail -n 1)"
+            highest="$(printf '%s\n' "$all_stable" | sort -V | tail -n 1)"
+            if [[ "$highest_minor" == "$TAG" ]]; then
+              tags+=("$minor")
+            fi
+            if [[ "$highest" == "$TAG" ]]; then
+              tags+=("latest")
+            fi
+          fi
+          printf '%s\n' "${tags[@]}" > "$RUNNER_TEMP/tags"
+          echo "version=$version" >> "$GITHUB_ENV"
+          echo "Image tags: ${tags[*]}"
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Set up buildx
+        run: docker buildx create --driver docker-container --use
+
+      # migrate first: the app must never be published without its schema.
+      - name: Build and push the migrate image
+        working-directory: src
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-migrate"
+          mapfile -t tags < "$RUNNER_TEMP/tags"
+          args=()
+          for tag in "${tags[@]}"; do
+            args+=(-t "$image:$tag")
+          done
+          meta=(
+            "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            "org.opencontainers.image.revision=${GITHUB_SHA}"
+            "org.opencontainers.image.version=${version}"
+            "org.opencontainers.image.licenses=Apache-2.0"
+            "org.opencontainers.image.description=Atlas schema for Astovia ${version}"
+          )
+          for m in "${meta[@]}"; do
+            args+=(--label "$m" --annotation "index:$m")
+          done
+          docker buildx build --platform linux/amd64,linux/arm64 --target migrate --push "${args[@]}" .
+
+      - name: Build and push the app image
+        working-directory: src
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          mapfile -t tags < "$RUNNER_TEMP/tags"
+          args=()
+          for tag in "${tags[@]}"; do
+            args+=(-t "$image:$tag")
+          done
+          meta=(
+            "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            "org.opencontainers.image.revision=${GITHUB_SHA}"
+            "org.opencontainers.image.version=${version}"
+            "org.opencontainers.image.licenses=Apache-2.0"
+            "org.opencontainers.image.description=Self-hosted task manager that keeps you from forgetting things"
+          )
+          for m in "${meta[@]}"; do
+            args+=(--label "$m" --annotation "index:$m")
+          done
+          docker buildx build --platform linux/amd64,linux/arm64 --push "${args[@]}" .
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io

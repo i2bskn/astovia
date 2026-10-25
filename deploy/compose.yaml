@@ -1,0 +1,43 @@
+# Runs Astovia with SQLite behind Caddy (HTTPS) on a single server.
+# Apply the schema with "docker compose run --rm migrate" before the first
+# start and after every version change.
+name: astovia
+services:
+  app:
+    image: ghcr.io/i2bskn/astovia:${ASTOVIA_VERSION:?set ASTOVIA_VERSION in .env}
+    restart: unless-stopped
+    environment:
+      ASTOVIA_PUBLIC_URL: https://${ASTOVIA_DOMAIN:?set ASTOVIA_DOMAIN in .env}
+      ASTOVIA_DB_DRIVER: sqlite
+      ASTOVIA_DB_DSN: file:/app/data/astovia.db
+      ASTOVIA_JWT_SECRET: ${ASTOVIA_JWT_SECRET:?set ASTOVIA_JWT_SECRET in .env}
+    volumes:
+      - data:/app/data
+  caddy:
+    image: caddy:2.11.6-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      ASTOVIA_DOMAIN: ${ASTOVIA_DOMAIN:?set ASTOVIA_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+  migrate:
+    image: ghcr.io/i2bskn/astovia-migrate:${ASTOVIA_VERSION:?set ASTOVIA_VERSION in .env}
+    profiles: ["tools"]
+    command: ["schema", "apply", "--env", "sqlite"]
+    volumes:
+      - data:/app/data
+volumes:
+  # Fixed name so that the backup and restore commands do not depend on the
+  # Compose project name.
+  data:
+    name: astovia-data
+  caddy-data:
+  caddy-config:
