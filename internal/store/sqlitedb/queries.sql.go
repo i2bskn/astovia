@@ -161,6 +161,17 @@ func (q *Queries) CountChildrenByParents(ctx context.Context, arg CountChildrenB
 	return items, nil
 }
 
+const countGmailAccounts = `-- name: CountGmailAccounts :one
+SELECT COUNT(*) FROM gmail_accounts WHERE user_id = ?1
+`
+
+func (q *Queries) CountGmailAccounts(ctx context.Context, userID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countGmailAccounts, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countNotificationsByDedupeKey = `-- name: CountNotificationsByDedupeKey :one
 SELECT COUNT(*) FROM notifications WHERE user_id = ?1 AND dedupe_key = ?2
 `
@@ -414,6 +425,78 @@ func (q *Queries) CreateGitHubConnection(ctx context.Context, arg CreateGitHubCo
 		arg.LastTrackedAt,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+	)
+	return err
+}
+
+const createGmailAccount = `-- name: CreateGmailAccount :execrows
+INSERT INTO gmail_accounts (id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+ON CONFLICT (email) DO NOTHING
+`
+
+type CreateGmailAccountParams struct {
+	ID              string
+	UserID          string
+	Email           string
+	Generation      int64
+	TokenSealed     string
+	ImmediateNotify int64
+	Status          string
+	LastError       sql.NullString
+	FailureCount    int64
+	ConnectedAt     int64
+	NextPollAt      int64
+	LastSyncedAt    sql.NullInt64
+	LastTrackedAt   sql.NullInt64
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
+func (q *Queries) CreateGmailAccount(ctx context.Context, arg CreateGmailAccountParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, createGmailAccount,
+		arg.ID,
+		arg.UserID,
+		arg.Email,
+		arg.Generation,
+		arg.TokenSealed,
+		arg.ImmediateNotify,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.ConnectedAt,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastTrackedAt,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const createGoogleAuthState = `-- name: CreateGoogleAuthState :exec
+INSERT INTO google_auth_states (state_hash,user_id,verifier_sealed,expires_at,created_at)
+VALUES (?1,?2,?3,?4,?5)
+`
+
+type CreateGoogleAuthStateParams struct {
+	StateHash      string
+	UserID         string
+	VerifierSealed string
+	ExpiresAt      int64
+	CreatedAt      int64
+}
+
+func (q *Queries) CreateGoogleAuthState(ctx context.Context, arg CreateGoogleAuthStateParams) error {
+	_, err := q.db.ExecContext(ctx, createGoogleAuthState,
+		arg.StateHash,
+		arg.UserID,
+		arg.VerifierSealed,
+		arg.ExpiresAt,
+		arg.CreatedAt,
 	)
 	return err
 }
@@ -812,6 +895,20 @@ func (q *Queries) DeleteChatworkConnection(ctx context.Context, userID string) e
 	return err
 }
 
+const deleteExpiredGoogleAuthStates = `-- name: DeleteExpiredGoogleAuthStates :exec
+DELETE FROM google_auth_states WHERE user_id = ?1 AND expires_at <= ?2
+`
+
+type DeleteExpiredGoogleAuthStatesParams struct {
+	UserID string
+	Now    int64
+}
+
+func (q *Queries) DeleteExpiredGoogleAuthStates(ctx context.Context, arg DeleteExpiredGoogleAuthStatesParams) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredGoogleAuthStates, arg.UserID, arg.Now)
+	return err
+}
+
 const deleteExpiredOAuthGrants = `-- name: DeleteExpiredOAuthGrants :exec
 DELETE FROM oauth_grants WHERE user_id = ?1 AND expires_at <= ?2
 `
@@ -847,6 +944,40 @@ DELETE FROM github_connections WHERE user_id = ?1
 func (q *Queries) DeleteGitHubConnection(ctx context.Context, userID string) error {
 	_, err := q.db.ExecContext(ctx, deleteGitHubConnection, userID)
 	return err
+}
+
+const deleteGmailAccount = `-- name: DeleteGmailAccount :execrows
+DELETE FROM gmail_accounts WHERE id = ?1 AND user_id = ?2
+`
+
+type DeleteGmailAccountParams struct {
+	ID     string
+	UserID string
+}
+
+func (q *Queries) DeleteGmailAccount(ctx context.Context, arg DeleteGmailAccountParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteGmailAccount, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteGoogleAuthState = `-- name: DeleteGoogleAuthState :execrows
+DELETE FROM google_auth_states WHERE state_hash = ?1 AND user_id = ?2
+`
+
+type DeleteGoogleAuthStateParams struct {
+	StateHash string
+	UserID    string
+}
+
+func (q *Queries) DeleteGoogleAuthState(ctx context.Context, arg DeleteGoogleAuthStateParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteGoogleAuthState, arg.StateHash, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const deleteGrantOAuthTokens = `-- name: DeleteGrantOAuthTokens :exec
@@ -964,6 +1095,24 @@ func (q *Queries) DeleteUserAPITokens(ctx context.Context, userID string) error 
 	return err
 }
 
+const deleteUserGmailAccounts = `-- name: DeleteUserGmailAccounts :exec
+DELETE FROM gmail_accounts WHERE user_id = ?1
+`
+
+func (q *Queries) DeleteUserGmailAccounts(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserGmailAccounts, userID)
+	return err
+}
+
+const deleteUserGoogleAuthStates = `-- name: DeleteUserGoogleAuthStates :exec
+DELETE FROM google_auth_states WHERE user_id = ?1
+`
+
+func (q *Queries) DeleteUserGoogleAuthStates(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserGoogleAuthStates, userID)
+	return err
+}
+
 const deleteUserOAuthGrants = `-- name: DeleteUserOAuthGrants :exec
 DELETE FROM oauth_grants WHERE user_id = ?1
 `
@@ -1009,6 +1158,30 @@ func (q *Queries) DeleteUserPendingNotificationsByKindAndSource(ctx context.Cont
 		arg.Kind,
 		arg.ItemUserID,
 		arg.Source,
+	)
+	return err
+}
+
+const deleteUserPendingNotificationsByKindAndSourcePrefix = `-- name: DeleteUserPendingNotificationsByKindAndSourcePrefix :exec
+DELETE FROM notifications WHERE notifications.user_id = ?1 AND notifications.kind = ?2 AND notifications.sent_at IS NULL
+AND notifications.action_item_id IN (SELECT action_items.id FROM action_items WHERE action_items.user_id = ?3 AND action_items.source = ?4 AND substr(action_items.source_key, 1, length(?5)) = ?5)
+`
+
+type DeleteUserPendingNotificationsByKindAndSourcePrefixParams struct {
+	UserID     string
+	Kind       string
+	ItemUserID string
+	Source     sql.NullString
+	Prefix     interface{}
+}
+
+func (q *Queries) DeleteUserPendingNotificationsByKindAndSourcePrefix(ctx context.Context, arg DeleteUserPendingNotificationsByKindAndSourcePrefixParams) error {
+	_, err := q.db.ExecContext(ctx, deleteUserPendingNotificationsByKindAndSourcePrefix,
+		arg.UserID,
+		arg.Kind,
+		arg.ItemUserID,
+		arg.Source,
+		arg.Prefix,
 	)
 	return err
 }
@@ -1415,6 +1588,62 @@ func (q *Queries) GetGitHubConnection(ctx context.Context, userID string) (Githu
 		&i.LastTrackedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getGmailAccount = `-- name: GetGmailAccount :one
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE id = ?1 AND user_id = ?2
+`
+
+type GetGmailAccountParams struct {
+	ID     string
+	UserID string
+}
+
+func (q *Queries) GetGmailAccount(ctx context.Context, arg GetGmailAccountParams) (GmailAccount, error) {
+	row := q.db.QueryRowContext(ctx, getGmailAccount, arg.ID, arg.UserID)
+	var i GmailAccount
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Email,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.ImmediateNotify,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.ConnectedAt,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastTrackedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getGoogleAuthState = `-- name: GetGoogleAuthState :one
+SELECT state_hash, user_id, verifier_sealed, expires_at, created_at FROM google_auth_states
+WHERE state_hash = ?1 AND user_id = ?2
+`
+
+type GetGoogleAuthStateParams struct {
+	StateHash string
+	UserID    string
+}
+
+func (q *Queries) GetGoogleAuthState(ctx context.Context, arg GetGoogleAuthStateParams) (GoogleAuthState, error) {
+	row := q.db.QueryRowContext(ctx, getGoogleAuthState, arg.StateHash, arg.UserID)
+	var i GoogleAuthState
+	err := row.Scan(
+		&i.StateHash,
+		&i.UserID,
+		&i.VerifierSealed,
+		&i.ExpiresAt,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -2568,6 +2797,56 @@ func (q *Queries) ListDueGitHubConnections(ctx context.Context, arg ListDueGitHu
 	return items, nil
 }
 
+const listDueGmailAccounts = `-- name: ListDueGmailAccounts :many
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE status = 'active' AND next_poll_at <= ?1 AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY next_poll_at, id LIMIT ?2
+`
+
+type ListDueGmailAccountsParams struct {
+	Now      int64
+	PageSize int64
+}
+
+func (q *Queries) ListDueGmailAccounts(ctx context.Context, arg ListDueGmailAccountsParams) ([]GmailAccount, error) {
+	rows, err := q.db.QueryContext(ctx, listDueGmailAccounts, arg.Now, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GmailAccount
+	for rows.Next() {
+		var i GmailAccount
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Email,
+			&i.Generation,
+			&i.TokenSealed,
+			&i.ImmediateNotify,
+			&i.Status,
+			&i.LastError,
+			&i.FailureCount,
+			&i.ConnectedAt,
+			&i.NextPollAt,
+			&i.LastSyncedAt,
+			&i.LastTrackedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDueNotifications = `-- name: ListDueNotifications :many
 SELECT id, user_id, kind, action_item_id, dedupe_key, title, body, url, scheduled_at, sent_at, attempts, last_error, created_at FROM notifications
 WHERE sent_at IS NULL AND scheduled_at <= ?1 AND user_id IN (SELECT id FROM users WHERE disabled = 0)
@@ -2664,6 +2943,119 @@ func (q *Queries) ListDueSlackConnections(ctx context.Context, arg ListDueSlackC
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGmailAccounts = `-- name: ListGmailAccounts :many
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE user_id = ?1 ORDER BY email
+`
+
+func (q *Queries) ListGmailAccounts(ctx context.Context, userID string) ([]GmailAccount, error) {
+	rows, err := q.db.QueryContext(ctx, listGmailAccounts, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GmailAccount
+	for rows.Next() {
+		var i GmailAccount
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Email,
+			&i.Generation,
+			&i.TokenSealed,
+			&i.ImmediateNotify,
+			&i.Status,
+			&i.LastError,
+			&i.FailureCount,
+			&i.ConnectedAt,
+			&i.NextPollAt,
+			&i.LastSyncedAt,
+			&i.LastTrackedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGmailJudgedKeys = `-- name: ListGmailJudgedKeys :many
+SELECT source_key FROM action_items
+WHERE user_id = ?1 AND source = 'gmail' AND substr(source_key, 1, length(?2)) = ?2 AND created_at >= ?3
+ORDER BY created_at DESC, id DESC LIMIT ?4
+`
+
+type ListGmailJudgedKeysParams struct {
+	UserID       string
+	Prefix       interface{}
+	CreatedSince int64
+	PageSize     int64
+}
+
+func (q *Queries) ListGmailJudgedKeys(ctx context.Context, arg ListGmailJudgedKeysParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, listGmailJudgedKeys,
+		arg.UserID,
+		arg.Prefix,
+		arg.CreatedSince,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var source_key sql.NullString
+		if err := rows.Scan(&source_key); err != nil {
+			return nil, err
+		}
+		items = append(items, source_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGoogleAuthStateHashes = `-- name: ListGoogleAuthStateHashes :many
+SELECT state_hash FROM google_auth_states
+WHERE user_id = ?1 ORDER BY created_at DESC, state_hash DESC
+`
+
+func (q *Queries) ListGoogleAuthStateHashes(ctx context.Context, userID string) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listGoogleAuthStateHashes, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var state_hash string
+		if err := rows.Scan(&state_hash); err != nil {
+			return nil, err
+		}
+		items = append(items, state_hash)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -3087,6 +3479,71 @@ func (q *Queries) ListTrackedActionItems(ctx context.Context, arg ListTrackedAct
 	return items, nil
 }
 
+const listTrackedSourcePrefixItems = `-- name: ListTrackedSourcePrefixItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = ?1 AND source = ?2 AND substr(source_key, 1, length(?3)) = ?3 AND tracking = 1 AND status IN ('open','candidate')
+ORDER BY COALESCE(tracked_at, 0), id LIMIT ?4
+`
+
+type ListTrackedSourcePrefixItemsParams struct {
+	UserID   string
+	Source   sql.NullString
+	Prefix   interface{}
+	PageSize int64
+}
+
+func (q *Queries) ListTrackedSourcePrefixItems(ctx context.Context, arg ListTrackedSourcePrefixItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listTrackedSourcePrefixItems,
+		arg.UserID,
+		arg.Source,
+		arg.Prefix,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, email, password_hash, disabled, created_at, role FROM users ORDER BY created_at, id LIMIT ?1
 `
@@ -3336,6 +3793,67 @@ func (q *Queries) LockGitHubConnection(ctx context.Context, userID string) (Gith
 	return i, err
 }
 
+const lockGmailAccount = `-- name: LockGmailAccount :one
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE id = ?1 AND user_id = ?2
+`
+
+type LockGmailAccountParams struct {
+	ID     string
+	UserID string
+}
+
+func (q *Queries) LockGmailAccount(ctx context.Context, arg LockGmailAccountParams) (GmailAccount, error) {
+	row := q.db.QueryRowContext(ctx, lockGmailAccount, arg.ID, arg.UserID)
+	var i GmailAccount
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Email,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.ImmediateNotify,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.ConnectedAt,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastTrackedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockGmailAccountByEmail = `-- name: LockGmailAccountByEmail :one
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE email = ?1
+`
+
+func (q *Queries) LockGmailAccountByEmail(ctx context.Context, email string) (GmailAccount, error) {
+	row := q.db.QueryRowContext(ctx, lockGmailAccountByEmail, email)
+	var i GmailAccount
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Email,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.ImmediateNotify,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.ConnectedAt,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastTrackedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const lockInvitationByTokenHash = `-- name: LockInvitationByTokenHash :one
 SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations WHERE token_hash = ?1
 `
@@ -3543,6 +4061,43 @@ type MarkOAuthCodeUsedParams struct {
 
 func (q *Queries) MarkOAuthCodeUsed(ctx context.Context, arg MarkOAuthCodeUsedParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markOAuthCodeUsed, arg.CodeUsedAt, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const reconnectGmailAccount = `-- name: ReconnectGmailAccount :execrows
+UPDATE gmail_accounts SET generation = ?1, token_sealed = ?2, status = ?3, last_error = ?4, failure_count = ?5, connected_at = ?6, next_poll_at = ?7, updated_at = ?8
+WHERE id = ?9 AND user_id = ?10
+`
+
+type ReconnectGmailAccountParams struct {
+	Generation   int64
+	TokenSealed  string
+	Status       string
+	LastError    sql.NullString
+	FailureCount int64
+	ConnectedAt  int64
+	NextPollAt   int64
+	UpdatedAt    int64
+	ID           string
+	UserID       string
+}
+
+func (q *Queries) ReconnectGmailAccount(ctx context.Context, arg ReconnectGmailAccountParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, reconnectGmailAccount,
+		arg.Generation,
+		arg.TokenSealed,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.ConnectedAt,
+		arg.NextPollAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.UserID,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -3910,6 +4465,28 @@ func (q *Queries) StopTrackingSourceActionItems(ctx context.Context, arg StopTra
 	return err
 }
 
+const stopTrackingSourcePrefixItems = `-- name: StopTrackingSourcePrefixItems :exec
+UPDATE action_items SET tracking = 0, version = version + 1, updated_at = ?1
+WHERE user_id = ?2 AND source = ?3 AND substr(source_key, 1, length(?4)) = ?4 AND tracking = 1
+`
+
+type StopTrackingSourcePrefixItemsParams struct {
+	UpdatedAt int64
+	UserID    string
+	Source    sql.NullString
+	Prefix    interface{}
+}
+
+func (q *Queries) StopTrackingSourcePrefixItems(ctx context.Context, arg StopTrackingSourcePrefixItemsParams) error {
+	_, err := q.db.ExecContext(ctx, stopTrackingSourcePrefixItems,
+		arg.UpdatedAt,
+		arg.UserID,
+		arg.Source,
+		arg.Prefix,
+	)
+	return err
+}
+
 const touchAPIToken = `-- name: TouchAPIToken :exec
 UPDATE api_tokens SET last_used_at = ?1
 WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)
@@ -4210,6 +4787,93 @@ func (q *Queries) UpdateGitHubSyncState(ctx context.Context, arg UpdateGitHubSyn
 		arg.LastReconciledAt,
 		arg.LastTrackedAt,
 		arg.UpdatedAt,
+		arg.UserID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateGmailSettings = `-- name: UpdateGmailSettings :execrows
+UPDATE gmail_accounts SET immediate_notify = ?1, updated_at = ?2
+WHERE id = ?3 AND user_id = ?4
+`
+
+type UpdateGmailSettingsParams struct {
+	ImmediateNotify int64
+	UpdatedAt       int64
+	ID              string
+	UserID          string
+}
+
+func (q *Queries) UpdateGmailSettings(ctx context.Context, arg UpdateGmailSettingsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateGmailSettings,
+		arg.ImmediateNotify,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.UserID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateGmailSyncState = `-- name: UpdateGmailSyncState :execrows
+UPDATE gmail_accounts SET status = ?1, last_error = ?2, failure_count = ?3, next_poll_at = ?4, last_synced_at = ?5, last_tracked_at = ?6, updated_at = ?7
+WHERE id = ?8 AND user_id = ?9 AND generation = ?10
+`
+
+type UpdateGmailSyncStateParams struct {
+	Status        string
+	LastError     sql.NullString
+	FailureCount  int64
+	NextPollAt    int64
+	LastSyncedAt  sql.NullInt64
+	LastTrackedAt sql.NullInt64
+	UpdatedAt     int64
+	ID            string
+	UserID        string
+	Generation    int64
+}
+
+func (q *Queries) UpdateGmailSyncState(ctx context.Context, arg UpdateGmailSyncStateParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateGmailSyncState,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastTrackedAt,
+		arg.UpdatedAt,
+		arg.ID,
+		arg.UserID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateGmailTokenSealed = `-- name: UpdateGmailTokenSealed :execrows
+UPDATE gmail_accounts SET token_sealed = ?1
+WHERE id = ?2 AND user_id = ?3 AND generation = ?4
+`
+
+type UpdateGmailTokenSealedParams struct {
+	TokenSealed string
+	ID          string
+	UserID      string
+	Generation  int64
+}
+
+func (q *Queries) UpdateGmailTokenSealed(ctx context.Context, arg UpdateGmailTokenSealedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateGmailTokenSealed,
+		arg.TokenSealed,
+		arg.ID,
 		arg.UserID,
 		arg.Generation,
 	)

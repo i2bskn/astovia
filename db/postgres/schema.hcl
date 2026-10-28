@@ -722,6 +722,121 @@ table "chatwork_connections" {
     columns = [column.status, column.next_poll_at]
   }
 }
+table "gmail_accounts" {
+  schema = schema.public
+  column "id" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "email" {
+    type = text
+    null = false
+  }
+  column "generation" {
+    type = bigint
+    null = false
+  }
+  column "token_sealed" {
+    type = text
+    null = false
+  }
+  column "immediate_notify" {
+    type    = bigint
+    null    = false
+    default = 1
+  }
+  column "status" {
+    type = text
+    null = false
+  }
+  column "last_error" {
+    type = text
+    null = true
+  }
+  column "failure_count" {
+    type    = bigint
+    null    = false
+    default = 0
+  }
+  column "connected_at" {
+    type = bigint
+    null = false
+  }
+  column "next_poll_at" {
+    type = bigint
+    null = false
+  }
+  column "last_synced_at" {
+    type = bigint
+    null = true
+  }
+  column "last_tracked_at" {
+    type = bigint
+    null = true
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "updated_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "gmail_accounts_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "gmail_accounts_email_idx" {
+    unique  = true
+    columns = [column.email]
+  }
+  index "gmail_accounts_user_idx" {
+    columns = [column.user_id, column.email]
+  }
+  index "gmail_accounts_status_next_poll_idx" {
+    columns = [column.status, column.next_poll_at]
+  }
+}
+table "google_auth_states" {
+  schema = schema.public
+  column "state_hash" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "verifier_sealed" {
+    type = text
+    null = false
+  }
+  column "expires_at" {
+    type = bigint
+    null = false
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.state_hash]
+  }
+  foreign_key "google_auth_states_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "google_auth_states_user_idx" {
+    columns = [column.user_id]
+  }
+}
 table "ai_settings" {
   schema = schema.public
   column "user_id" {

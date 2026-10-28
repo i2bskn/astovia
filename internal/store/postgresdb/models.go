@@ -102,6 +102,32 @@ type GithubConnection struct {
 	UpdatedAt            int64
 }
 
+type GmailAccount struct {
+	ID              string
+	UserID          string
+	Email           string
+	Generation      int64
+	TokenSealed     string
+	ImmediateNotify int64
+	Status          string
+	LastError       sql.NullString
+	FailureCount    int64
+	ConnectedAt     int64
+	NextPollAt      int64
+	LastSyncedAt    sql.NullInt64
+	LastTrackedAt   sql.NullInt64
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
+type GoogleAuthState struct {
+	StateHash      string
+	UserID         string
+	VerifierSealed string
+	ExpiresAt      int64
+	CreatedAt      int64
+}
+
 type InstanceSecret struct {
 	Name      string
 	Value     string

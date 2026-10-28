@@ -1,5 +1,5 @@
-// Clients of the GitHub, Slack and Chatwork integration, Web Push subscription and
-// notification settings APIs. The request function is injected (normally auth.ts's
+// Clients of the GitHub, Slack, Chatwork and mail (Gmail) integration, Web Push
+// subscription and notification settings APIs. The request function is injected (normally auth.ts's
 // request) so that this module can be tested with a fake.
 import type { RequestFunction } from './actionItems';
 
@@ -58,6 +58,29 @@ export interface ChatworkConnection extends ChatworkSettings {
 }
 
 export type ChatworkState = { connected: false } | ChatworkConnection;
+
+// GmailAccount is a Google account connected for the mail integration.
+export interface GmailAccount {
+  id: string;
+  email: string;
+  immediate_notify: boolean;
+  status: string;
+  last_error: string | null;
+  last_synced_at: string | null;
+  created_at: string;
+}
+
+// GmailState is the mail integration: available is false until the operator
+// sets the Google OAuth client; the accounts are listed either way.
+export interface GmailState {
+  available: boolean;
+  redirect_uri: string;
+  max_accounts: number;
+  accounts: GmailAccount[];
+}
+
+// GOOGLE_CONSENT_ORIGIN starts every URL of Google's consent screen.
+export const GOOGLE_CONSENT_ORIGIN = 'https://accounts.google.com/';
 
 export interface PushDevice {
   id: string;
@@ -127,6 +150,26 @@ function readChatwork(data: unknown): ChatworkState {
   throw new Error('Unexpected Chatwork integration response');
 }
 
+function isGmailAccount(value: unknown): value is GmailAccount {
+  return isRecord(value) && typeof value.id === 'string' && value.id !== '' && typeof value.email === 'string' &&
+    typeof value.immediate_notify === 'boolean' && typeof value.status === 'string' &&
+    nullableString(value.last_error) && nullableString(value.last_synced_at) && typeof value.created_at === 'string';
+}
+
+export function readGmailAccount(data: unknown): GmailAccount {
+  if (!isGmailAccount(data)) throw new Error('Unexpected mail integration response');
+  return { id: data.id, email: data.email, immediate_notify: data.immediate_notify, status: data.status, last_error: data.last_error, last_synced_at: data.last_synced_at, created_at: data.created_at };
+}
+
+export function readGmail(data: unknown): GmailState {
+  if (
+    !isRecord(data) || typeof data.available !== 'boolean' || typeof data.redirect_uri !== 'string' ||
+    typeof data.max_accounts !== 'number' || !Number.isInteger(data.max_accounts) || data.max_accounts < 0 ||
+    !Array.isArray(data.accounts) || !data.accounts.every(isGmailAccount)
+  ) throw new Error('Unexpected mail integration response');
+  return { available: data.available, redirect_uri: data.redirect_uri, max_accounts: data.max_accounts, accounts: data.accounts.map(readGmailAccount) };
+}
+
 function isDevice(value: unknown): value is PushDevice {
   return isRecord(value) && typeof value.id === 'string' && value.id !== '' && typeof value.label === 'string' &&
     typeof value.created_at === 'string' && nullableString(value.last_used_at);
@@ -193,6 +236,29 @@ export function createIntegrationsClient(request: RequestFunction) {
     },
     async disconnectChatwork(): Promise<void> {
       await request<unknown>('/api/v1/integrations/chatwork', { method: 'DELETE' });
+    },
+    async getGmail(): Promise<GmailState> {
+      return readGmail(await request<unknown>('/api/v1/integrations/gmail'));
+    },
+    // authorizeGmail starts a Google authorization and returns the URL of
+    // Google's consent screen. accountId connects that account again.
+    async authorizeGmail(accountId?: string): Promise<string> {
+      const body = accountId === undefined ? {} : { account_id: accountId };
+      const data = await request<unknown>('/api/v1/integrations/gmail/authorize', json('POST', body));
+      if (!isRecord(data) || typeof data.url !== 'string' || !data.url.startsWith(GOOGLE_CONSENT_ORIGIN)) throw new Error('Unexpected mail authorization response');
+      return data.url;
+    },
+    // completeGmail completes an authorization with what Google sent back:
+    // the code, or the error when it was not allowed.
+    async completeGmail(state: string, result: string | { error: string }): Promise<GmailAccount> {
+      const body = typeof result === 'string' ? { state, code: result } : { state, error: result.error };
+      return readGmailAccount(await request<unknown>('/api/v1/integrations/gmail/complete', json('POST', body)));
+    },
+    async updateGmailAccount(id: string, immediateNotify: boolean): Promise<GmailAccount> {
+      return readGmailAccount(await request<unknown>(`/api/v1/integrations/gmail/accounts/${encodeURIComponent(id)}`, json('PATCH', { immediate_notify: immediateNotify })));
+    },
+    async disconnectGmail(id: string): Promise<void> {
+      await request<unknown>(`/api/v1/integrations/gmail/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
     },
     async getPushPublicKey(): Promise<string> {
       const data = await request<unknown>('/api/v1/push/public-key');

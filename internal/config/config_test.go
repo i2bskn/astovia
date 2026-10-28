@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 )
 
@@ -82,5 +83,32 @@ func TestPublicURLRejectsUnsupportedOrigins(t *testing.T) {
 				t.Fatalf("accepted unsupported origin %q", input)
 			}
 		})
+	}
+}
+
+func TestGoogleClient(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://example.com")
+	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("ASTOVIA_GOOGLE_CLIENT_ID", "")
+	t.Setenv("ASTOVIA_GOOGLE_CLIENT_SECRET", "")
+	if c, e := Load(false); e != nil || c.Google != nil {
+		t.Fatal(c.Google, e)
+	}
+	t.Setenv("ASTOVIA_GOOGLE_CLIENT_ID", "id.apps.googleusercontent.com")
+	t.Setenv("ASTOVIA_GOOGLE_CLIENT_SECRET", "secret")
+	c, e := Load(false)
+	if e != nil || c.Google == nil || c.Google.ID != "id.apps.googleusercontent.com" || c.Google.Secret != "secret" || c.Google.RedirectURI != "https://example.com/integrations/google/callback" {
+		t.Fatal(c.Google, e)
+	}
+	for _, tc := range []struct{ id, secret string }{{"id", ""}, {"", "secret"}, {" id", "secret"}, {"id", "secret "}, {"id\n", "secret"}, {"id", "sécret"}, {strings.Repeat("a", 513), "secret"}} {
+		t.Setenv("ASTOVIA_GOOGLE_CLIENT_ID", tc.id)
+		t.Setenv("ASTOVIA_GOOGLE_CLIENT_SECRET", tc.secret)
+		if _, e := Load(false); e == nil {
+			t.Fatalf("accepted %q %q", tc.id, tc.secret)
+		} else if tc.secret != "" && strings.Contains(e.Error(), tc.secret) {
+			t.Fatalf("error contains the secret: %v", e)
+		}
 	}
 }

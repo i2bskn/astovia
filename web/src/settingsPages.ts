@@ -1,5 +1,5 @@
 import type { APIToken } from './apiTokens';
-import type { ChatworkState, GitHubState, PushDevice, SlackState } from './integrations';
+import type { ChatworkState, GitHubState, GmailState, PushDevice, SlackState } from './integrations';
 import type { Connection } from './oauth';
 
 // Pages of Settings, one per errand. path is relative to /settings.
@@ -7,7 +7,7 @@ export type SettingsPage = 'integrations' | 'ai' | 'notifications' | 'ai-clients
 
 // summary describes the page in the phone list until its status is loaded.
 export const settingsPages: readonly { value: SettingsPage; label: string; path: string; summary: string }[] = [
-  { value: 'integrations', label: '連携', path: 'integrations', summary: 'GitHub・Slack・Chatwork からタスクを見つける' },
+  { value: 'integrations', label: '連携', path: 'integrations', summary: 'GitHub・Slack・Chatwork・メールからタスクを見つける' },
   { value: 'ai', label: 'AI', path: 'ai', summary: 'タスクを判断する AI のキーとモデル' },
   { value: 'notifications', label: '通知', path: 'notifications', summary: '受け取る端末と通知のタイミング' },
   { value: 'ai-clients', label: 'AI クライアント', path: 'ai-clients', summary: '接続のしかたと API トークン' },
@@ -67,23 +67,34 @@ export function chatworkStatus(state: ChatworkState): string {
   return state.status === 'error' || state.last_error ? `Chatwork（${state.account_name}）の接続を確認してください` : `Chatwork（${state.account_name}）と連携中`;
 }
 
+// gmailStatus sums up the Google accounts of the mail integration.
+export function gmailStatus(state: GmailState): string {
+  if (state.accounts.length === 0) return 'メールは未接続';
+  if (state.accounts.some((a) => a.status === 'error' || a.last_error !== null)) return 'メールの接続を確認してください';
+  return `メール（${state.accounts.length} 件）と連携中`;
+}
+
 function needsAttention(state: GitHubState | SlackState | ChatworkState): boolean {
   return state.connected && (state.status === 'error' || state.last_error !== null);
 }
 
-// integrationsStatus sums up the GitHub, Slack and Chatwork states for the
-// phone list: the connections that need attention when there are any,
+// integrationsStatus sums up the GitHub, Slack, Chatwork and mail states for
+// the phone list: the connections that need attention when there are any,
 // otherwise the connected ones, otherwise that none is connected. A state
 // that could not be read is left out; the result is undefined when none was
 // read.
-export function integrationsStatus(github?: GitHubState, slack?: SlackState, chatwork?: ChatworkState): string | undefined {
-  const states: { state: GitHubState | SlackState | ChatworkState; text: string }[] = [];
-  if (github) states.push({ state: github, text: githubStatus(github) });
-  if (slack) states.push({ state: slack, text: slackStatus(slack) });
-  if (chatwork) states.push({ state: chatwork, text: chatworkStatus(chatwork) });
+export function integrationsStatus(github?: GitHubState, slack?: SlackState, chatwork?: ChatworkState, gmail?: GmailState): string | undefined {
+  const states: { attention: boolean; connected: boolean; text: string }[] = [];
+  if (github) states.push({ attention: needsAttention(github), connected: github.connected, text: githubStatus(github) });
+  if (slack) states.push({ attention: needsAttention(slack), connected: slack.connected, text: slackStatus(slack) });
+  if (chatwork) states.push({ attention: needsAttention(chatwork), connected: chatwork.connected, text: chatworkStatus(chatwork) });
+  if (gmail) {
+    const connected = gmail.accounts.length > 0;
+    states.push({ attention: connected && gmail.accounts.some((a) => a.status === 'error' || a.last_error !== null), connected, text: gmailStatus(gmail) });
+  }
   if (states.length === 0) return undefined;
-  const failing = states.filter((s) => needsAttention(s.state));
-  const connected = states.filter((s) => s.state.connected);
+  const failing = states.filter((s) => s.attention);
+  const connected = states.filter((s) => s.connected);
   const shown = failing.length > 0 ? failing : connected.length > 0 ? connected : states;
   return shown.map((s) => s.text).join(' · ');
 }

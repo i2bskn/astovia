@@ -11,6 +11,7 @@ import CandidateList from './CandidateList';
 import { candidates } from './candidates';
 import ConsentPage from './ConsentPage';
 import { dateTime } from './format';
+import GoogleCallbackPage from './GoogleCallbackPage';
 import { linkPageAt } from './links';
 import { resetNoticeKey, resetNoticeText, showResetNotice } from './resetNotice';
 import { AutoIcon, SettingsIcon, SidebarIcon, SparkleIcon, TasksIcon } from './icons';
@@ -165,7 +166,7 @@ function PageHeader({ title, lead }: { title: string; lead: string }) {
   return <header className="page-header"><h1>{title}</h1><p className="page-lead"><Phrased text={lead} /></p></header>;
 }
 
-const titles: Record<string, string> = { '/': 'タスク', '/candidates': 'タスク候補', '/auto': '自動で処理したもの', '/settings': '設定', '/account': 'アカウント' };
+const titles: Record<string, string> = { '/': 'タスク', '/candidates': 'タスク候補', '/auto': '自動で処理したもの', '/settings': '設定', '/account': 'アカウント', '/integrations/google/callback': 'Google アカウントの接続' };
 
 // titleAt is the default title of a screen. A task's detail screen replaces
 // it with the task's content once the task is read.
@@ -277,6 +278,7 @@ function Workspace({ user, error }: { user: User; error: string | null }) {
           <Route path="tasks/:id" element={<TaskDetailRoute />} />
           <Route path="settings/*" element={<Settings />} />
           <Route path="account/*" element={<Account userID={user.id} email={email} role={user.role} />} />
+          <Route path="integrations/google/callback" element={<GoogleCallbackPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>

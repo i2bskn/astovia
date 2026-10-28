@@ -12,6 +12,8 @@ import (
 	"github.com/i2bskn/astovia/internal/config"
 	"github.com/i2bskn/astovia/internal/github"
 	"github.com/i2bskn/astovia/internal/githubsync"
+	"github.com/i2bskn/astovia/internal/gmailsync"
+	"github.com/i2bskn/astovia/internal/google"
 	"github.com/i2bskn/astovia/internal/httpserver"
 	"github.com/i2bskn/astovia/internal/notify"
 	"github.com/i2bskn/astovia/internal/secretbox"
@@ -98,10 +100,11 @@ func run(args []string) error {
 }
 
 // startWorkers starts the background loops of serve: GitHub synchronization
-// (with the AI judging mentions), Slack and Chatwork synchronization (with
-// the AI judging messages and replies; Chatwork also imports tasks), the
-// notification engine, the dispatcher, the cleanup of sent notifications
-// and the sweep of task candidates and passed events. They share the
+// (with the AI judging mentions), Slack, Chatwork and mail synchronization
+// (with the AI judging messages and replies; Chatwork also imports tasks;
+// mail does nothing without the Google OAuth client), the notification
+// engine, the dispatcher, the cleanup of sent notifications and the sweep
+// of task candidates and passed events. They share the
 // authentication service's clock. They stop when ctx is canceled; the returned group
 // finishes when they have returned.
 func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.Service) *sync.WaitGroup {
@@ -111,6 +114,7 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: aiClient, Box: box, Now: now}
 	slackSyncer := &slacksync.Syncer{Store: s, Slack: slack.New(now), AI: aiClient, Box: box, Now: now}
 	chatworkSyncer := &chatworksync.Syncer{Store: s, Chatwork: chatwork.New(now), AI: aiClient, Box: box, Now: now}
+	gmailSyncer := &gmailsync.Syncer{Store: s, Google: google.New(now), Client: c.Google, AI: aiClient, Box: box, Now: now}
 	engine := &notify.Engine{Store: s, Now: now}
 	sweeper := &notify.Sweeper{Store: s, Now: now}
 	vapid := &notify.VAPID{Store: s, Box: box, Now: now}
@@ -124,6 +128,7 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 		{"github sync", 15 * time.Second, syncer.RunOnce},
 		{"slack sync", 15 * time.Second, slackSyncer.RunOnce},
 		{"chatwork sync", 15 * time.Second, chatworkSyncer.RunOnce},
+		{"gmail sync", 15 * time.Second, gmailSyncer.RunOnce},
 		{"notification engine", time.Minute, engine.RunOnce},
 		{"notification dispatcher", 5 * time.Second, dispatcher.RunOnce},
 		{"notification cleanup", time.Hour, dispatcher.Cleanup},

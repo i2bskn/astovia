@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accountPageAt, accountPages, chatworkStatus, clientsStatus, devicesStatus, githubStatus, integrationsStatus, legacyAccountPath, settingsPageAt, settingsPages, slackStatus, visibleAccountPages } from '../.test-build/settingsPages.js';
+import { accountPageAt, accountPages, chatworkStatus, clientsStatus, devicesStatus, githubStatus, gmailStatus, integrationsStatus, legacyAccountPath, settingsPageAt, settingsPages, slackStatus, visibleAccountPages } from '../.test-build/settingsPages.js';
 
 test('settings has four pages under /settings', () => {
   assert.deepEqual(settingsPages.map((p) => p.path), ['integrations', 'ai', 'notifications', 'ai-clients']);
@@ -60,7 +60,7 @@ test('the integrations page sums up GitHub and Slack', () => {
 const chatwork = { connected: true, account_name: 'alice', organization_name: 'Acme', token_last4: '1234', immediate_notify: true, detect_mentions: true, detect_dms: true, import_tasks: true, status: 'active', last_error: null, last_synced_at: null, created_at: '2026-10-01T00:00:00Z' };
 
 test('the integrations page sums up Chatwork too', () => {
-  assert.equal(settingsPages[0].summary, 'GitHub・Slack・Chatwork からタスクを見つける');
+  assert.equal(settingsPages[0].summary, 'GitHub・Slack・Chatwork・メールからタスクを見つける');
   assert.equal(chatworkStatus({ connected: false }), 'Chatwork は未接続');
   assert.equal(chatworkStatus(chatwork), 'Chatwork（alice）と連携中');
   assert.equal(chatworkStatus({ ...chatwork, last_error: 'rate_limited' }), 'Chatwork（alice）の接続を確認してください');
@@ -71,6 +71,23 @@ test('the integrations page sums up Chatwork too', () => {
   assert.equal(integrationsStatus(undefined, undefined, chatwork), 'Chatwork（alice）と連携中');
   assert.equal(integrationsStatus({ connected: false }, undefined, chatwork), 'Chatwork（alice）と連携中');
   assert.equal(integrationsStatus(undefined, undefined, undefined), undefined);
+});
+
+const gmailAccount = { id: 'a1', email: 'alice@example.com', immediate_notify: true, status: 'active', last_error: null, last_synced_at: null, created_at: '2026-10-01T00:00:00Z' };
+const gmail = { available: true, redirect_uri: 'https://astovia.test/integrations/google/callback', max_accounts: 10, accounts: [gmailAccount, { ...gmailAccount, id: 'a2', email: 'b@example.com' }] };
+
+test('the integrations page sums up the mail accounts', () => {
+  assert.equal(gmailStatus({ ...gmail, accounts: [] }), 'メールは未接続');
+  assert.equal(gmailStatus({ ...gmail, available: false, accounts: [] }), 'メールは未接続');
+  assert.equal(gmailStatus(gmail), 'メール（2 件）と連携中');
+  assert.equal(gmailStatus({ ...gmail, accounts: [gmailAccount, { ...gmailAccount, id: 'a2', status: 'error', last_error: 'token_invalid' }] }), 'メールの接続を確認してください');
+  assert.equal(gmailStatus({ ...gmail, accounts: [{ ...gmailAccount, last_error: 'rate_limited' }] }), 'メールの接続を確認してください');
+  assert.equal(integrationsStatus(github, slack, chatwork, gmail), 'GitHub（octo）と連携中 · Slack（Acme）と連携中 · Chatwork（alice）と連携中 · メール（2 件）と連携中');
+  assert.equal(integrationsStatus({ connected: false }, { connected: false }, { connected: false }, { ...gmail, accounts: [] }), 'GitHub は未接続 · Slack は未接続 · Chatwork は未接続 · メールは未接続');
+  assert.equal(integrationsStatus(github, undefined, undefined, { ...gmail, accounts: [{ ...gmailAccount, status: 'error' }] }), 'メールの接続を確認してください');
+  assert.equal(integrationsStatus({ connected: false }, undefined, undefined, gmail), 'メール（2 件）と連携中');
+  assert.equal(integrationsStatus(undefined, undefined, undefined, { ...gmail, accounts: [] }), 'メールは未接続');
+  assert.equal(integrationsStatus(undefined, undefined, undefined, undefined), undefined);
 });
 
 test('the user management page is shown to owners only', () => {

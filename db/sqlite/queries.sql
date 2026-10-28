@@ -274,6 +274,73 @@ ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
 SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND source = 'chatwork' AND status = 'open' AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix)
 ORDER BY created_at, id LIMIT sqlc.arg(page_size);
+-- name: ListGmailAccounts :many
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE user_id = sqlc.arg(user_id) ORDER BY email;
+-- name: GetGmailAccount :one
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: LockGmailAccount :one
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: LockGmailAccountByEmail :one
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE email = sqlc.arg(email);
+-- name: CountGmailAccounts :one
+SELECT COUNT(*) FROM gmail_accounts WHERE user_id = sqlc.arg(user_id);
+-- name: CreateGmailAccount :execrows
+INSERT INTO gmail_accounts (id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(email),sqlc.arg(generation),sqlc.arg(token_sealed),sqlc.arg(immediate_notify),sqlc.arg(status),sqlc.arg(last_error),sqlc.arg(failure_count),sqlc.arg(connected_at),sqlc.arg(next_poll_at),sqlc.arg(last_synced_at),sqlc.arg(last_tracked_at),sqlc.arg(created_at),sqlc.arg(updated_at))
+ON CONFLICT (email) DO NOTHING;
+-- name: ReconnectGmailAccount :execrows
+UPDATE gmail_accounts SET generation = sqlc.arg(generation), token_sealed = sqlc.arg(token_sealed), status = sqlc.arg(status), last_error = sqlc.arg(last_error), failure_count = sqlc.arg(failure_count), connected_at = sqlc.arg(connected_at), next_poll_at = sqlc.arg(next_poll_at), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: UpdateGmailTokenSealed :execrows
+UPDATE gmail_accounts SET token_sealed = sqlc.arg(token_sealed)
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation);
+-- name: UpdateGmailSyncState :execrows
+UPDATE gmail_accounts SET status = sqlc.arg(status), last_error = sqlc.arg(last_error), failure_count = sqlc.arg(failure_count), next_poll_at = sqlc.arg(next_poll_at), last_synced_at = sqlc.arg(last_synced_at), last_tracked_at = sqlc.arg(last_tracked_at), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation);
+-- name: UpdateGmailSettings :execrows
+UPDATE gmail_accounts SET immediate_notify = sqlc.arg(immediate_notify), updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: DeleteGmailAccount :execrows
+DELETE FROM gmail_accounts WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+-- name: DeleteUserGmailAccounts :exec
+DELETE FROM gmail_accounts WHERE user_id = sqlc.arg(user_id);
+-- name: ListDueGmailAccounts :many
+SELECT id, user_id, email, generation, token_sealed, immediate_notify, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM gmail_accounts
+WHERE status = 'active' AND next_poll_at <= sqlc.arg(now) AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY next_poll_at, id LIMIT sqlc.arg(page_size);
+-- name: ListGmailJudgedKeys :many
+SELECT source_key FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = 'gmail' AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix) AND created_at >= sqlc.arg(created_since)
+ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: CreateGoogleAuthState :exec
+INSERT INTO google_auth_states (state_hash,user_id,verifier_sealed,expires_at,created_at)
+VALUES (sqlc.arg(state_hash),sqlc.arg(user_id),sqlc.arg(verifier_sealed),sqlc.arg(expires_at),sqlc.arg(created_at));
+-- name: GetGoogleAuthState :one
+SELECT state_hash, user_id, verifier_sealed, expires_at, created_at FROM google_auth_states
+WHERE state_hash = sqlc.arg(state_hash) AND user_id = sqlc.arg(user_id);
+-- name: ListGoogleAuthStateHashes :many
+SELECT state_hash FROM google_auth_states
+WHERE user_id = sqlc.arg(user_id) ORDER BY created_at DESC, state_hash DESC;
+-- name: DeleteGoogleAuthState :execrows
+DELETE FROM google_auth_states WHERE state_hash = sqlc.arg(state_hash) AND user_id = sqlc.arg(user_id);
+-- name: DeleteExpiredGoogleAuthStates :exec
+DELETE FROM google_auth_states WHERE user_id = sqlc.arg(user_id) AND expires_at <= sqlc.arg(now);
+-- name: DeleteUserGoogleAuthStates :exec
+DELETE FROM google_auth_states WHERE user_id = sqlc.arg(user_id);
+-- name: StopTrackingSourcePrefixItems :exec
+UPDATE action_items SET tracking = 0, version = version + 1, updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix) AND tracking = 1;
+-- name: ListTrackedSourcePrefixItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix) AND tracking = 1 AND status IN ('open','candidate')
+ORDER BY COALESCE(tracked_at, 0), id LIMIT sqlc.arg(page_size);
+-- name: DeleteUserPendingNotificationsByKindAndSourcePrefix :exec
+DELETE FROM notifications WHERE notifications.user_id = sqlc.arg(user_id) AND notifications.kind = sqlc.arg(kind) AND notifications.sent_at IS NULL
+AND notifications.action_item_id IN (SELECT action_items.id FROM action_items WHERE action_items.user_id = sqlc.arg(item_user_id) AND action_items.source = sqlc.arg(source) AND substr(action_items.source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix));
 -- name: ListChildActionItems :many
 SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND parent_id = sqlc.arg(parent_id)

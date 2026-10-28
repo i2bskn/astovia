@@ -24,6 +24,8 @@ services:
       ASTOVIA_DB_DRIVER: sqlite
       ASTOVIA_DB_DSN: file:/app/data/astovia.db
       ASTOVIA_JWT_SECRET: "${ASTOVIA_JWT_SECRET:-}"
+      ASTOVIA_GOOGLE_CLIENT_ID: "${ASTOVIA_GOOGLE_CLIENT_ID:-}"
+      ASTOVIA_GOOGLE_CLIENT_SECRET: "${ASTOVIA_GOOGLE_CLIENT_SECRET:-}"
   web:
     build:
       context: .

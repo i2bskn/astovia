@@ -11,6 +11,8 @@ services:
       ASTOVIA_DB_DRIVER: sqlite
       ASTOVIA_DB_DSN: file:/app/data/astovia.db
       ASTOVIA_JWT_SECRET: ${ASTOVIA_JWT_SECRET:?set ASTOVIA_JWT_SECRET in .env}
+      ASTOVIA_GOOGLE_CLIENT_ID: ${ASTOVIA_GOOGLE_CLIENT_ID:-}
+      ASTOVIA_GOOGLE_CLIENT_SECRET: ${ASTOVIA_GOOGLE_CLIENT_SECRET:-}
     volumes:
       - data:/app/data
   caddy:

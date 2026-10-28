@@ -8,6 +8,7 @@ import { createAPITokensClient } from './apiTokens';
 import ChatworkSettings from './ChatworkSettings';
 import ConnectionList from './ConnectionList';
 import GitHubSettings from './GitHubSettings';
+import GmailSettings from './GmailSettings';
 import { BellIcon, ChevronLeftIcon, ChevronRightIcon, PlugIcon, SourceIcon, SparkleIcon } from './icons';
 import { createIntegrationsClient } from './integrations';
 import NotificationSettings from './NotificationSettings';
@@ -48,12 +49,12 @@ function SettingsIndex() {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([integrations.getGitHub(), integrations.getSlack(), integrations.getChatwork(), ai.getAI(), integrations.listPushDevices(), oauth.listConnections(), apiTokens.listAPITokens()])
-      .then(([github, slack, chatwork, aiState, devices, connections, tokens]) => {
+    void Promise.allSettled([integrations.getGitHub(), integrations.getSlack(), integrations.getChatwork(), integrations.getGmail(), ai.getAI(), integrations.listPushDevices(), oauth.listConnections(), apiTokens.listAPITokens()])
+      .then(([github, slack, chatwork, gmail, aiState, devices, connections, tokens]) => {
         if (!active) return;
         // A page whose state could not be read keeps its summary.
         setStatus({
-          integrations: integrationsStatus(github.status === 'fulfilled' ? github.value : undefined, slack.status === 'fulfilled' ? slack.value : undefined, chatwork.status === 'fulfilled' ? chatwork.value : undefined),
+          integrations: integrationsStatus(github.status === 'fulfilled' ? github.value : undefined, slack.status === 'fulfilled' ? slack.value : undefined, chatwork.status === 'fulfilled' ? chatwork.value : undefined, gmail.status === 'fulfilled' ? gmail.value : undefined),
           ai: aiState.status === 'fulfilled' ? aiStatus(aiState.value) : undefined,
           notifications: devices.status === 'fulfilled' ? devicesStatus(devices.value) : undefined,
           'ai-clients': connections.status === 'fulfilled' && tokens.status === 'fulfilled' ? clientsStatus(connections.value, tokens.value) : undefined,
@@ -95,7 +96,7 @@ export default function Settings() {
     </nav>
     <Routes>
       <Route index element={phone ? <SettingsIndex /> : <Navigate to="/settings/integrations" replace />} />
-      <Route path="integrations" element={<div className="settings-stack"><GitHubSettings /><SlackSettings /><ChatworkSettings /></div>} />
+      <Route path="integrations" element={<div className="settings-stack"><GitHubSettings /><SlackSettings /><ChatworkSettings /><GmailSettings /></div>} />
       <Route path="ai" element={<AISettings />} />
       <Route path="notifications" element={<NotificationSettings />} />
       <Route path="ai-clients" element={<div className="settings-stack"><ConnectionList /><APITokenList /></div>} />

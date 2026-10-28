@@ -437,6 +437,101 @@ func (q sqliteQueries) listChatworkJudgedKeys(ctx context.Context, userID, prefi
 func (q sqliteQueries) listChatworkTaskItems(ctx context.Context, userID, prefix string, limit int) ([]ActionItem, error) {
 	return q.actionItems(q.q.ListChatworkTaskItems(ctx, db.ListChatworkTaskItemsParams{UserID: userID, Prefix: prefix, PageSize: int64(limit)}))
 }
+func (q sqliteQueries) gmailAccounts(rows []db.GmailAccount, err error) ([]GmailAccount, error) {
+	if err != nil {
+		return nil, err
+	}
+	out := make([]GmailAccount, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, GmailAccount(row))
+	}
+	return out, nil
+}
+func (q sqliteQueries) listGmailAccounts(ctx context.Context, userID string) ([]GmailAccount, error) {
+	return q.gmailAccounts(q.q.ListGmailAccounts(ctx, userID))
+}
+func (q sqliteQueries) gmailAccount(ctx context.Context, userID, id string) (GmailAccount, error) {
+	row, err := q.q.GetGmailAccount(ctx, db.GetGmailAccountParams{ID: id, UserID: userID})
+	return GmailAccount(row), err
+}
+func (q sqliteQueries) lockGmailAccount(ctx context.Context, userID, id string) (GmailAccount, error) {
+	row, err := q.q.LockGmailAccount(ctx, db.LockGmailAccountParams{ID: id, UserID: userID})
+	return GmailAccount(row), err
+}
+func (q sqliteQueries) lockGmailAccountByEmail(ctx context.Context, email string) (GmailAccount, error) {
+	row, err := q.q.LockGmailAccountByEmail(ctx, email)
+	return GmailAccount(row), err
+}
+func (q sqliteQueries) countGmailAccounts(ctx context.Context, userID string) (int64, error) {
+	return q.q.CountGmailAccounts(ctx, userID)
+}
+func (q sqliteQueries) createGmailAccount(ctx context.Context, a GmailAccount) (int64, error) {
+	return q.q.CreateGmailAccount(ctx, db.CreateGmailAccountParams(a))
+}
+func (q sqliteQueries) reconnectGmailAccount(ctx context.Context, a GmailAccount) (int64, error) {
+	return q.q.ReconnectGmailAccount(ctx, db.ReconnectGmailAccountParams{Generation: a.Generation, TokenSealed: a.TokenSealed, Status: a.Status, LastError: a.LastError, FailureCount: a.FailureCount, ConnectedAt: a.ConnectedAt, NextPollAt: a.NextPollAt, UpdatedAt: a.UpdatedAt, ID: a.ID, UserID: a.UserID})
+}
+func (q sqliteQueries) updateGmailTokenSealed(ctx context.Context, userID, id string, generation int64, tokenSealed string) (int64, error) {
+	return q.q.UpdateGmailTokenSealed(ctx, db.UpdateGmailTokenSealedParams{TokenSealed: tokenSealed, ID: id, UserID: userID, Generation: generation})
+}
+func (q sqliteQueries) updateGmailSyncState(ctx context.Context, a GmailAccount) (int64, error) {
+	return q.q.UpdateGmailSyncState(ctx, db.UpdateGmailSyncStateParams{Status: a.Status, LastError: a.LastError, FailureCount: a.FailureCount, NextPollAt: a.NextPollAt, LastSyncedAt: a.LastSyncedAt, LastTrackedAt: a.LastTrackedAt, UpdatedAt: a.UpdatedAt, ID: a.ID, UserID: a.UserID, Generation: a.Generation})
+}
+func (q sqliteQueries) updateGmailSettings(ctx context.Context, a GmailAccount) (int64, error) {
+	return q.q.UpdateGmailSettings(ctx, db.UpdateGmailSettingsParams{ImmediateNotify: a.ImmediateNotify, UpdatedAt: a.UpdatedAt, ID: a.ID, UserID: a.UserID})
+}
+func (q sqliteQueries) deleteGmailAccount(ctx context.Context, userID, id string) (int64, error) {
+	return q.q.DeleteGmailAccount(ctx, db.DeleteGmailAccountParams{ID: id, UserID: userID})
+}
+func (q sqliteQueries) deleteUserGmailAccounts(ctx context.Context, userID string) error {
+	return q.q.DeleteUserGmailAccounts(ctx, userID)
+}
+func (q sqliteQueries) listDueGmailAccounts(ctx context.Context, now int64, limit int) ([]GmailAccount, error) {
+	return q.gmailAccounts(q.q.ListDueGmailAccounts(ctx, db.ListDueGmailAccountsParams{Now: now, PageSize: int64(limit)}))
+}
+func (q sqliteQueries) listGmailJudgedKeys(ctx context.Context, userID, prefix string, createdSince int64, limit int) ([]string, error) {
+	rows, err := q.q.ListGmailJudgedKeys(ctx, db.ListGmailJudgedKeysParams{UserID: userID, Prefix: prefix, CreatedSince: createdSince, PageSize: int64(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.String)
+	}
+	return out, nil
+}
+func (q sqliteQueries) createGoogleAuthState(ctx context.Context, st googleAuthState) error {
+	return q.q.CreateGoogleAuthState(ctx, db.CreateGoogleAuthStateParams(st))
+}
+func (q sqliteQueries) googleAuthState(ctx context.Context, userID, stateHash string) (googleAuthState, error) {
+	row, err := q.q.GetGoogleAuthState(ctx, db.GetGoogleAuthStateParams{StateHash: stateHash, UserID: userID})
+	return googleAuthState(row), err
+}
+func (q sqliteQueries) listGoogleAuthStateHashes(ctx context.Context, userID string) ([]string, error) {
+	hashes, err := q.q.ListGoogleAuthStateHashes(ctx, userID)
+	if hashes == nil {
+		hashes = []string{}
+	}
+	return hashes, err
+}
+func (q sqliteQueries) deleteGoogleAuthState(ctx context.Context, userID, stateHash string) (int64, error) {
+	return q.q.DeleteGoogleAuthState(ctx, db.DeleteGoogleAuthStateParams{StateHash: stateHash, UserID: userID})
+}
+func (q sqliteQueries) deleteExpiredGoogleAuthStates(ctx context.Context, userID string, now int64) error {
+	return q.q.DeleteExpiredGoogleAuthStates(ctx, db.DeleteExpiredGoogleAuthStatesParams{UserID: userID, Now: now})
+}
+func (q sqliteQueries) deleteUserGoogleAuthStates(ctx context.Context, userID string) error {
+	return q.q.DeleteUserGoogleAuthStates(ctx, userID)
+}
+func (q sqliteQueries) stopTrackingSourcePrefixItems(ctx context.Context, userID, source, prefix string, now int64) error {
+	return q.q.StopTrackingSourcePrefixItems(ctx, db.StopTrackingSourcePrefixItemsParams{UpdatedAt: now, UserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix})
+}
+func (q sqliteQueries) listTrackedSourcePrefixItems(ctx context.Context, userID, source, prefix string, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListTrackedSourcePrefixItems(ctx, db.ListTrackedSourcePrefixItemsParams{UserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix, PageSize: int64(limit)}))
+}
+func (q sqliteQueries) deleteUserPendingNotificationsBySourcePrefix(ctx context.Context, userID, kind, source, prefix string) error {
+	return q.q.DeleteUserPendingNotificationsByKindAndSourcePrefix(ctx, db.DeleteUserPendingNotificationsByKindAndSourcePrefixParams{UserID: userID, Kind: kind, ItemUserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix})
+}
 func (q sqliteQueries) aiSettings(ctx context.Context, userID string) (AISettings, error) {
 	row, err := q.q.GetAISettings(ctx, userID)
 	return fromSQLiteAISetting(row), err

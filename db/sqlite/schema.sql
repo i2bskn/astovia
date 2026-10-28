@@ -224,6 +224,44 @@ CREATE TABLE "chatwork_connections" (
 );
 -- Create index "chatwork_connections_status_next_poll_idx" to table: "chatwork_connections"
 CREATE INDEX "chatwork_connections_status_next_poll_idx" ON "chatwork_connections" ("status", "next_poll_at");
+-- Create "gmail_accounts" table
+CREATE TABLE "gmail_accounts" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "email" text NOT NULL,
+  "generation" integer NOT NULL,
+  "token_sealed" text NOT NULL,
+  "immediate_notify" integer NOT NULL DEFAULT 1,
+  "status" text NOT NULL,
+  "last_error" text NULL,
+  "failure_count" integer NOT NULL DEFAULT 0,
+  "connected_at" integer NOT NULL,
+  "next_poll_at" integer NOT NULL,
+  "last_synced_at" integer NULL,
+  "last_tracked_at" integer NULL,
+  "created_at" integer NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "gmail_accounts_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "gmail_accounts_email_idx" to table: "gmail_accounts"
+CREATE UNIQUE INDEX "gmail_accounts_email_idx" ON "gmail_accounts" ("email");
+-- Create index "gmail_accounts_user_idx" to table: "gmail_accounts"
+CREATE INDEX "gmail_accounts_user_idx" ON "gmail_accounts" ("user_id", "email");
+-- Create index "gmail_accounts_status_next_poll_idx" to table: "gmail_accounts"
+CREATE INDEX "gmail_accounts_status_next_poll_idx" ON "gmail_accounts" ("status", "next_poll_at");
+-- Create "google_auth_states" table
+CREATE TABLE "google_auth_states" (
+  "state_hash" text NOT NULL,
+  "user_id" text NOT NULL,
+  "verifier_sealed" text NOT NULL,
+  "expires_at" integer NOT NULL,
+  "created_at" integer NOT NULL,
+  PRIMARY KEY ("state_hash"),
+  CONSTRAINT "google_auth_states_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "google_auth_states_user_idx" to table: "google_auth_states"
+CREATE INDEX "google_auth_states_user_idx" ON "google_auth_states" ("user_id");
 -- Create "ai_settings" table
 CREATE TABLE "ai_settings" (
   "user_id" text NOT NULL,

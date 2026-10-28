@@ -10,6 +10,7 @@ import (
 	"github.com/i2bskn/astovia/internal/chatwork"
 	"github.com/i2bskn/astovia/internal/config"
 	"github.com/i2bskn/astovia/internal/github"
+	"github.com/i2bskn/astovia/internal/google"
 	"github.com/i2bskn/astovia/internal/notify"
 	"github.com/i2bskn/astovia/internal/oauth"
 	"github.com/i2bskn/astovia/internal/secretbox"
@@ -46,10 +47,13 @@ type Server struct {
 	// fetchCIMD fetches a Client ID Metadata Document. Tests replace it.
 	fetchCIMD func(ctx context.Context, clientID string) (oauth.Document, error)
 	// github verifies GitHub tokens, slack Slack tokens, chatwork Chatwork
-	// API tokens and ai API keys. Tests replace their base URLs.
+	// API tokens and ai API keys; google connects and revokes Google
+	// accounts with the OAuth client of cfg.Google. Tests replace their
+	// base URLs (and cfg.Google).
 	github   *github.Client
 	slack    *slack.Client
 	chatwork *chatwork.Client
+	google   *google.Client
 	ai       *ai.Client
 	// box seals stored credentials, and vapid manages the Web Push key
 	// pair; both are the ones the background loops use as well.
@@ -119,7 +123,7 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
-		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, pushTestLimiter: newKeyLimiter(3, time.Minute)}
+		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, pushTestLimiter: newKeyLimiter(3, time.Minute)}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -189,6 +193,13 @@ func (s *Server) handler() http.Handler {
 		http.MethodPut:    s.requireUser(requireJSON(http.HandlerFunc(s.handlePutChatwork))),
 		http.MethodPatch:  s.requireUser(requireJSON(http.HandlerFunc(s.handlePatchChatwork))),
 		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteChatwork)),
+	}))
+	mux.Handle("/api/v1/integrations/gmail", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleGetGmail))))
+	mux.Handle("/api/v1/integrations/gmail/authorize", allow(http.MethodPost, s.requireUser(requireJSON(http.HandlerFunc(s.handleAuthorizeGmail)))))
+	mux.Handle("/api/v1/integrations/gmail/complete", allow(http.MethodPost, s.requireUser(requireJSON(http.HandlerFunc(s.handleCompleteGmail)))))
+	mux.Handle("/api/v1/integrations/gmail/accounts/{id}", allowMethods(map[string]http.Handler{
+		http.MethodPatch:  s.requireUser(requireJSON(http.HandlerFunc(s.handlePatchGmailAccount))),
+		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteGmailAccount)),
 	}))
 	mux.Handle("/api/v1/ai", allowMethods(map[string]http.Handler{
 		http.MethodGet:    s.requireUser(http.HandlerFunc(s.handleGetAI)),
@@ -532,16 +543,19 @@ func readOnly(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // screenPath reports whether p is a screen of the web UI: /, /candidates,
-// /auto, /settings, /settings/<page>, /tasks/<id>, /consent, /invite or
-// /reset-password, optionally with a trailing slash. The tokens of /invite
-// and /reset-password are in the URL fragment, which never reaches here.
+// /auto, /settings, /settings/<page>, /tasks/<id>, /consent, /invite,
+// /reset-password or the Google callback, optionally with a trailing
+// slash. The tokens of /invite and /reset-password are in the URL fragment,
+// which never reaches here. The query of the Google callback (the code and
+// the state) does reach here; it is never logged, and the page removes it
+// from the address bar at once.
 func screenPath(p string) bool {
 	if p == "/" {
 		return true
 	}
 	p = strings.TrimSuffix(p, "/")
 	switch p {
-	case "/candidates", "/auto", "/settings", "/account", "/consent", "/invite", "/reset-password":
+	case "/candidates", "/auto", "/settings", "/account", "/consent", "/invite", "/reset-password", config.GoogleCallbackPath:
 		return true
 	}
 	if id, ok := strings.CutPrefix(p, "/tasks/"); ok {

@@ -142,6 +142,44 @@ CREATE TABLE "github_connections" (
 );
 -- Create index "github_connections_status_next_poll_idx" to table: "github_connections"
 CREATE INDEX "github_connections_status_next_poll_idx" ON "github_connections" ("status", "next_poll_at");
+-- Create "gmail_accounts" table
+CREATE TABLE "gmail_accounts" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "email" text NOT NULL,
+  "generation" bigint NOT NULL,
+  "token_sealed" text NOT NULL,
+  "immediate_notify" bigint NOT NULL DEFAULT 1,
+  "status" text NOT NULL,
+  "last_error" text NULL,
+  "failure_count" bigint NOT NULL DEFAULT 0,
+  "connected_at" bigint NOT NULL,
+  "next_poll_at" bigint NOT NULL,
+  "last_synced_at" bigint NULL,
+  "last_tracked_at" bigint NULL,
+  "created_at" bigint NOT NULL,
+  "updated_at" bigint NOT NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "gmail_accounts_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
+);
+-- Create index "gmail_accounts_email_idx" to table: "gmail_accounts"
+CREATE UNIQUE INDEX "gmail_accounts_email_idx" ON "gmail_accounts" ("email");
+-- Create index "gmail_accounts_status_next_poll_idx" to table: "gmail_accounts"
+CREATE INDEX "gmail_accounts_status_next_poll_idx" ON "gmail_accounts" ("status", "next_poll_at");
+-- Create index "gmail_accounts_user_idx" to table: "gmail_accounts"
+CREATE INDEX "gmail_accounts_user_idx" ON "gmail_accounts" ("user_id", "email");
+-- Create "google_auth_states" table
+CREATE TABLE "google_auth_states" (
+  "state_hash" text NOT NULL,
+  "user_id" text NOT NULL,
+  "verifier_sealed" text NOT NULL,
+  "expires_at" bigint NOT NULL,
+  "created_at" bigint NOT NULL,
+  PRIMARY KEY ("state_hash"),
+  CONSTRAINT "google_auth_states_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
+);
+-- Create index "google_auth_states_user_idx" to table: "google_auth_states"
+CREATE INDEX "google_auth_states_user_idx" ON "google_auth_states" ("user_id");
 -- Create "invitations" table
 CREATE TABLE "invitations" (
   "id" text NOT NULL,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { autoOutcome, autoReasonLabel, chatworkErrorMessage, chatworkStatusMessage, githubErrorMessage, githubStatusMessage, httpsURL, slackErrorMessage, slackStatusMessage } from '../.test-build/automation.js';
+import { autoOutcome, autoReasonLabel, chatworkErrorMessage, chatworkStatusMessage, githubErrorMessage, githubStatusMessage, gmailErrorMessage, gmailStatusMessage, httpsURL, slackErrorMessage, slackStatusMessage } from '../.test-build/automation.js';
 import { createIntegrationsClient } from '../.test-build/integrations.js';
 import { SLACK_APP_MANIFEST } from '../.test-build/slackManifest.js';
 import { base64URLToBytes, bytesToBase64URL, deviceLabel, isIOS, pushSupport, sameKey } from '../.test-build/notifications.js';
@@ -20,6 +20,8 @@ test('automatic completion reasons have Japanese labels', () => {
   assert.equal(autoReasonLabel('chatwork.no_action'), '対応不要と判定');
   assert.equal(autoReasonLabel('chatwork.reply_resolved'), '返信で対応済み');
   assert.equal(autoReasonLabel('chatwork.task_closed'), 'Chatwork のタスク一覧から外れた');
+  assert.equal(autoReasonLabel('gmail.no_action'), '対応不要と判定');
+  assert.equal(autoReasonLabel('gmail.reply_resolved'), '返信で対応済み');
   assert.equal(autoReasonLabel('candidate.expired'), '候補のまま期間が過ぎた');
   assert.equal(autoReasonLabel('event.passed'), '予定の時刻を過ぎた');
   assert.equal(autoReasonLabel('chatwork.unknown'), 'chatwork.unknown');
@@ -77,6 +79,31 @@ test('Chatwork messages', () => {
   assert.equal(chatworkStatusMessage('active', 'rate_limited'), 'Chatwork の利用上限に達したため、一時的に止まっています。');
   assert.equal(chatworkStatusMessage('active', 'unavailable'), 'Chatwork に接続できない状態が続いています。');
   assert.match(chatworkStatusMessage('error', null), /停止/);
+});
+
+test('mail messages', () => {
+  assert.equal(gmailStatusMessage('active', null), '正常');
+  assert.equal(gmailStatusMessage('error', 'token_invalid'), 'Google との接続が切れました。もう一度接続してください。');
+  assert.equal(gmailStatusMessage('error', 'scopes_missing'), 'メールの読み取りが許可されていません。もう一度接続してください。');
+  assert.equal(gmailStatusMessage('error', 'policy_blocked'), 'Google Workspace の管理者がこのアプリを許可していません。');
+  assert.equal(gmailStatusMessage('active', 'api_disabled'), 'Gmail API が有効になっていません（運用者の設定）。');
+  assert.equal(gmailStatusMessage('active', 'client_invalid'), 'Google のクライアントの設定が正しくありません（運用者の設定）。');
+  assert.match(gmailStatusMessage('active', 'rate_limited'), /利用上限/);
+  assert.match(gmailStatusMessage('active', 'unavailable'), /接続できない状態/);
+  assert.match(gmailStatusMessage('error', 'token_undecryptable'), /読み出せません/);
+  assert.match(gmailStatusMessage('error', null), /停止/);
+  assert.equal(gmailStatusMessage('active', 'unknown_code'), '正常');
+  assert.equal(gmailErrorMessage('gmail_state_invalid'), '接続の手続きの期限が切れました。もう一度お試しください。');
+  assert.equal(gmailErrorMessage('gmail_denied'), 'Google で接続が許可されませんでした。');
+  assert.equal(gmailErrorMessage('gmail_scope_missing'), 'メールの読み取りを許可してください。');
+  assert.equal(gmailErrorMessage('gmail_in_use'), 'この Google アカウントは、Astovia の別のユーザーが接続しています。');
+  assert.equal(gmailErrorMessage('gmail_api_disabled'), 'Gmail API が有効になっていません（運用者の設定）。');
+  assert.equal(gmailErrorMessage('gmail_policy_blocked'), 'Google Workspace の管理者がこのアプリを許可していません。');
+  assert.equal(gmailErrorMessage('gmail_too_many'), '10 件まで接続できます。');
+  assert.match(gmailErrorMessage('gmail_unavailable'), /運用者/);
+  assert.match(gmailErrorMessage('gmail_exchange_failed'), /完了できませんでした/);
+  assert.match(gmailErrorMessage('invalid_request'), /正しくありません/);
+  assert.match(gmailErrorMessage(null), /接続できませんでした/);
 });
 
 test('the Slack app manifest on screen is the one in deploy', async () => {
@@ -218,6 +245,48 @@ test('Chatwork integration client', async () => {
   for (const bad of [null, {}, { connected: true }, { ...chatworkConnection, import_tasks: 'yes' }, { ...chatworkConnection, organization_name: null }, { ...chatworkConnection, last_synced_at: 1 }]) {
     await assert.rejects(fake(bad).client.getChatwork(), /Unexpected Chatwork integration response/);
   }
+});
+
+const gmailAccount = { id: 'a1', email: 'alice@example.com', immediate_notify: true, status: 'active', last_error: null, last_synced_at: null, created_at: '2026-10-24T10:00:00Z' };
+const gmailState = { available: true, redirect_uri: 'https://astovia.test/integrations/google/callback', max_accounts: 10, accounts: [gmailAccount] };
+
+test('mail integration client', async () => {
+  let f = fake(gmailState);
+  assert.deepEqual(await f.client.getGmail(), gmailState);
+  assert.equal(f.calls[0].path, '/api/v1/integrations/gmail');
+  assert.deepEqual(await fake({ ...gmailState, available: false, accounts: [] }).client.getGmail(), { ...gmailState, available: false, accounts: [] });
+  for (const bad of [null, {}, { ...gmailState, available: 'yes' }, { ...gmailState, accounts: null }, { ...gmailState, max_accounts: 1.5 }, { ...gmailState, redirect_uri: null },
+    { ...gmailState, accounts: [{ ...gmailAccount, id: '' }] }, { ...gmailState, accounts: [{ ...gmailAccount, immediate_notify: 1 }] }, { ...gmailState, accounts: [{ ...gmailAccount, last_error: 1 }] }]) {
+    await assert.rejects(fake(bad).client.getGmail(), /Unexpected mail integration response/);
+  }
+
+  // authorizeGmail returns only URLs of Google's consent screen.
+  f = fake({ url: 'https://accounts.google.com/o/oauth2/v2/auth?x=1' });
+  assert.equal(await f.client.authorizeGmail(), 'https://accounts.google.com/o/oauth2/v2/auth?x=1');
+  assert.equal(f.calls[0].path, '/api/v1/integrations/gmail/authorize');
+  assert.equal(f.calls[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(f.calls[0].init.body), {});
+  await f.client.authorizeGmail('a1');
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { account_id: 'a1' });
+  for (const url of ['https://evil.example/', 'http://accounts.google.com/', 'https://accounts.google.com.evil.example/', 'javascript:alert(1)', 1]) {
+    await assert.rejects(fake({ url }).client.authorizeGmail(), /Unexpected mail authorization response/);
+  }
+
+  f = fake(gmailAccount);
+  assert.deepEqual(await f.client.completeGmail('gst_x', 'code-1'), gmailAccount);
+  assert.equal(f.calls[0].path, '/api/v1/integrations/gmail/complete');
+  assert.deepEqual(JSON.parse(f.calls[0].init.body), { state: 'gst_x', code: 'code-1' });
+  await f.client.completeGmail('gst_y', { error: 'access_denied' });
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { state: 'gst_y', error: 'access_denied' });
+  assert.deepEqual(await f.client.updateGmailAccount('a/1', false), gmailAccount);
+  assert.equal(f.calls[2].path, '/api/v1/integrations/gmail/accounts/a%2F1');
+  assert.equal(f.calls[2].init.method, 'PATCH');
+  assert.deepEqual(JSON.parse(f.calls[2].init.body), { immediate_notify: false });
+  await assert.rejects(fake({}).client.completeGmail('gst_x', 'c'), /Unexpected mail integration response/);
+  f = fake(undefined);
+  await f.client.disconnectGmail('a1');
+  assert.equal(f.calls[0].path, '/api/v1/integrations/gmail/accounts/a1');
+  assert.equal(f.calls[0].init.method, 'DELETE');
 });
 
 test('push and settings clients', async () => {

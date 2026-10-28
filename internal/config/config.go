@@ -15,7 +15,21 @@ type Config struct {
 	Addr, PublicURL, Driver, DSN string
 	Secret                       []byte
 	Secure                       bool
+	// Google is the OAuth client of the mail integration, or nil when
+	// ASTOVIA_GOOGLE_CLIENT_ID and ASTOVIA_GOOGLE_CLIENT_SECRET are not set.
+	Google *GoogleClient
 }
+
+// GoogleClient is the OAuth client (a web application) the operator made in
+// Google Cloud for the mail integration. RedirectURI is derived from the
+// public URL. The secret is never logged or put in an error.
+type GoogleClient struct {
+	ID, Secret, RedirectURI string
+}
+
+// GoogleCallbackPath is the path of the redirect URI of the Google OAuth
+// client, a screen of the web UI.
+const GoogleCallbackPath = "/integrations/google/callback"
 
 func Load(requireSecret bool) (Config, error) {
 	c := Config{Addr: env("ASTOVIA_ADDR", "127.0.0.1:8080"), PublicURL: env("ASTOVIA_PUBLIC_URL", "http://localhost:8080"), Driver: env("ASTOVIA_DB_DRIVER", "sqlite"), DSN: os.Getenv("ASTOVIA_DB_DSN")}
@@ -33,6 +47,9 @@ func Load(requireSecret bool) (Config, error) {
 	if err != nil {
 		return c, err
 	}
+	if c.Google, err = googleClient(c.PublicURL); err != nil {
+		return c, err
+	}
 	if requireSecret {
 		c.Secret, err = base64.StdEncoding.DecodeString(os.Getenv("ASTOVIA_JWT_SECRET"))
 		if err != nil || len(c.Secret) < 32 {
@@ -41,6 +58,42 @@ func Load(requireSecret bool) (Config, error) {
 	}
 	return c, nil
 }
+
+// googleClient reads the OAuth client of the mail integration. Both values
+// empty disable it; one of them alone is an error. The values are not
+// trimmed: surrounding spaces are rejected, so that a copy and paste mistake
+// does not pass silently.
+func googleClient(publicURL string) (*GoogleClient, error) {
+	id, secret := os.Getenv("ASTOVIA_GOOGLE_CLIENT_ID"), os.Getenv("ASTOVIA_GOOGLE_CLIENT_SECRET")
+	if id == "" && secret == "" {
+		return nil, nil
+	}
+	if id == "" || secret == "" {
+		return nil, errors.New("ASTOVIA_GOOGLE_CLIENT_ID and ASTOVIA_GOOGLE_CLIENT_SECRET must be set together")
+	}
+	if !validGoogleValue(id) {
+		return nil, errors.New("ASTOVIA_GOOGLE_CLIENT_ID must be 1 to 512 printable ASCII characters without surrounding spaces")
+	}
+	if !validGoogleValue(secret) {
+		return nil, errors.New("ASTOVIA_GOOGLE_CLIENT_SECRET must be 1 to 512 printable ASCII characters without surrounding spaces")
+	}
+	return &GoogleClient{ID: id, Secret: secret, RedirectURI: publicURL + GoogleCallbackPath}, nil
+}
+
+// validGoogleValue accepts 1-512 printable ASCII characters that do not
+// start or end with a space.
+func validGoogleValue(v string) bool {
+	if len(v) < 1 || len(v) > 512 || v[0] == ' ' || v[len(v)-1] == ' ' {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func env(k, d string) string {
 	v := strings.TrimSpace(os.Getenv(k))
 	if v == "" {

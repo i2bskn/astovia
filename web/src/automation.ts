@@ -1,5 +1,5 @@
-// Labels and checks for automatically processed items and the GitHub, Slack
-// and Chatwork integrations. Pure functions, tested without a browser.
+// Labels and checks for automatically processed items and the GitHub, Slack,
+// Chatwork and mail integrations. Pure functions, tested without a browser.
 
 const reasonLabels: Readonly<Record<string, string>> = {
   'github.review_submitted': 'レビューを提出した',
@@ -16,6 +16,8 @@ const reasonLabels: Readonly<Record<string, string>> = {
   // Given when the task left the list for any reason (completed, deleted,
   // reassigned or the room left), so the cause is not named.
   'chatwork.task_closed': 'Chatwork のタスク一覧から外れた',
+  'gmail.no_action': '対応不要と判定',
+  'gmail.reply_resolved': '返信で対応済み',
   'candidate.expired': '候補のまま期間が過ぎた',
   'event.passed': '予定の時刻を過ぎた',
   'children.done': '子タスクがすべて完了した',
@@ -141,4 +143,51 @@ export function chatworkErrorMessage(code: string | null): string {
       return 'トークンの形式が正しくありません。';
   }
   return 'Chatwork と接続できませんでした。接続を確認して、もう一度お試しください。';
+}
+
+const gmailConnectionErrors: Readonly<Record<string, string>> = {
+  token_invalid: 'Google との接続が切れました。もう一度接続してください。',
+  token_undecryptable: '保存したトークンを読み出せません。もう一度接続してください。',
+  scopes_missing: 'メールの読み取りが許可されていません。もう一度接続してください。',
+  policy_blocked: 'Google Workspace の管理者がこのアプリを許可していません。',
+  api_disabled: 'Gmail API が有効になっていません（運用者の設定）。',
+  client_invalid: 'Google のクライアントの設定が正しくありません（運用者の設定）。',
+  rate_limited: 'Gmail の利用上限に達したため、一時的に止まっています。',
+  unavailable: 'Gmail に接続できない状態が続いています。',
+};
+
+// gmailStatusMessage describes the synchronization state of a Google
+// account of the mail integration.
+export function gmailStatusMessage(status: string, lastError: string | null): string {
+  if (lastError && Object.hasOwn(gmailConnectionErrors, lastError)) return gmailConnectionErrors[lastError] ?? lastError;
+  if (status === 'error') return 'エラーで停止しています。もう一度接続してください。';
+  return '正常';
+}
+
+// gmailErrorMessage describes why connecting a Google account failed, from
+// the error code of the response.
+export function gmailErrorMessage(code: string | null): string {
+  switch (code) {
+    case 'gmail_unavailable':
+      return 'メール連携を使うには、Astovia の運用者の設定が必要です。';
+    case 'gmail_too_many':
+      return '10 件まで接続できます。';
+    case 'gmail_state_invalid':
+      return '接続の手続きの期限が切れました。もう一度お試しください。';
+    case 'gmail_denied':
+      return 'Google で接続が許可されませんでした。';
+    case 'gmail_scope_missing':
+      return 'メールの読み取りを許可してください。';
+    case 'gmail_in_use':
+      return 'この Google アカウントは、Astovia の別のユーザーが接続しています。';
+    case 'gmail_api_disabled':
+      return 'Gmail API が有効になっていません（運用者の設定）。';
+    case 'gmail_policy_blocked':
+      return 'Google Workspace の管理者がこのアプリを許可していません。';
+    case 'gmail_exchange_failed':
+      return 'Google との接続を完了できませんでした。時間をおいて、もう一度お試しください。';
+    case 'invalid_request':
+      return '接続の手続きが正しくありません。もう一度お試しください。';
+  }
+  return 'Google アカウントを接続できませんでした。接続を確認して、もう一度お試しください。';
 }
