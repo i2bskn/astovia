@@ -80,7 +80,7 @@ func aiOK(needsAction bool, task, summary string) func(http.ResponseWriter) {
 // for none).
 func aiJudged(decision, task, summary, eventTitle, eventStart, eventEnd string) func(http.ResponseWriter) {
 	return func(w http.ResponseWriter) {
-		out, _ := json.Marshal(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd})
+		out, _ := json.Marshal(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd, "topic": "", "same_as": ""})
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
 			"content": []map[string]any{{"type": "text", "text": string(out)}}, "stop_reason": "end_turn", "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}})
@@ -206,7 +206,7 @@ func TestMentionDetection(t *testing.T) {
 			t.Fatalf("items: %d", st.count())
 		}
 		p := st.pending()
-		if len(p) != 1 || p[0].Title != "メンション: o/r#1" || p[0].Body != "確認して回答する" || p[0].ActionItemID.String != open.ID {
+		if len(p) != 1 || p[0].Title != "メンション: o/r#1" || p[0].Body != "確認して回答する" || p[0].ActionItemID.String != open.ID || p[0].URL != "/tasks/"+open.ID {
 			t.Fatalf("notifications: %+v", p)
 		}
 		// The request names the target and carries the user's key.
@@ -721,4 +721,96 @@ func TestMentions(t *testing.T) {
 	if k := SourceKey(kindMention, github.Ref{Owner: "Octo", Repo: "Repo", Number: 12}) + ":c345"; k != "github:mention:octo/repo#12:c345" {
 		t.Error(k)
 	}
+}
+
+// aiGrouped answers a judgment with a task that the AI put in the same
+// matter as the related task sameAs.
+func aiGrouped(task, topic, sameAs string) func(http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		out, _ := json.Marshal(map[string]any{"decision": ai.DecisionTask, "task": task, "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
+			"content": []map[string]any{{"type": "text", "text": string(out)}}, "stop_reason": "end_turn", "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}})
+	}
+}
+
+// relatedTasks returns the related tasks sent with the n-th judgment.
+func relatedTasks(t *testing.T, fa *fakeAI, n int) []map[string]any {
+	t.Helper()
+	var body struct {
+		Messages []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(fa.body(n)), &body); err != nil {
+		t.Fatal(err)
+	}
+	_, doc, _ := strings.Cut(body.Messages[0].Content[0].Text, "\n")
+	var in struct {
+		RelatedTasks []map[string]any `json:"related_tasks"`
+	}
+	if err := json.Unmarshal([]byte(doc), &in); err != nil {
+		t.Fatal(err)
+	}
+	return in.RelatedTasks
+}
+
+func TestMentionGroup(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		st, fa := newMentionTest(t, driver)
+		recent := st.now.Add(-30 * time.Minute)
+		st.issueWithComments(comment(11, "bob", "@octocat 障害の調査をお願いします", recent), comment(12, "bob", "@octocat 報告書もお願いします", recent.Add(time.Minute)))
+		st.gh.set(func(f *fakeGitHub) { f.headers["/notifications"] = map[string]string{"Last-Modified": "v2"} })
+		fa.set(func(f *fakeAI) {
+			f.replies = []func(http.ResponseWriter){aiOK(true, "障害を調査する", "s"), aiGrouped("報告書を書く", "決済障害の対応", "t1")}
+		})
+		st.advance(time.Minute)
+		st.sync()
+		if fa.count() != 2 {
+			t.Fatalf("AI calls: %d", fa.count())
+		}
+		if got := relatedTasks(t, fa, 1); len(got) != 0 {
+			t.Fatalf("first related: %v", got)
+		}
+		if got := relatedTasks(t, fa, 2); len(got) != 1 || got[0]["id"] != "t1" || got[0]["task"] != "障害を調査する" {
+			t.Fatalf("second related: %v", got)
+		}
+		first, second := st.mustItem(mentionKey(1, "c11")), st.mustItem(mentionKey(1, "c12"))
+		group := st.mustItem("github:group:o/r#1:" + second.ID)
+		if group.Content != "決済障害の対応" || group.Status != "open" || group.Tracking != 0 || group.Source.String != "github" || first.ParentID.String != group.ID || second.ParentID.String != group.ID || first.Version != 2 {
+			t.Fatalf("group %+v first %+v second %+v", group, first, second)
+		}
+		var refs []map[string]string
+		if err := json.Unmarshal([]byte(group.Refs), &refs); err != nil || len(refs) != 1 || refs[0]["url"] != "https://github.com/o/r/issues/1" || refs[0]["conversation_id"] != "o/r#1" || refs[0]["account"] != "octocat" {
+			t.Fatalf("group refs: %s", group.Refs)
+		}
+		// Tracking does not take the group for a review request or an
+		// assignment.
+		if _, _, ok := parseSourceKey(group.SourceKey.String); ok {
+			t.Fatal("group key parsed")
+		}
+
+		// The group is a related task with its subtasks, and takes a new
+		// task of its matter.
+		st.issueWithComments(comment(11, "bob", "@octocat 障害の調査をお願いします", recent), comment(12, "bob", "@octocat 報告書もお願いします", recent.Add(time.Minute)),
+			comment(13, "carol", "@octocat 再発防止の打ち合わせも", st.now.Add(-time.Minute)))
+		st.gh.set(func(f *fakeGitHub) { f.headers["/notifications"] = map[string]string{"Last-Modified": "v3"} })
+		fa.set(func(f *fakeAI) {
+			f.replies, f.bodies = []func(http.ResponseWriter){aiGrouped("再発防止を検討する", "別名", "t1")}, nil
+		})
+		st.advance(time.Minute)
+		st.sync()
+		got := relatedTasks(t, fa, 1)
+		if len(got) != 1 || got[0]["task"] != "決済障害の対応" || len(got[0]["subtasks"].([]any)) != 2 {
+			t.Fatalf("related group: %v", got)
+		}
+		if third := st.mustItem(mentionKey(1, "c13")); third.ParentID.String != group.ID {
+			t.Fatalf("third: %+v", third)
+		}
+		if n := st.count(); n != 4 {
+			t.Fatalf("items: %d", n)
+		}
+	})
 }

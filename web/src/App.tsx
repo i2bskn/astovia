@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
-import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch } from 'react-router';
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch, useParams } from 'react-router';
 import { auth } from './auth';
 import ActionItemList from './ActionItemList';
 import AutoItemList from './AutoItemList';
@@ -10,6 +10,7 @@ import ConsentPage from './ConsentPage';
 import { AutoIcon, SettingsIcon, SidebarIcon, SparkleIcon, TasksIcon } from './icons';
 import Phrased from './Phrased';
 import Settings from './Settings';
+import TaskDetail from './TaskDetail';
 import { settingsPageAt, settingsPages } from './settingsPages';
 import { countLabel, views } from './view';
 import type { View } from './view';
@@ -102,6 +103,16 @@ function NavBadge({ view }: { view: View }) {
   return <span className="nav-badge">{countLabel(state.items.length, state.more)}<span className="sr-only">件</span></span>;
 }
 
+// ViewLink is an entry of the menus. The tasks entry is current on the task
+// list and on a task's detail screen, which NavLink cannot express, so it is
+// a Link with aria-current set by hand; the others are NavLinks.
+function ViewLink({ view, path, className, title, children }: { view: View; path: string; className: string; title?: string; children: React.ReactNode }) {
+  const list = useMatch('/') !== null;
+  const detail = useMatch('/tasks/:id') !== null;
+  if (view === 'tasks') return <Link to={path} className={className} title={title} aria-current={list || detail ? 'page' : undefined}>{children}</Link>;
+  return <NavLink to={path} className={className} title={title}>{children}</NavLink>;
+}
+
 // Sign-out lives in Settings > Account, one step away, so that it is not
 // pressed by accident next to the menu toggle.
 function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boolean; onToggle: () => void }) {
@@ -110,9 +121,9 @@ function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boo
       {collapsed ? <img className="sidebar-mark" src="/favicon.svg" alt="" width={28} height={28} /> : <Logo />}
     </Link>
     <nav className="sidebar-nav" aria-label="画面">
-      {views.map((v) => <NavLink key={v.value} to={v.path} end={v.path === '/'} className="nav-item" title={collapsed ? v.label : undefined}>
+      {views.map((v) => <ViewLink key={v.value} view={v.value} path={v.path} className="nav-item" title={collapsed ? v.label : undefined}>
         {viewIcons[v.value]()}<span className="nav-label">{collapsed ? v.short : v.label}</span><NavBadge view={v.value} />
-      </NavLink>)}
+      </ViewLink>)}
     </nav>
     <div className="sidebar-foot">
       <Link to="/settings/account" className="nav-item sidebar-account" title={email}>
@@ -129,9 +140,9 @@ function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boo
 // TabBar replaces the sidebar on phones, where it sits under the thumb.
 function TabBar() {
   return <nav className="tabbar" aria-label="画面">
-    {views.map((v) => <NavLink key={v.value} to={v.path} end={v.path === '/'} className="tab-item">
+    {views.map((v) => <ViewLink key={v.value} view={v.value} path={v.path} className="tab-item">
       {viewIcons[v.value]()}<span>{v.short}</span><NavBadge view={v.value} />
-    </NavLink>)}
+    </ViewLink>)}
   </nav>;
 }
 
@@ -141,9 +152,19 @@ function PageHeader({ title, lead }: { title: string; lead: string }) {
 
 const titles: Record<string, string> = { '/': 'タスク', '/candidates': 'タスク候補', '/auto': '自動で処理したもの', '/settings': '設定' };
 
+// titleAt is the default title of a screen. A task's detail screen replaces
+// it with the task's content once the task is read.
 function titleAt(pathname: string): string | undefined {
+  if (pathname.startsWith('/tasks/')) return 'タスクの詳細';
   const page = settingsPages.find((p) => p.value === settingsPageAt(pathname));
   return page ? `${page.label}の設定` : titles[pathname];
+}
+
+// TaskDetailRoute creates the detail screen again for each id, so that no
+// state is carried over from one task to another.
+function TaskDetailRoute() {
+  const { id = '' } = useParams();
+  return <TaskDetail key={id} id={id} />;
 }
 
 function Workspace({ email, error }: { email: string; error: string | null }) {
@@ -196,6 +217,7 @@ function Workspace({ email, error }: { email: string; error: string | null }) {
             <PageHeader title="自動で処理したもの" lead="連携先の状態を見て、Astovia が自動で片付けたタスクです。間違っていたら未完了に戻してください。戻したものは、以後自動では処理しません。" />
             <AutoItemList />
           </>} />
+          <Route path="tasks/:id" element={<TaskDetailRoute />} />
           <Route path="settings/*" element={<Settings email={email} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

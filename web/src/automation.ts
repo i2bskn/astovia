@@ -13,6 +13,7 @@ const reasonLabels: Readonly<Record<string, string>> = {
   'slack.reply_resolved': '返信で対応済み',
   'candidate.expired': '候補のまま期間が過ぎた',
   'event.passed': '予定の時刻を過ぎた',
+  'children.done': '子タスクがすべて完了した',
 };
 
 // autoOutcome is how an automatically processed item ended: 完了 for done

@@ -7,6 +7,7 @@ import type { ActionItem, ActionItemStatus } from './actionItems';
 import { candidates } from './candidates';
 import { dueLabel } from './format';
 import { CheckIcon, ChevronRightIcon, PlusIcon, SparkleIcon } from './icons';
+import { splitUrgent, urgentTone } from './nesting';
 import Phrased from './Phrased';
 import TaskRow, { toastMessage } from './TaskRow';
 import { useNow } from './useNow';
@@ -37,12 +38,11 @@ function Skeleton() {
   </ul>;
 }
 
-// Items due today or earlier come first, so that what is about to be
-// forgotten is at the top; the rest keeps the server's order.
-function urgent(item: ActionItem, now: Date): boolean {
-  if (item.status !== 'open' || !item.due_at) return false;
-  const tone = dueLabel(item.due_at, now)?.tone;
-  return tone === 'past' || tone === 'today' || tone === 'soon';
+// A date due tomorrow or earlier is urgent. Items with an urgent date of
+// their own or of a subtask come first (see splitUrgent), so that what is
+// about to be forgotten is at the top; the rest keeps the server's order.
+function urgentDate(value: string, now: Date): boolean {
+  return urgentTone(dueLabel(value, now)?.tone);
 }
 
 export default function ActionItemList() {
@@ -81,7 +81,7 @@ export default function ActionItemList() {
     setError(null);
     if (!cursor) setConflict(false);
     try {
-      const page = await client.listActionItems({ status: current === 'all' ? undefined : current, cursor });
+      const page = await client.listActionItems({ status: current === 'all' ? undefined : current, view: 'top', cursor });
       if (expected !== sequence.current) return;
       setItems((previous) => cursor ? [...previous, ...page.items] : page.items);
       setNextCursor(page.next_cursor);
@@ -166,9 +166,9 @@ export default function ActionItemList() {
   // takes the newest few; the server lists them newest first.
   const candidateCount = filter === 'open' ? candidateState.items.length : 0;
   const preview = candidateState.items.slice(0, previewLimit);
-  // Past dates first, oldest first, then the nearest upcoming ones.
-  const soon = filter === 'open' ? items.filter((i) => urgent(i, now)).sort((a, b) => Date.parse(a.due_at ?? '') - Date.parse(b.due_at ?? '')) : [];
-  const rest = filter === 'open' ? items.filter((i) => !urgent(i, now)) : items;
+  // Subtasks are on their parent's detail screen. Past dates first, oldest
+  // first, then the nearest upcoming ones.
+  const { soon, rest } = filter === 'open' ? splitUrgent(items, (value) => urgentDate(value, now)) : splitUrgent(items, () => false);
   const row = (item: ActionItem, index: number) => <TaskRow key={item.id} item={item} index={index} now={now} busy={busyIDs.has(item.id)} onChange={(i, s) => { void changeStatus(i, s); }} />;
 
   return <section className="tasks" aria-labelledby={headingID}>
@@ -208,17 +208,17 @@ export default function ActionItemList() {
       </button>
       {previewOpen ? <div id={previewID} className="candidate-preview">
         <p className="group-hint">AI が自分宛てか判断しきれなかったものです。タスクにするか、不要かを選んでください。</p>
-        <ul className="task-list">{preview.map(row)}</ul>
+        <ul className="task-list">{preview.map((item, i) => row(item, i))}</ul>
         <Link className="candidate-all" to="/candidates">すべて見る（{countLabel(candidateCount, candidateState.more)}件）</Link>
       </div> : null}
     </div> : null}
     {soon.length > 0 ? <div className="task-group">
       <h3 className="group-label urgent">期限切れ・まもなく期限<span className="count">{soon.length}</span></h3>
-      <ul className="task-list">{soon.map(row)}</ul>
+      <ul className="task-list">{soon.map((item, i) => row(item, i))}</ul>
     </div> : null}
     {rest.length > 0 ? <div className="task-group">
       {soon.length > 0 ? <h3 className="group-label">期限なし・先の予定<span className="count">{rest.length}</span></h3> : null}
-      <ul className="task-list">{rest.map((item, i) => row(item, i + soon.length))}</ul>
+      <ul className="task-list">{rest.map((item, i) => row(item, soon.length + i))}</ul>
     </div> : null}
 
     {!loading && !error && items.length === 0 ? <div className="empty">

@@ -32,6 +32,8 @@ const (
 	maxTokens      = 4096
 	// resultLimit is the longest task or summary kept, in characters.
 	resultLimit = 200
+	// topicLimit is the longest topic kept, in characters.
+	topicLimit = 40
 )
 
 // Models are the models a user can choose, the default first. The web UI
@@ -177,12 +179,50 @@ const eventLayout = "2006-01-02T15:04"
 
 // MentionResult is the AI's judgment of a mention. Decision is one of the
 // Decision constants; Task is empty when it is DecisionNone. Event is set
-// when the posts fixed a meeting that the user attends.
+// when the posts fixed a meeting that the user attends. Topic names the
+// matter the task belongs to, and SameAs is the ID of the related task of
+// the same matter (one of the IDs given in the input), both empty when there
+// is none or the decision is DecisionNone.
 type MentionResult struct {
 	Decision string
 	Task     string
 	Summary  string
 	Event    *Event
+	Topic    string
+	SameAs   string
+}
+
+// RelatedTask is a task the user already has in the same conversation,
+// shown to the AI so that it can tell whether a new task belongs to the
+// same matter. ID is a short symbol ("t1") chosen by the caller, never a
+// database ID. A group (several tasks of one matter) carries the content of
+// its subtasks; Closed marks a group whose subtasks were all done.
+type RelatedTask struct {
+	ID       string
+	Task     string
+	Subtasks []string
+	Closed   bool
+}
+
+type relatedTaskJSON struct {
+	ID       string   `json:"id"`
+	Task     string   `json:"task"`
+	Subtasks []string `json:"subtasks,omitempty"`
+	Closed   bool     `json:"closed,omitempty"`
+}
+
+// relatedTasksJSON converts the related tasks, cutting each text at
+// resultLimit characters. It never returns nil.
+func relatedTasksJSON(tasks []RelatedTask) []relatedTaskJSON {
+	out := make([]relatedTaskJSON, 0, len(tasks))
+	for _, t := range tasks {
+		v := relatedTaskJSON{ID: t.ID, Task: limit(t.Task, resultLimit), Closed: t.Closed}
+		for _, sub := range t.Subtasks {
+			v.Subtasks = append(v.Subtasks, limit(sub, resultLimit))
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // Event is a meeting found by a judgment. End is zero when no end was given.
@@ -202,8 +242,10 @@ var outputSchema = map[string]any{
 		"event_title": map[string]any{"type": "string"},
 		"event_start": map[string]any{"type": "string", "description": "YYYY-MM-DDTHH:MM in the local time of the input timezone, or an empty string"},
 		"event_end":   map[string]any{"type": "string", "description": "YYYY-MM-DDTHH:MM in the local time of the input timezone, or an empty string"},
+		"topic":       map[string]any{"type": "string", "description": "A short name of the matter the task belongs to, or an empty string"},
+		"same_as":     map[string]any{"type": "string", "description": "The id of the related task of the same matter, or an empty string"},
 	},
-	"required":             []string{"decision", "task", "summary", "event_title", "event_start", "event_end"},
+	"required":             []string{"decision", "task", "summary", "event_title", "event_start", "event_end", "topic", "same_as"},
 	"additionalProperties": false,
 }
 
@@ -217,7 +259,7 @@ func (c *Client) JudgeMention(ctx context.Context, key, model string, in Mention
 	if err != nil {
 		return MentionResult{}, err
 	}
-	return parseResult(text, location(in.Location))
+	return parseResult(text, location(in.Location), in.RelatedTasks)
 }
 
 // structured sends one judgment with a fixed system prompt and a JSON
@@ -255,8 +297,9 @@ func (c *Client) structured(ctx context.Context, key, model, system, user string
 }
 
 // parseResult decodes and checks the structured output. Event times are
-// read in loc. An event that cannot be used is dropped and the task kept.
-func parseResult(text string, loc *time.Location) (MentionResult, error) {
+// read in loc. An event that cannot be used is dropped and the task kept;
+// a same_as that is not the ID of one of related is dropped as well.
+func parseResult(text string, loc *time.Location, related []RelatedTask) (MentionResult, error) {
 	var out struct {
 		Decision   *string `json:"decision"`
 		Task       *string `json:"task"`
@@ -264,16 +307,24 @@ func parseResult(text string, loc *time.Location) (MentionResult, error) {
 		EventTitle *string `json:"event_title"`
 		EventStart *string `json:"event_start"`
 		EventEnd   *string `json:"event_end"`
+		Topic      *string `json:"topic"`
+		SameAs     *string `json:"same_as"`
 	}
 	d := json.NewDecoder(strings.NewReader(text))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&out); err != nil || out.Decision == nil || out.Task == nil || out.Summary == nil || out.EventTitle == nil || out.EventStart == nil || out.EventEnd == nil {
+	if err := d.Decode(&out); err != nil || out.Decision == nil || out.Task == nil || out.Summary == nil || out.EventTitle == nil || out.EventStart == nil || out.EventEnd == nil || out.Topic == nil || out.SameAs == nil {
 		return MentionResult{}, fmt.Errorf("%w (invalid output)", ErrUnusable)
 	}
-	r := MentionResult{Decision: *out.Decision, Task: truncate(clean(*out.Task), resultLimit), Summary: truncate(clean(*out.Summary), resultLimit)}
+	r := MentionResult{Decision: *out.Decision, Task: truncate(clean(*out.Task), resultLimit), Summary: truncate(clean(*out.Summary), resultLimit), Topic: truncate(clean(*out.Topic), topicLimit)}
+	for _, t := range related {
+		if t.ID != "" && t.ID == strings.TrimSpace(*out.SameAs) {
+			r.SameAs = t.ID
+			break
+		}
+	}
 	switch r.Decision {
 	case DecisionNone:
-		r.Task = ""
+		r.Task, r.Topic, r.SameAs = "", "", ""
 		return r, nil
 	case DecisionTask, DecisionCandidate:
 		if r.Task == "" {

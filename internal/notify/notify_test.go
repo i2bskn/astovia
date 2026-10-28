@@ -108,7 +108,7 @@ func TestEngineStale(t *testing.T) {
 			got[n.DedupeKey] = n
 		}
 		old, older := got["stale:old:1"], got["stale:older:2"]
-		if len(got) != 2 || old.Title != "未対応が3日続いています" || old.Body != "content old" || old.ActionItemID.String != "old" || old.URL != "/" || older.Title != "未対応が7日続いています" || old.Kind != store.NotificationStale {
+		if len(got) != 2 || old.Title != "未対応が3日続いています" || old.Body != "content old" || old.ActionItemID.String != "old" || old.URL != "/tasks/old" || older.URL != "/tasks/"+older.ActionItemID.String || older.Title != "未対応が7日続いています" || old.Kind != store.NotificationStale {
 			t.Fatalf("stale notifications: %+v", got)
 		}
 		// With a shorter period, the same items reach a new period.

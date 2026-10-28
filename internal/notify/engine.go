@@ -90,7 +90,7 @@ func (e *Engine) stale(ctx context.Context, userID string, settings store.Notifi
 	var list []store.Notification
 	for _, item := range items {
 		age := now - item.CreatedAt
-		n, err := newNotification(store.NotificationStale, fmt.Sprintf("stale:%s:%d", item.ID, age/period), fmt.Sprintf("未対応が%d日続いています", age/86400), item.Content, "/", now)
+		n, err := newNotification(store.NotificationStale, fmt.Sprintf("stale:%s:%d", item.ID, age/period), fmt.Sprintf("未対応が%d日続いています", age/86400), item.Content, "/tasks/"+item.ID, now)
 		if err != nil {
 			return nil, err
 		}

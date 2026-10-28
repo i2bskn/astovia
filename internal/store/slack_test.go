@@ -240,12 +240,18 @@ func testSlackKeyQueries(t *testing.T, driver string) {
 	if keys, err = s.SlackJudgedKeys(ctx, "bob-id", "slack:T1:d:C1:-:", 0, 500); err != nil || len(keys) != 0 {
 		t.Fatalf("other user: %v %v", keys, err)
 	}
-	tasks, err := s.SlackOpenTasks(ctx, "alice-id", "slack:T1:d:C1:-:", 4)
-	if err != nil || !reflect.DeepEqual(tasks, []string{"Slack: untracked", "Slack: c", "Slack: b", "Slack: a"}) {
-		t.Fatalf("open tasks: %v %v", tasks, err)
+	// The open items of a conversation, tracked or not (events are not
+	// tracked); candidates and done items are left out.
+	open, err := s.ConversationItems(ctx, "alice-id", store.SourceSlack, []string{"slack:T1:d:C1:-:"}, nil, 0, 0, 4)
+	var ids []string
+	for _, item := range open {
+		ids = append(ids, item.ID)
 	}
-	if tasks, err = s.SlackOpenTasks(ctx, "alice-id", "slack:T9:", 3); err != nil || tasks == nil || len(tasks) != 0 {
-		t.Fatalf("no open tasks: %#v %v", tasks, err)
+	if err != nil || !reflect.DeepEqual(ids, []string{"untracked", "c", "b", "a"}) {
+		t.Fatalf("open items: %v %v", ids, err)
+	}
+	if open, err = s.ConversationItems(ctx, "alice-id", store.SourceSlack, []string{"slack:T9:"}, nil, 0, 0, 3); err != nil || len(open) != 0 {
+		t.Fatalf("no open items: %#v %v", open, err)
 	}
 	// Tracked candidates are followed like open items.
 	tracked, err := s.TrackedActionItems(ctx, "alice-id", store.SourceSlack, 100)

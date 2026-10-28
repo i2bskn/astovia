@@ -84,6 +84,10 @@ sql:
             go_type:
               import: database/sql
               type: NullInt64
+          - column: action_items.parent_id
+            go_type:
+              import: database/sql
+              type: NullString
           - column: github_connections.last_error
             go_type:
               import: database/sql

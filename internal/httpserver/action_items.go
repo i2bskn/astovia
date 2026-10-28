@@ -60,6 +60,28 @@ type actionItemResponse struct {
 	// item, and is null for other kinds.
 	Kind  string           `json:"kind"`
 	Event *actionItemEvent `json:"event"`
+	// ParentID is the item this one is a subtask of, or null; Parent shows
+	// that item. Children counts the subtasks, or is null without any.
+	ParentID *string             `json:"parent_id"`
+	Parent   *actionItemParent   `json:"parent"`
+	Children *actionItemChildren `json:"children"`
+}
+
+// actionItemParent is the parent of a subtask.
+type actionItemParent struct {
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	Status  string `json:"status"`
+}
+
+// actionItemChildren counts the subtasks of a parent. Total leaves out the
+// dismissed ones; Remaining counts the open and candidate ones. NextDueAt is
+// the earliest due date of the open and candidate ones, or null.
+type actionItemChildren struct {
+	Total     int64   `json:"total"`
+	Done      int64   `json:"done"`
+	Remaining int64   `json:"remaining"`
+	NextDueAt *string `json:"next_due_at"`
 }
 
 // actionItemEvent is the meeting of an event item. EndAt is null when no end
@@ -124,6 +146,9 @@ func toActionItemResponse(item store.ActionItem) (actionItemResponse, error) {
 		}
 		out.Event = event
 	}
+	if item.ParentID.Valid {
+		out.ParentID = &item.ParentID.String
+	}
 	return out, nil
 }
 
@@ -135,6 +160,8 @@ type actionItemFields struct {
 	Note    json.RawMessage `json:"note"`
 	DueAt   json.RawMessage `json:"due_at"`
 	Refs    json.RawMessage `json:"refs"`
+	// ParentID is the parent's ID, or null for no parent.
+	ParentID json.RawMessage `json:"parent_id"`
 }
 
 type actionItemPatch struct {
@@ -230,6 +257,17 @@ func (in actionItemFields) parse() (func(*store.ActionItem), int, string) {
 		}
 		sets = append(sets, func(item *store.ActionItem) { item.Refs = refs })
 	}
+	if in.ParentID != nil {
+		var parent sql.NullString
+		if !isNull(in.ParentID) {
+			v, ok := decodeString(in.ParentID)
+			if !ok || !itemIDPattern.MatchString(v) {
+				return nil, 0, parentMessage
+			}
+			parent = sql.NullString{String: v, Valid: true}
+		}
+		sets = append(sets, func(item *store.ActionItem) { item.ParentID = parent })
+	}
 	return func(item *store.ActionItem) {
 		for _, set := range sets {
 			set(item)
@@ -305,6 +343,8 @@ func storeError(op, userID string, err error) *opError {
 		return errActionItemNotFound
 	case errors.Is(err, store.ErrVersionConflict):
 		return &opError{status: 409, code: "conflict", message: "The action item was updated by another request."}
+	case errors.Is(err, store.ErrInvalidParent):
+		return invalidRequest(parentMessage)
 	default:
 		log.Printf("action items: %s user=%s: %v", op, userID, err)
 		return &opError{status: 503, code: "unavailable", message: "The service is temporarily unavailable. Try again."}
@@ -312,10 +352,50 @@ func storeError(op, userID string, err error) *opError {
 }
 
 // itemResponse converts a stored item, reporting a failure as storeError does.
-func itemResponse(op, userID string, item store.ActionItem) (actionItemResponse, *opError) {
-	out, err := toActionItemResponse(item)
+func (s *Server) itemResponse(ctx context.Context, op, userID string, item store.ActionItem) (actionItemResponse, *opError) {
+	out, e := s.itemResponses(ctx, op, userID, []store.ActionItem{item})
+	if e != nil {
+		return actionItemResponse{}, e
+	}
+	return out[0], nil
+}
+
+// itemResponses converts stored items with their parents and subtask
+// counts, read with one query each for all the items.
+func (s *Server) itemResponses(ctx context.Context, op, userID string, items []store.ActionItem) ([]actionItemResponse, *opError) {
+	ids := make([]string, 0, len(items))
+	var parentIDs []string
+	for _, item := range items {
+		ids = append(ids, item.ID)
+		if item.ParentID.Valid {
+			parentIDs = append(parentIDs, item.ParentID.String)
+		}
+	}
+	counts, err := s.auth.Store.ChildCounts(ctx, userID, ids)
 	if err != nil {
-		return actionItemResponse{}, storeError(op, userID, err)
+		return nil, storeError(op, userID, err)
+	}
+	parents, err := s.auth.Store.ItemSummaries(ctx, userID, parentIDs)
+	if err != nil {
+		return nil, storeError(op, userID, err)
+	}
+	out := make([]actionItemResponse, 0, len(items))
+	for _, item := range items {
+		v, err := toActionItemResponse(item)
+		if err != nil {
+			return nil, storeError(op, userID, err)
+		}
+		if p, ok := parents[item.ParentID.String]; ok && item.ParentID.Valid {
+			v.Parent = &actionItemParent{ID: p.ID, Content: p.Content, Status: p.Status}
+		}
+		if c, ok := counts[item.ID]; ok && c.Children > 0 {
+			v.Children = &actionItemChildren{Total: c.Total, Done: c.Done, Remaining: c.Remaining}
+			if c.NextDueAt.Valid {
+				next := formatTime(c.NextDueAt.Int64)
+				v.Children.NextDueAt = &next
+			}
+		}
+		out = append(out, v)
 	}
 	return out, nil
 }
@@ -359,6 +439,7 @@ func decodeAutoCursor(v string) (*store.AutoActionItemCursor, bool) {
 }
 
 const (
+	parentMessage = "parent_id must be the id of your item that has no parent, and an item with subtasks cannot have a parent."
 	statusMessage = "status must be open, candidate, done or dismissed."
 	limitMessage  = "limit must be an integer from 1 to 100."
 	cursorMessage = "cursor is invalid."
@@ -368,6 +449,18 @@ const (
 // and an empty cursor starts from the newest item; callers reject empty values
 // given explicitly before calling.
 func (s *Server) listActionItems(ctx context.Context, userID, status string, limit int, cursor string) (actionItemListResponse, *opError) {
+	return s.listCreatedItems(ctx, userID, status, limit, cursor, s.auth.Store.ListActionItems)
+}
+
+// listTopActionItems is listActionItems for view=top: the items without a
+// parent, and the subtasks whose parent has another status than the one
+// listed. The cursors are the same as those of listActionItems.
+func (s *Server) listTopActionItems(ctx context.Context, userID, status string, limit int, cursor string) (actionItemListResponse, *opError) {
+	return s.listCreatedItems(ctx, userID, status, limit, cursor, s.auth.Store.ListTopActionItems)
+}
+
+// listCreatedItems lists the items read by fetch, newest created first.
+func (s *Server) listCreatedItems(ctx context.Context, userID, status string, limit int, cursor string, fetch func(context.Context, string, string, *store.ActionItemCursor, int) ([]store.ActionItem, error)) (actionItemListResponse, *opError) {
 	if status != "" && !validStatus(status) {
 		return actionItemListResponse{}, invalidRequest(statusMessage)
 	}
@@ -381,7 +474,7 @@ func (s *Server) listActionItems(ctx context.Context, userID, status string, lim
 			return actionItemListResponse{}, invalidRequest(cursorMessage)
 		}
 	}
-	items, err := s.auth.Store.ListActionItems(ctx, userID, status, after, limit+1)
+	items, err := fetch(ctx, userID, status, after, limit+1)
 	if err != nil {
 		return actionItemListResponse{}, storeError("list", userID, err)
 	}
@@ -391,13 +484,11 @@ func (s *Server) listActionItems(ctx context.Context, userID, status string, lim
 		next := encodeCursor(items[limit-1])
 		out.NextCursor = &next
 	}
-	for _, item := range items {
-		v, e := itemResponse("list", userID, item)
-		if e != nil {
-			return actionItemListResponse{}, e
-		}
-		out.Items = append(out.Items, v)
+	list, e := s.itemResponses(ctx, "list", userID, items)
+	if e != nil {
+		return actionItemListResponse{}, e
 	}
+	out.Items = append(out.Items, list...)
 	return out, nil
 }
 
@@ -427,13 +518,33 @@ func (s *Server) listAutoActionItems(ctx context.Context, userID, status string,
 		next := encodeAutoCursor(items[limit-1])
 		out.NextCursor = &next
 	}
-	for _, item := range items {
-		v, e := itemResponse("list", userID, item)
-		if e != nil {
-			return actionItemListResponse{}, e
-		}
-		out.Items = append(out.Items, v)
+	list, e := s.itemResponses(ctx, "list", userID, items)
+	if e != nil {
+		return actionItemListResponse{}, e
 	}
+	out.Items = append(out.Items, list...)
+	return out, nil
+}
+
+// childListLimit is the most subtasks listed for one parent.
+const childListLimit = 100
+
+// listChildActionItems lists the subtasks of the user's parent, oldest
+// first, without paging. Another user's or a missing parent has none.
+func (s *Server) listChildActionItems(ctx context.Context, userID, parentID string) (actionItemListResponse, *opError) {
+	if !itemIDPattern.MatchString(parentID) {
+		return actionItemListResponse{}, invalidRequest(parentMessage)
+	}
+	items, err := s.auth.Store.ChildActionItems(ctx, userID, parentID, childListLimit)
+	if err != nil {
+		return actionItemListResponse{}, storeError("list", userID, err)
+	}
+	out := actionItemListResponse{Items: []actionItemResponse{}}
+	list, e := s.itemResponses(ctx, "list", userID, items)
+	if e != nil {
+		return actionItemListResponse{}, e
+	}
+	out.Items = append(out.Items, list...)
 	return out, nil
 }
 
@@ -456,7 +567,7 @@ func (s *Server) createActionItem(ctx context.Context, userID string, body actio
 	if err = s.auth.Store.CreateActionItem(ctx, item); err != nil {
 		return actionItemResponse{}, storeError("create", userID, err)
 	}
-	return itemResponse("create", userID, item)
+	return s.itemResponse(ctx, "create", userID, item)
 }
 
 // getActionItem returns the user's item. A malformed ID is reported as not
@@ -469,7 +580,7 @@ func (s *Server) getActionItem(ctx context.Context, userID, id string) (actionIt
 	if err != nil {
 		return actionItemResponse{}, storeError("get", userID, err)
 	}
-	return itemResponse("get", userID, item)
+	return s.itemResponse(ctx, "get", userID, item)
 }
 
 // updateActionItem validates body and applies it to the user's item.
@@ -488,7 +599,7 @@ func (s *Server) updateActionItem(ctx context.Context, userID, id string, body a
 		return actionItemResponse{}, invalidRequest(msg)
 	}
 	if n == 0 {
-		return actionItemResponse{}, invalidRequest("At least one of content, status, note, due_at or refs is required.")
+		return actionItemResponse{}, invalidRequest("At least one of content, status, note, due_at, refs or parent_id is required.")
 	}
 	now := s.auth.Now().Unix()
 	item, err := s.auth.Store.UpdateActionItem(ctx, userID, id, func(item *store.ActionItem) error {
@@ -518,7 +629,7 @@ func (s *Server) updateActionItem(ctx context.Context, userID, id string, body a
 	if err != nil {
 		return actionItemResponse{}, storeError("update", userID, err)
 	}
-	return itemResponse("update", userID, item)
+	return s.itemResponse(ctx, "update", userID, item)
 }
 
 func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
@@ -533,10 +644,23 @@ func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for k, v := range q {
-		if (k != "status" && k != "limit" && k != "cursor" && k != "auto") || len(v) != 1 {
-			fail(w, 400, "invalid_request", "Only status, limit, cursor and auto are allowed, each at most once.")
+		if (k != "status" && k != "limit" && k != "cursor" && k != "auto" && k != "parent_id" && k != "view") || len(v) != 1 {
+			fail(w, 400, "invalid_request", "Only status, limit, cursor, auto, parent_id and view are allowed, each at most once.")
 			return
 		}
+	}
+	if v, ok := q["parent_id"]; ok {
+		if len(q) != 1 {
+			fail(w, 400, "invalid_request", "parent_id cannot be combined with status, limit, cursor, auto or view.")
+			return
+		}
+		out, e := s.listChildActionItems(r.Context(), u.ID, v[0])
+		if e != nil {
+			failOp(w, e)
+			return
+		}
+		writeJSON(w, 200, out)
+		return
 	}
 	auto := false
 	if v, ok := q["auto"]; ok {
@@ -545,6 +669,18 @@ func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		auto = true
+	}
+	top := false
+	if v, ok := q["view"]; ok {
+		if v[0] != "top" {
+			fail(w, 400, "invalid_request", "view must be top.")
+			return
+		}
+		if auto {
+			fail(w, 400, "invalid_request", "view cannot be combined with auto or parent_id.")
+			return
+		}
+		top = true
 	}
 	status := ""
 	if v, ok := q["status"]; ok {
@@ -572,8 +708,11 @@ func (s *Server) handleListActionItems(w http.ResponseWriter, r *http.Request) {
 		cursor = v[0]
 	}
 	list := s.listActionItems
-	if auto {
+	switch {
+	case auto:
 		list = s.listAutoActionItems
+	case top:
+		list = s.listTopActionItems
 	}
 	out, e := list(r.Context(), u.ID, status, limit, cursor)
 	if e != nil {

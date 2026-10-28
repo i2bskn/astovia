@@ -387,7 +387,7 @@ func testMCPTools(t *testing.T, driver string) {
 		{"action_items_get", map[string]any{"id": "missing"}, "not_found: Action item not found."},
 		{"action_items_get", map[string]any{"id": item.ID, "extra": 1}, "invalid_request: Invalid arguments."},
 		{"action_items_update", map[string]any{"status": "done"}, "invalid_request: id is required."},
-		{"action_items_update", map[string]any{"id": item.ID}, "invalid_request: At least one of content, status, note, due_at or refs is required."},
+		{"action_items_update", map[string]any{"id": item.ID}, "invalid_request: At least one of content, status, note, due_at, refs or parent_id is required."},
 		{"action_items_update", map[string]any{"id": item.ID, "version": 0, "status": "open"}, "invalid_request: version must be a positive integer."},
 		{"action_items_update", map[string]any{"id": item.ID, "content": ""}, "invalid_request: content must be 1-500 characters."},
 		{"action_items_update", map[string]any{"id": item.ID, "unknown": 1}, "invalid_request: Invalid arguments."},

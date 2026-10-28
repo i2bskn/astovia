@@ -126,7 +126,7 @@ func TestEnvironmentIsIgnored(t *testing.T) {
 			if r.method != "GET" || r.path != "/v1/models/claude-haiku-5-5" {
 				t.Fatalf("request: %s %s", r.method, r.path)
 			}
-			f.set(message("end_turn", `{"decision":"none","task":"","summary":"x","event_title":"","event_start":"","event_end":""}`))
+			f.set(message("end_turn", `{"decision":"none","task":"","summary":"x","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`))
 			if _, err := c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); err != nil {
 				t.Fatal(err)
 			}
@@ -194,7 +194,7 @@ func TestErrorClasses(t *testing.T) {
 }
 
 func TestJudgeMention(t *testing.T) {
-	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"  設計方針について回答する​ ","summary":"bob さんが質問","event_title":"","event_start":"","event_end":""}`))
+	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"  設計方針について回答する​ ","summary":"bob さんが質問","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`))
 	res, err := c.JudgeMention(context.Background(), testKey, "claude-sonnet-5-5", testInput())
 	if err != nil || res.Decision != DecisionTask || res.Event != nil || res.Task != "設計方針について回答する" || res.Summary != "bob さんが質問" {
 		t.Fatalf("result: %+v %v", res, err)
@@ -235,13 +235,13 @@ func TestJudgeMention(t *testing.T) {
 		t.Fatalf("messages: %s", r.body)
 	}
 	schema := body.OutputConfig.Format.Schema
-	if body.OutputConfig.Effort != "low" || body.OutputConfig.Format.Type != "json_schema" || schema["additionalProperties"] != false || len(schema["required"].([]any)) != 6 {
+	if body.OutputConfig.Effort != "low" || body.OutputConfig.Format.Type != "json_schema" || schema["additionalProperties"] != false || len(schema["required"].([]any)) != 8 {
 		t.Fatalf("output_config: %s", r.body)
 	}
 
 	long := strings.Repeat("あ", 300)
-	f.set(message("end_turn", `{"decision":"none","task":"ignored","summary":"`+long+`","event_title":"MTG","event_start":"2026-10-29T12:30","event_end":""}`))
-	if res, err = c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); err != nil || res.Decision != DecisionNone || res.Event != nil || res.Task != "" || res.Summary != strings.Repeat("あ", 200) {
+	f.set(message("end_turn", `{"decision":"none","task":"ignored","summary":"`+long+`","event_title":"MTG","event_start":"2026-10-29T12:30","event_end":"","topic":"話題","same_as":"t1"}`))
+	if res, err = c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); err != nil || res.Decision != DecisionNone || res.Event != nil || res.Task != "" || res.Summary != strings.Repeat("あ", 200) || res.Topic != "" || res.SameAs != "" {
 		t.Fatalf("no action: %+v %v", res, err)
 	}
 
@@ -250,6 +250,8 @@ func TestJudgeMention(t *testing.T) {
 		"max_tokens":       message("max_tokens", `{"decision":"task","task":"x","summary":"y"`+noEvent+`}`),
 		"invalid JSON":     message("end_turn", `{"decision":"task",`),
 		"missing field":    message("end_turn", `{"decision":"task","task":"x","summary":"y"}`),
+		"missing topic":    message("end_turn", `{"decision":"task","task":"x","summary":"y","event_title":"","event_start":"","event_end":"","same_as":""}`),
+		"missing same_as":  message("end_turn", `{"decision":"task","task":"x","summary":"y","event_title":"","event_start":"","event_end":"","topic":""}`),
 		"extra field":      message("end_turn", `{"decision":"task","task":"x","summary":"y"`+noEvent+`,"due":"z"}`),
 		"old field":        message("end_turn", `{"needs_action":true,"task":"x","summary":"y"`+noEvent+`}`),
 		"unknown decision": message("end_turn", `{"decision":"maybe","task":"x","summary":"y"`+noEvent+`}`),
@@ -263,8 +265,9 @@ func TestJudgeMention(t *testing.T) {
 	}
 }
 
-// noEvent is the event fields of an answer without an event.
-const noEvent = `,"event_title":"","event_start":"","event_end":""`
+// noEvent is the event, topic and same_as fields of an answer without an
+// event or related task.
+const noEvent = `,"event_title":"","event_start":"","event_end":"","topic":"","same_as":""`
 
 func TestOutputSchema(t *testing.T) {
 	data, err := json.Marshal(outputSchema)
@@ -279,7 +282,7 @@ func TestOutputSchema(t *testing.T) {
 	if err = json.Unmarshal(data, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(schema.Required, ",") != "decision,task,summary,event_title,event_start,event_end" || schema.AdditionalProperties || len(schema.Properties) != 6 {
+	if strings.Join(schema.Required, ",") != "decision,task,summary,event_title,event_start,event_end,topic,same_as" || schema.AdditionalProperties || len(schema.Properties) != 8 {
 		t.Fatalf("schema: %s", data)
 	}
 	if enum, _ := json.Marshal(schema.Properties["decision"]["enum"]); string(enum) != `["task","candidate","none"]` {
@@ -293,7 +296,7 @@ func TestParseResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	answer := func(decision, task, title, start, end string) string {
-		v, _ := json.Marshal(map[string]string{"decision": decision, "task": task, "summary": "s", "event_title": title, "event_start": start, "event_end": end})
+		v, _ := json.Marshal(map[string]string{"decision": decision, "task": task, "summary": "s", "event_title": title, "event_start": start, "event_end": end, "topic": "", "same_as": ""})
 		return string(v)
 	}
 	start := time.Date(2026, 10, 29, 12, 30, 0, 0, tokyo)
@@ -315,7 +318,7 @@ func TestParseResult(t *testing.T) {
 		"empty title":      {answer("task", "登録する", " ", "2026-10-29T12:30", ""), DecisionTask, "登録する", nil},
 		"none with event":  {answer("none", "", "MTG", "2026-10-29T12:30", ""), DecisionNone, "", nil},
 	} {
-		r, err := parseResult(tc.text, tokyo)
+		r, err := parseResult(tc.text, tokyo, nil)
 		if err != nil || r.Decision != tc.decision || r.Task != tc.task || r.Summary != "s" {
 			t.Fatalf("%s: %+v %v", name, r, err)
 		}
@@ -324,9 +327,38 @@ func TestParseResult(t *testing.T) {
 		}
 	}
 	// The start is read in the given time zone.
-	r, err := parseResult(answer("task", "登録する", "MTG", "2026-10-29T12:30", ""), time.UTC)
+	r, err := parseResult(answer("task", "登録する", "MTG", "2026-10-29T12:30", ""), time.UTC, nil)
 	if err != nil || r.Event == nil || r.Event.Start.Unix() != start.Add(9*time.Hour).Unix() {
 		t.Fatalf("UTC: %+v %v", r, err)
+	}
+}
+
+func TestParseResultTopic(t *testing.T) {
+	related := []RelatedTask{{ID: "t1", Task: "調査する"}, {ID: "t2", Task: "まとめ", Subtasks: []string{"報告する"}}}
+	answer := func(decision, topic, sameAs string) string {
+		v, _ := json.Marshal(map[string]string{"decision": decision, "task": "x", "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs})
+		return string(v)
+	}
+	long := strings.Repeat("話", 50)
+	for name, tc := range map[string]struct {
+		text, topic, sameAs string
+	}{
+		"empty":           {answer("task", "", ""), "", ""},
+		"same":            {answer("task", " Mikata 決済障害の対応​ ", "t2"), "Mikata 決済障害の対応", "t2"},
+		"candidate":       {answer("candidate", "障害", "t1"), "障害", "t1"},
+		"too long":        {answer("task", long, " t1 "), strings.Repeat("話", topicLimit), "t1"},
+		"unknown symbol":  {answer("task", "障害", "t3"), "障害", ""},
+		"database id":     {answer("task", "障害", "item-1"), "障害", ""},
+		"none drops both": {answer("none", "障害", "t1"), "", ""},
+	} {
+		r, err := parseResult(tc.text, time.UTC, related)
+		if err != nil || r.Topic != tc.topic || r.SameAs != tc.sameAs {
+			t.Fatalf("%s: %+v %v", name, r, err)
+		}
+	}
+	// Without related tasks no symbol is known.
+	if r, err := parseResult(answer("task", "障害", "t1"), time.UTC, nil); err != nil || r.SameAs != "" {
+		t.Fatalf("no related: %+v %v", r, err)
 	}
 }
 
@@ -455,6 +487,22 @@ func TestUserMessage(t *testing.T) {
 	if !strings.Contains(msg, `{"timezone":"Asia/Tokyo","me":"octocat"`) {
 		t.Fatalf("timezone first: %s", msg)
 	}
+	if !strings.Contains(msg, `"related_tasks":[]`) {
+		t.Fatalf("no related tasks: %s", msg)
+	}
+	// Related tasks are sent with their symbols; long texts are cut.
+	in.RelatedTasks = []RelatedTask{{ID: "t1", Task: strings.Repeat("調", 201)}, {ID: "t2", Task: "障害対応", Subtasks: []string{"調査する", strings.Repeat("報", 201)}, Closed: true}}
+	if msg, err = UserMessage(in); err != nil {
+		t.Fatal(err)
+	}
+	if _, got = decodeMessage(t, msg); len(got.RelatedTasks) != 2 || got.RelatedTasks[0].ID != "t1" || got.RelatedTasks[0].Task != strings.Repeat("調", 200)+omitted || got.RelatedTasks[0].Subtasks != nil || got.RelatedTasks[0].Closed ||
+		!got.RelatedTasks[1].Closed || len(got.RelatedTasks[1].Subtasks) != 2 || got.RelatedTasks[1].Subtasks[1] != strings.Repeat("報", 200)+omitted {
+		t.Fatalf("related tasks: %+v", got.RelatedTasks)
+	}
+	if !strings.Contains(msg, `{"id":"t1","task":"`) || !strings.Contains(msg, `"subtasks":["調査する",`) || !strings.Contains(msg, `"closed":true`) {
+		t.Fatalf("related tasks JSON: %s", msg)
+	}
+	in.RelatedTasks = nil
 	if _, got = decodeMessage(t, msg); got.TimeZone != "Asia/Tokyo" || got.Posts[0].At != "2026-10-24T01:02:03+09:00" || got.Posts[0].Weekday != "Saturday" {
 		t.Fatalf("local time: %+v", got.Posts[0])
 	}

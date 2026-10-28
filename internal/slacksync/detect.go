@@ -38,14 +38,22 @@ const (
 	// messages; after that it moves on and they become confirmation tasks.
 	retryLimit = 6 * time.Hour
 
-	searchCount   = 100
-	searchPages   = 2
-	historyLimit  = 100
-	historyPages  = 2
-	groupDMLimit  = 20
-	groupDMList   = 200
-	judgedLimit   = 500
-	openTaskLimit = 3
+	searchCount  = 100
+	searchPages  = 2
+	historyLimit = 100
+	historyPages = 2
+	groupDMLimit = 20
+	groupDMList  = 200
+	judgedLimit  = 500
+	// relatedFetch is the number of items of a conversation read to make
+	// at most relatedLimit related tasks for the AI, each group with at
+	// most subtaskLimit subtasks. groupWindow is how long a group whose
+	// subtasks were all done still takes new subtasks, and how old the
+	// items of a direct message conversation outside threads may be.
+	relatedFetch = 30
+	relatedLimit = 10
+	subtaskLimit = 5
+	groupWindow  = 72 * time.Hour
 	// runLimit is the largest number of messages judged together.
 	runLimit     = 10
 	contentLimit = 500
@@ -78,6 +86,13 @@ type conversation struct {
 // unit is one judgment: a mention, or a run of messages from others in a
 // conversation. posts is the context sent to the AI in time order, targets
 // the timestamps judged and last the newest of them.
+//
+// thread is the thread of the conversation the unit belongs to, for the
+// related tasks and the group parent: the key's thread, or for a message
+// outside a thread in a channel the message itself (so that a mention in a
+// thread and one in its first message share a conversation), or noThread
+// for direct messages outside threads. related maps the symbols given to
+// the AI to the related tasks.
 type unit struct {
 	key         sourceKey
 	convType    string
@@ -86,7 +101,8 @@ type unit struct {
 	posts       []slack.Message
 	targets     map[string]bool
 	last        slack.Message
-	openPrefix  string
+	thread      string
+	related     map[string]store.RelatedTask
 }
 
 type ref struct {
@@ -461,8 +477,9 @@ func (r *run) mention(m slack.Message) error {
 	case m.Channel.IsMPIM:
 		u.convType = ai.SlackGroupDM
 	}
-	if thread != noThread {
-		u.openPrefix = conversationPrefix(r.conn.TeamID, kindMention, m.Channel.ID, thread)
+	u.thread = thread
+	if thread == noThread && u.convType == ai.SlackChannel {
+		u.thread = m.TS
 	}
 	if postponed {
 		_, err = r.postpone(u)
@@ -543,7 +560,7 @@ func (r *run) conversation(c *conversation) error {
 		}
 		i, j := indexTS(c.messages, run[0].TS), indexTS(c.messages, last.TS)
 		u := &unit{key: key, convType: c.kind, channelName: c.channel.Name, title: title, posts: c.messages[max(0, i-ai.PostsBefore):min(len(c.messages), j+1+ai.PostsAfter)],
-			targets: map[string]bool{}, last: last, openPrefix: prefix}
+			targets: map[string]bool{}, last: last, thread: c.thread}
 		for _, m := range run {
 			u.targets[m.TS] = true
 		}
@@ -644,7 +661,7 @@ func (r *run) slackInput(u *unit) (ai.SlackInput, error) {
 	if err != nil {
 		return ai.SlackInput{}, err
 	}
-	in := ai.SlackInput{Me: ai.SlackPerson{ID: r.conn.SlackUserID, Name: r.conn.SlackUserName}, Location: loc, Workspace: r.conn.TeamName, ConversationType: u.convType, ChannelName: u.channelName, OpenTasks: []string{}}
+	in := ai.SlackInput{Me: ai.SlackPerson{ID: r.conn.SlackUserID, Name: r.conn.SlackUserName}, Location: loc, Workspace: r.conn.TeamName, ConversationType: u.convType, ChannelName: u.channelName, RelatedTasks: []ai.RelatedTask{}}
 	for _, m := range u.posts {
 		p, err := r.post(m, u.targets[m.TS])
 		if err != nil {
@@ -652,14 +669,44 @@ func (r *run) slackInput(u *unit) (ai.SlackInput, error) {
 		}
 		in.Posts = append(in.Posts, p)
 	}
-	if u.openPrefix != "" {
-		tasks, err := r.s.Store.SlackOpenTasks(r.parent, r.conn.UserID, u.openPrefix, openTaskLimit)
-		if err != nil {
-			return ai.SlackInput{}, err
-		}
-		in.OpenTasks = tasks
+	tasks, err := r.s.Store.RelatedTasks(r.parent, r.conn.UserID, r.relatedScope(u))
+	if err != nil {
+		return ai.SlackInput{}, err
+	}
+	u.related = map[string]store.RelatedTask{}
+	for i, t := range tasks {
+		id := "t" + strconv.Itoa(i+1)
+		u.related[id] = t
+		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: id, Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
 	}
 	return in, nil
+}
+
+// relatedScope selects the related tasks of a unit's conversation: the
+// mentions and direct message runs of its channel and thread, whatever their
+// kind, the groups made for it, and in a channel the mention of the
+// thread's first message. Outside threads, the items of a direct message
+// conversation are limited to the last groupWindow.
+func (r *run) relatedScope(u *unit) store.RelatedScope {
+	now := r.s.Now()
+	team, channel := r.conn.TeamID, u.key.Channel
+	group := conversationPrefix(team, kindGroup, channel, u.thread)
+	scope := store.RelatedScope{
+		Source:        store.SourceSlack,
+		Prefixes:      []string{conversationPrefix(team, kindMention, channel, u.thread), conversationPrefix(team, kindDM, channel, u.thread), group},
+		GroupPrefixes: []string{group},
+		ClosedSince:   now.Add(-groupWindow).Unix(),
+		FetchLimit:    relatedFetch,
+		Limit:         relatedLimit,
+		SubtaskLimit:  subtaskLimit,
+	}
+	if u.convType == ai.SlackChannel && u.thread != noThread {
+		scope.ExactKeys = []string{conversationPrefix(team, kindMention, channel, noThread) + u.thread}
+	}
+	if u.convType != ai.SlackChannel && u.thread == noThread {
+		scope.DMSince = now.Add(-groupWindow).Unix()
+	}
+	return scope
 }
 
 // create creates the item of a unit unless it exists, and queues its
@@ -687,6 +734,12 @@ func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 	key := u.key.String()
 	item := store.ActionItem{ID: id, Status: "open", Refs: string(refs), Version: 1, CreatedAt: now, UpdatedAt: now,
 		Source: nullString(store.SourceSlack), SourceKey: nullString(key), Tracking: 1, DetectedAt: nullInt(now)}
+	// The group parent shares the conversation's reference, with a link to
+	// the conversation itself.
+	groupRefs, err := json.Marshal([]ref{{Service: store.SourceSlack, Account: r.conn.TeamName, ConversationID: u.key.Channel, ConversationName: place, URL: r.conversationURL(u.key.Channel, u.thread)}})
+	if err != nil {
+		return false, err
+	}
 	switch o {
 	case outcomeAction, outcomeCandidate:
 		item.Content = res.Task
@@ -713,13 +766,101 @@ func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 		if _, found, e := tx.LockItemBySourceKey(key); e != nil || found {
 			return e
 		}
+		madeGroup := false
+		if o == outcomeAction && item.Status == "open" {
+			parent, made, e := r.groupParent(tx, u, res, item.ID, string(groupRefs), now)
+			if e != nil {
+				return e
+			}
+			item.ParentID, madeGroup = parent, made
+		}
 		created, e := tx.CreateItem(item)
+		if errors.Is(e, store.ErrInvalidParent) && !madeGroup {
+			// The group changed; the item is created on its own.
+			r.warn("grouping skipped", "reason", "invalid_parent")
+			item.ParentID = sql.NullString{}
+			created, e = tx.CreateItem(item)
+		}
 		if e != nil || !created || item.Status != "open" || !notify || tx.Conn.ImmediateNotify != 1 {
 			return e
 		}
 		return tx.Enqueue(detectedNotification(u.title, item, now))
 	})
 	return err == nil, err
+}
+
+// groupParent returns the parent for a new open task that the AI judged to
+// belong to the same matter as a related task, and whether a group parent
+// was made for it. A related group takes the task while it is open, or
+// while it was completed by its subtasks within groupWindow. A related plain
+// task still open, without a parent and without subtasks, is put under a new
+// group parent named after the topic, and the new task joins it. Otherwise
+// the task stays on its own. Nothing is written before the checks pass, and
+// any error after the group parent was made rolls back the transaction.
+func (r *run) groupParent(tx *store.SlackTx, u *unit, res ai.MentionResult, itemID, refs string, now int64) (sql.NullString, bool, error) {
+	target, ok := u.related[res.SameAs]
+	if res.SameAs == "" || !ok {
+		return sql.NullString{}, false, nil
+	}
+	if target.Group {
+		p, found, e := tx.LockItem(target.ID)
+		if e != nil {
+			return sql.NullString{}, false, e
+		}
+		closedRecently := p.Status == "done" && p.AutoReason.String == store.ReasonChildrenDone && p.AutoAt.Valid && p.AutoAt.Int64 >= now-int64(groupWindow/time.Second)
+		if !found || p.ParentID.Valid || (p.Status != "open" && !closedRecently) {
+			r.warn("grouping skipped", "reason", "group_changed")
+			return sql.NullString{}, false, nil
+		}
+		return nullString(p.ID), false, nil
+	}
+	if res.Topic == "" {
+		return sql.NullString{}, false, nil
+	}
+	t, found, e := tx.LockItem(target.ID)
+	if e != nil {
+		return sql.NullString{}, false, e
+	}
+	if !found || t.Status != "open" || t.ParentID.Valid {
+		r.warn("grouping skipped", "reason", "task_changed")
+		return sql.NullString{}, false, nil
+	}
+	n, e := tx.ChildCount(t.ID)
+	if e != nil {
+		return sql.NullString{}, false, e
+	}
+	if n > 0 {
+		r.warn("grouping skipped", "reason", "task_changed")
+		return sql.NullString{}, false, nil
+	}
+	id, e := auth.Random()
+	if e != nil {
+		return sql.NullString{}, false, e
+	}
+	group := store.ActionItem{ID: id, Content: truncate(res.Topic, contentLimit), Status: "open", Refs: refs, Version: 1, CreatedAt: now, UpdatedAt: now,
+		Source: nullString(store.SourceSlack), SourceKey: nullString(conversationPrefix(r.conn.TeamID, kindGroup, u.key.Channel, u.thread) + itemID), DetectedAt: nullInt(now), Kind: store.KindTask}
+	created, e := tx.CreateGroup(group)
+	if e != nil {
+		return sql.NullString{}, false, e
+	}
+	if !created {
+		return sql.NullString{}, false, errors.New("slacksync: group parent key already exists")
+	}
+	if e = tx.SetParent(t.ID, group.ID, now); e != nil {
+		return sql.NullString{}, false, e
+	}
+	return nullString(group.ID), true, nil
+}
+
+// conversationURL links to a conversation: the thread's first message, or
+// the channel outside threads. It is empty when the workspace URL is not a
+// Slack URL.
+func (r *run) conversationURL(channel, thread string) string {
+	base := strings.TrimSuffix(r.conn.TeamURL, "/") + "/archives/" + channel
+	if thread != noThread {
+		base += "/p" + strings.ReplaceAll(thread, ".", "")
+	}
+	return slackURL(base).String
 }
 
 // setEvent makes item an untracked event item when the AI found an event.
@@ -771,5 +912,5 @@ func detectedNotification(title string, item store.ActionItem, now int64) store.
 	}
 	return store.Notification{ID: id, Kind: store.NotificationDetected, ActionItemID: nullString(item.ID),
 		DedupeKey: "detected:" + item.ID + ":" + strconv.FormatInt(item.Version, 10),
-		Title:     title, Body: item.Content, URL: "/", ScheduledAt: now, CreatedAt: now}
+		Title:     title, Body: item.Content, URL: "/tasks/" + item.ID, ScheduledAt: now, CreatedAt: now}
 }

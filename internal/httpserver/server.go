@@ -481,8 +481,9 @@ func readOnly(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// screenPath reports whether p is a screen of the web UI: /, /auto,
-// /settings, /settings/<page> or /consent, optionally with a trailing slash.
+// screenPath reports whether p is a screen of the web UI: /, /candidates,
+// /auto, /settings, /settings/<page>, /tasks/<id> or /consent, optionally
+// with a trailing slash.
 func screenPath(p string) bool {
 	if p == "/" {
 		return true
@@ -491,6 +492,9 @@ func screenPath(p string) bool {
 	switch p {
 	case "/candidates", "/auto", "/settings", "/consent":
 		return true
+	}
+	if id, ok := strings.CutPrefix(p, "/tasks/"); ok {
+		return itemIDPattern.MatchString(id)
 	}
 	page, ok := strings.CutPrefix(p, "/settings/")
 	return ok && pageName.MatchString(page)

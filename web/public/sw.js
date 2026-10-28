@@ -60,7 +60,8 @@ function screenWindow(raw) {
   const url = new URL(raw);
   if (url.origin !== self.location.origin) return false;
   const p = url.pathname;
-  return p === '/' || p === '/auto' || p === '/auto/' || p === '/settings' || p.startsWith('/settings/');
+  return p === '/' || p === '/candidates' || p.startsWith('/candidates/') || p === '/auto' || p === '/auto/' ||
+    p.startsWith('/tasks/') || p === '/settings' || p.startsWith('/settings/');
 }
 
 self.addEventListener('notificationclick', (event) => {

@@ -387,7 +387,7 @@ func TestNotificationDetection(t *testing.T) {
 		titles := map[string]bool{}
 		for _, n := range st.pending() {
 			titles[n.Title+"|"+n.Body] = true
-			if n.Kind != "detected" || n.URL != "/" || !n.ActionItemID.Valid || !strings.HasPrefix(n.DedupeKey, "detected:"+n.ActionItemID.String+":") {
+			if n.Kind != "detected" || n.URL != "/tasks/"+n.ActionItemID.String || !n.ActionItemID.Valid || !strings.HasPrefix(n.DedupeKey, "detected:"+n.ActionItemID.String+":") {
 				t.Fatalf("notification: %+v", n)
 			}
 		}

@@ -183,6 +183,10 @@ table "action_items" {
     type = bigint
     null = true
   }
+  column "parent_id" {
+    type = text
+    null = true
+  }
   primary_key {
     columns = [column.id]
   }
@@ -205,6 +209,9 @@ table "action_items" {
   }
   index "action_items_user_auto_idx" {
     columns = [column.user_id, column.auto_at, column.id]
+  }
+  index "action_items_user_parent_idx" {
+    columns = [column.user_id, column.parent_id]
   }
 }
 table "api_tokens" {

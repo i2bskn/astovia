@@ -138,13 +138,14 @@ func (s *Server) newMCPServer(userID string) *mcp.Server {
 	f := false
 	server.AddTool(&mcp.Tool{
 		Name:        "action_items_create",
-		Description: "Save a new action item for the user. Include refs to the source conversation when known.",
+		Description: "Save a new action item for the user. Include refs to the source conversation when known. Give parent_id to make it a subtask; items nest at most two levels.",
 		InputSchema: objectSchema([]string{"content"}, map[string]any{
-			"content": stringProp("Short description of what needs to be done (1-500 characters)."),
-			"status":  statusProp(),
-			"note":    nullableStringProp("Optional free-form note (up to 4000 characters)."),
-			"due_at":  dueAtProp(),
-			"refs":    refsProp(),
+			"content":   stringProp("Short description of what needs to be done (1-500 characters)."),
+			"status":    statusProp(),
+			"note":      nullableStringProp("Optional free-form note (up to 4000 characters)."),
+			"due_at":    dueAtProp(),
+			"refs":      refsProp(),
+			"parent_id": nullableStringProp("Optional ID of the parent item, which must have no parent itself (two levels at most). null means no parent."),
 		}),
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &f, OpenWorldHint: &f},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -152,26 +153,46 @@ func (s *Server) newMCPServer(userID string) *mcp.Server {
 		if !decodeArguments(req, &in) {
 			return toolError(invalidArguments), nil
 		}
+		// null parent_id means no parent, as when it is omitted.
+		if isNull(in.ParentID) {
+			in.ParentID = nil
+		}
 		out, e := s.createActionItem(ctx, userID, in)
 		return toolResult(out, e), nil
 	})
 	server.AddTool(&mcp.Tool{
 		Name:        "action_items_list",
-		Description: "List the user's action items, newest first. Use next_cursor to get the next page.",
+		Description: "List the user's action items, newest first. Use next_cursor to get the next page. With parent_id, list the subtasks of that item instead, oldest first (items nest at most two levels).",
 		InputSchema: objectSchema(nil, map[string]any{
-			"status": map[string]any{"type": []string{"string", "null"}, "enum": []any{"open", "candidate", "done", "dismissed", nil}, "description": "open, candidate (an unconfirmed candidate found by the AI), done or dismissed."},
-			"limit":  map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 100, "description": "Maximum number of items (1-100, default 50)."},
-			"cursor": map[string]any{"type": []string{"string", "null"}, "description": "next_cursor from a previous call."},
+			"status":    map[string]any{"type": []string{"string", "null"}, "enum": []any{"open", "candidate", "done", "dismissed", nil}, "description": "open, candidate (an unconfirmed candidate found by the AI), done or dismissed."},
+			"limit":     map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 100, "description": "Maximum number of items (1-100, default 50)."},
+			"cursor":    map[string]any{"type": []string{"string", "null"}, "description": "next_cursor from a previous call."},
+			"parent_id": map[string]any{"type": []string{"string", "null"}, "description": "List the subtasks of this item (up to 100, no paging). Cannot be combined with status, limit or cursor."},
 		}),
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &f},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var in struct {
-			Status json.RawMessage `json:"status"`
-			Limit  json.RawMessage `json:"limit"`
-			Cursor json.RawMessage `json:"cursor"`
+			Status   json.RawMessage `json:"status"`
+			Limit    json.RawMessage `json:"limit"`
+			Cursor   json.RawMessage `json:"cursor"`
+			ParentID json.RawMessage `json:"parent_id"`
 		}
 		if !decodeArguments(req, &in) {
 			return toolError(invalidArguments), nil
+		}
+		// null is treated as omitted, as for the other arguments below.
+		if in.ParentID != nil && !isNull(in.ParentID) {
+			for _, raw := range []json.RawMessage{in.Status, in.Limit, in.Cursor} {
+				if raw != nil && !isNull(raw) {
+					return toolError(invalidRequest("parent_id cannot be combined with status, limit or cursor.")), nil
+				}
+			}
+			v, ok := decodeString(in.ParentID)
+			if !ok {
+				return toolError(invalidRequest(parentMessage)), nil
+			}
+			out, e := s.listChildActionItems(ctx, userID, v)
+			return toolResult(out, e), nil
 		}
 		// null is treated as omitted: clients often send null for optional
 		// arguments.
@@ -226,15 +247,16 @@ func (s *Server) newMCPServer(userID string) *mcp.Server {
 	})
 	server.AddTool(&mcp.Tool{
 		Name:        "action_items_update",
-		Description: "Update one of the user's action items: change its status (open, candidate, done, dismissed; candidate is an unconfirmed candidate found by the AI) or details. Only the given fields change.",
+		Description: "Update one of the user's action items: change its status (open, candidate, done, dismissed; candidate is an unconfirmed candidate found by the AI), details or parent. Only the given fields change. Items nest at most two levels.",
 		InputSchema: objectSchema([]string{"id"}, map[string]any{
-			"id":      stringProp("Action item ID."),
-			"content": stringProp("Short description of what needs to be done (1-500 characters)."),
-			"status":  statusProp(),
-			"note":    nullableStringProp("Optional free-form note (up to 4000 characters). null clears it."),
-			"due_at":  dueAtProp(),
-			"refs":    refsProp(),
-			"version": map[string]any{"type": "integer", "minimum": 1, "description": "If given, the update fails when the item's current version differs."},
+			"id":        stringProp("Action item ID."),
+			"content":   stringProp("Short description of what needs to be done (1-500 characters)."),
+			"status":    statusProp(),
+			"note":      nullableStringProp("Optional free-form note (up to 4000 characters). null clears it."),
+			"due_at":    dueAtProp(),
+			"refs":      refsProp(),
+			"parent_id": nullableStringProp("ID of the parent item, which must have no parent itself; an item with subtasks cannot get a parent. null removes the parent."),
+			"version":   map[string]any{"type": "integer", "minimum": 1, "description": "If given, the update fails when the item's current version differs."},
 		}),
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &f, IdempotentHint: false, OpenWorldHint: &f},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

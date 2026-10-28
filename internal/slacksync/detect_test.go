@@ -51,12 +51,12 @@ func TestMentionDetection(t *testing.T) {
 			t.Fatalf("items: %d", len(st.items()))
 		}
 		p := st.pending()
-		if len(p) != 1 || p[0].Title != "Slack: メンション" || p[0].Body != "確認して回答する" || p[0].ActionItemID.String != open.ID {
+		if len(p) != 1 || p[0].Title != "Slack: メンション" || p[0].Body != "確認して回答する" || p[0].ActionItemID.String != open.ID || p[0].URL != "/tasks/"+open.ID {
 			t.Fatalf("notifications: %+v", p)
 		}
 		in := st.ai.input(t, 2)
 		me := in["me"].(map[string]any)
-		if in["_system"] != ai.SlackSystemPrompt || me["id"] != "U1" || me["name"] != "alice" || in["workspace"] != "Acme" || in["conversation_type"] != "channel" || in["channel_name"] != "name-C1" || len(in["open_tasks"].([]any)) != 0 {
+		if in["_system"] != ai.SlackSystemPrompt || me["id"] != "U1" || me["name"] != "alice" || in["workspace"] != "Acme" || in["conversation_type"] != "channel" || in["channel_name"] != "name-C1" || len(related(in)) != 0 {
 			t.Fatalf("input: %+v", in)
 		}
 		got := posts(in)
@@ -145,6 +145,28 @@ func TestCandidatesAndEvents(t *testing.T) {
 	})
 }
 
+// related returns the related tasks of an AI input as "id:task" strings,
+// with the subtasks in brackets and "!" for a closed group.
+func related(in map[string]any) []string {
+	out := []string{}
+	for _, v := range in["related_tasks"].([]any) {
+		m := v.(map[string]any)
+		s := m["id"].(string) + ":" + m["task"].(string)
+		if subs, ok := m["subtasks"].([]any); ok {
+			var list []string
+			for _, sub := range subs {
+				list = append(list, sub.(string))
+			}
+			s += "[" + strings.Join(list, ",") + "]"
+		}
+		if closed, ok := m["closed"].(bool); ok && closed {
+			s += "!"
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 func TestThreadMentionAndOpenTasks(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		st := newSyncTest(t, driver)
@@ -165,16 +187,16 @@ func TestThreadMentionAndOpenTasks(t *testing.T) {
 		if i := st.mustItem(mentionKey("C1", parent, r1)); i.Status != "done" {
 			t.Fatalf("r1: %+v", i)
 		}
-		// A top-level mention gets no open tasks; a thread mention gets the
-		// thread's.
-		if tasks := st.ai.input(t, 1)["open_tasks"].([]any); len(tasks) != 0 {
-			t.Fatalf("top-level open tasks: %v", tasks)
+		// A top-level mention gets the tasks of its own thread (none yet); a
+		// thread mention gets the thread's, not the other topic's.
+		if tasks := related(st.ai.input(t, 1)); len(tasks) != 0 {
+			t.Fatalf("top-level related tasks: %v", tasks)
 		}
-		if tasks := st.ai.input(t, 2)["open_tasks"].([]any); len(tasks) != 0 {
-			t.Fatalf("first thread open tasks: %v", tasks)
+		if tasks := related(st.ai.input(t, 2)); len(tasks) != 0 {
+			t.Fatalf("first thread related tasks: %v", tasks)
 		}
-		if tasks := st.ai.input(t, 3)["open_tasks"].([]any); !reflect.DeepEqual(tasks, []any{"レビューする"}) {
-			t.Fatalf("second thread open tasks: %v", tasks)
+		if tasks := related(st.ai.input(t, 3)); !reflect.DeepEqual(tasks, []string{"t1:レビューする"}) {
+			t.Fatalf("second thread related tasks: %v", tasks)
 		}
 		got := posts(st.ai.input(t, 3))
 		if got[0] != [2]string{parent, "-"} || got[1] != [2]string{r1, "T"} || got[2] != [2]string{r2, "-"} {
@@ -214,8 +236,8 @@ func TestDMRuns(t *testing.T) {
 			t.Fatalf("first run: %v %v", in["conversation_type"], posts(in))
 		}
 		in = st.ai.input(t, 2)
-		if !reflect.DeepEqual(posts(in), [][2]string{{a1, "-"}, {a2, "-"}, {own, "-"}, {a3, "T"}}) || len(in["open_tasks"].([]any)) != 0 {
-			t.Fatalf("second run: %v %v", posts(in), in["open_tasks"])
+		if !reflect.DeepEqual(posts(in), [][2]string{{a1, "-"}, {a2, "-"}, {own, "-"}, {a3, "T"}}) || len(related(in)) != 0 {
+			t.Fatalf("second run: %v %v", posts(in), related(in))
 		}
 
 		// A message after a judged run starts a new run; judged messages
@@ -233,8 +255,8 @@ func TestDMRuns(t *testing.T) {
 		if got := posts(in); got[len(got)-1] != [2]string{a4, "T"} || got[len(got)-2] != [2]string{a3, "-"} {
 			t.Fatalf("new run: %v", got)
 		}
-		if !reflect.DeepEqual(in["open_tasks"], []any{"資料を送る"}) {
-			t.Fatalf("open tasks: %v", in["open_tasks"])
+		if !reflect.DeepEqual(related(in), []string{"t1:資料を送る"}) {
+			t.Fatalf("related tasks: %v", related(in))
 		}
 
 		// A reply in a thread is judged in its own conversation.

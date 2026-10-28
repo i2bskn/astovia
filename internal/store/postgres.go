@@ -88,8 +88,14 @@ func (q postgresQueries) listActionItems(ctx context.Context, userID, status str
 	}
 	return items, nil
 }
+func (q postgresQueries) listTopActionItems(ctx context.Context, userID, status string, after ActionItemCursor, limit int) ([]ActionItem, error) {
+	if status == "" {
+		return q.actionItems(q.q.ListTopActionItems(ctx, db.ListTopActionItemsParams{UserID: userID, BeforeCreatedAt: after.CreatedAt, TieCreatedAt: after.CreatedAt, BeforeID: after.ID, PageSize: int32(limit)}))
+	}
+	return q.actionItems(q.q.ListTopActionItemsByStatus(ctx, db.ListTopActionItemsByStatusParams{UserID: userID, Status: status, ParentStatus: status, BeforeCreatedAt: after.CreatedAt, TieCreatedAt: after.CreatedAt, BeforeID: after.ID, PageSize: int32(limit)}))
+}
 func (q postgresQueries) updateActionItem(ctx context.Context, item ActionItem, currentVersion int64) (int64, error) {
-	return q.q.UpdateActionItem(ctx, db.UpdateActionItemParams{Content: item.Content, Status: item.Status, Note: item.Note, DueAt: item.DueAt, Refs: item.Refs, Source: item.Source, SourceKey: item.SourceKey, Tracking: item.Tracking, AutoReason: item.AutoReason, AutoRef: item.AutoRef, AutoAt: item.AutoAt, DetectedAt: item.DetectedAt, TrackedAt: item.TrackedAt, Kind: item.Kind, EventTitle: item.EventTitle, EventStartAt: item.EventStartAt, EventEndAt: item.EventEndAt, NewVersion: item.Version, UpdatedAt: item.UpdatedAt, ID: item.ID, UserID: item.UserID, CurrentVersion: currentVersion})
+	return q.q.UpdateActionItem(ctx, db.UpdateActionItemParams{Content: item.Content, Status: item.Status, Note: item.Note, DueAt: item.DueAt, Refs: item.Refs, Source: item.Source, SourceKey: item.SourceKey, Tracking: item.Tracking, AutoReason: item.AutoReason, AutoRef: item.AutoRef, AutoAt: item.AutoAt, DetectedAt: item.DetectedAt, TrackedAt: item.TrackedAt, Kind: item.Kind, EventTitle: item.EventTitle, EventStartAt: item.EventStartAt, EventEndAt: item.EventEndAt, ParentID: item.ParentID, NewVersion: item.Version, UpdatedAt: item.UpdatedAt, ID: item.ID, UserID: item.UserID, CurrentVersion: currentVersion})
 }
 func (q postgresQueries) createAPIToken(ctx context.Context, token APIToken, hash string) error {
 	return q.q.CreateAPIToken(ctx, db.CreateAPITokenParams{ID: token.ID, UserID: token.UserID, Name: token.Name, TokenHash: hash, CreatedAt: token.CreatedAt})
@@ -262,11 +268,46 @@ func (q postgresQueries) listCandidateSweepUserIDs(ctx context.Context, now int6
 	}
 	return ids, err
 }
-func (q postgresQueries) expireCandidates(ctx context.Context, userID string, updatedBefore, now int64) (int64, error) {
+func (q postgresQueries) expireCandidates(ctx context.Context, userID string, updatedBefore, now int64) ([]sql.NullString, error) {
 	return q.q.ExpireCandidates(ctx, db.ExpireCandidatesParams{Now: now, UserID: userID, UpdatedBefore: updatedBefore})
 }
-func (q postgresQueries) expireEvents(ctx context.Context, userID string, now int64) (int64, error) {
+func (q postgresQueries) expireEvents(ctx context.Context, userID string, now int64) ([]sql.NullString, error) {
 	return q.q.ExpireEvents(ctx, db.ExpireEventsParams{Now: now, UserID: userID})
+}
+func (q postgresQueries) listChildActionItems(ctx context.Context, userID, parentID string, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListChildActionItems(ctx, db.ListChildActionItemsParams{UserID: userID, ParentID: sql.NullString{String: parentID, Valid: true}, PageSize: int32(limit)}))
+}
+func (q postgresQueries) countChildActionItems(ctx context.Context, userID, parentID string) (int64, error) {
+	return q.q.CountChildActionItems(ctx, db.CountChildActionItemsParams{UserID: userID, ParentID: sql.NullString{String: parentID, Valid: true}})
+}
+func (q postgresQueries) countChildrenByParents(ctx context.Context, userID, ids string) ([]ChildCount, error) {
+	rows, err := q.q.CountChildrenByParents(ctx, db.CountChildrenByParentsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ChildCount, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, ChildCount{ParentID: row.ParentID.String, Children: row.Children, Total: row.Total, Done: row.Done, Remaining: row.Remaining, NextDueAt: nextDueAt(row.NextDueAt)})
+	}
+	return out, nil
+}
+func (q postgresQueries) actionItemSummaries(ctx context.Context, userID, ids string) ([]ItemSummary, error) {
+	rows, err := q.q.GetActionItemsByIDs(ctx, db.GetActionItemsByIDsParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ItemSummary, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, ItemSummary(row))
+	}
+	return out, nil
+}
+func (q postgresQueries) listConversationActionItems(ctx context.Context, userID, source, prefix string, createdSince, closedSince int64, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListConversationActionItems(ctx, db.ListConversationActionItemsParams{UserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix, CreatedSince: createdSince, ClosedSince: sql.NullInt64{Int64: closedSince, Valid: true}, PageSize: int32(limit)}))
+}
+func (q postgresQueries) actionItemBySourceKey(ctx context.Context, userID, sourceKey string) (ActionItem, error) {
+	item, err := q.q.GetActionItemBySourceKey(ctx, db.GetActionItemBySourceKeyParams{UserID: userID, SourceKey: sql.NullString{String: sourceKey, Valid: true}})
+	return ActionItem(item), err
 }
 func (q postgresQueries) githubConnection(ctx context.Context, userID string) (GitHubConnection, error) {
 	row, err := q.q.GetGitHubConnection(ctx, userID)
@@ -346,13 +387,6 @@ func (q postgresQueries) listSlackJudgedKeys(ctx context.Context, userID, prefix
 		out = append(out, row.String)
 	}
 	return out, nil
-}
-func (q postgresQueries) listSlackOpenTasks(ctx context.Context, userID, prefix string, limit int) ([]string, error) {
-	rows, err := q.q.ListSlackOpenTasks(ctx, db.ListSlackOpenTasksParams{UserID: userID, Prefix: prefix, PageSize: int32(limit)})
-	if rows == nil {
-		rows = []string{}
-	}
-	return rows, err
 }
 func (q postgresQueries) aiSettings(ctx context.Context, userID string) (AISettings, error) {
 	row, err := q.q.GetAISettings(ctx, userID)

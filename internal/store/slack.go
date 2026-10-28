@@ -196,14 +196,6 @@ func (s *Store) SlackJudgedKeys(ctx context.Context, userID, prefix string, crea
 	return s.q.listSlackJudgedKeys(ctx, userID, prefix, createdSince, limit)
 }
 
-// SlackOpenTasks returns the content of up to limit of the user's open Slack
-// items whose key starts with prefix, newest first, whether tracked or not
-// (event items are not tracked). Task candidates are not included. It reads
-// without locking.
-func (s *Store) SlackOpenTasks(ctx context.Context, userID, prefix string, limit int) ([]string, error) {
-	return s.q.listSlackOpenTasks(ctx, userID, prefix, limit)
-}
-
 // SlackTx is one write of a Slack synchronization step. Conn is the
 // connection as locked at the start of the transaction.
 //

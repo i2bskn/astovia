@@ -41,6 +41,7 @@ CREATE TABLE "action_items" (
   "event_title" text NULL,
   "event_start_at" bigint NULL,
   "event_end_at" bigint NULL,
+  "parent_id" text NULL,
   PRIMARY KEY ("id"),
   CONSTRAINT "action_items_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
 );
@@ -48,6 +49,8 @@ CREATE TABLE "action_items" (
 CREATE INDEX "action_items_user_auto_idx" ON "action_items" ("user_id", "auto_at", "id");
 -- Create index "action_items_user_created_idx" to table: "action_items"
 CREATE INDEX "action_items_user_created_idx" ON "action_items" ("user_id", "created_at", "id");
+-- Create index "action_items_user_parent_idx" to table: "action_items"
+CREATE INDEX "action_items_user_parent_idx" ON "action_items" ("user_id", "parent_id");
 -- Create index "action_items_user_source_key_key" to table: "action_items"
 CREATE UNIQUE INDEX "action_items_user_source_key_key" ON "action_items" ("user_id", "source_key");
 -- Create index "action_items_user_status_created_idx" to table: "action_items"

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { calendarURL, createActionItemsClient, isConflict } from '../.test-build/actionItems.js';
+import { calendarURL, createActionItemsClient, isConflict, isInvalid, isNotFound } from '../.test-build/actionItems.js';
 
 const item = {
   id: 'item-1',
@@ -14,6 +14,9 @@ const item = {
   updated_at: '2026-10-23T01:02:03Z',
   kind: 'task',
   event: null,
+  parent_id: null,
+  parent: null,
+  children: null,
 };
 
 const event = {
@@ -63,6 +66,45 @@ test('createActionItem posts JSON', async () => {
   assert.equal(new Headers(calls[0].init.headers).get('content-type'), 'application/json');
   assert.deepEqual(JSON.parse(calls[0].init.body), { content: 'x', note: 'memo' });
   assert.deepEqual(JSON.parse(calls[1].init.body), { content: 'y', note: null });
+  await client.createActionItem({ content: 'z', parent_id: 'parent-1' });
+  assert.deepEqual(JSON.parse(calls[2].init.body), { content: 'z', note: null, parent_id: 'parent-1' });
+});
+
+test('subtasks and parents are accepted', async () => {
+  const child = { ...item, id: 'child-1', parent_id: 'parent-1', parent: { id: 'parent-1', content: '障害対応', status: 'open' } };
+  const parent = { ...item, id: 'parent-1', children: { total: 3, done: 2, remaining: 1, next_due_at: null } };
+  const soon = { ...parent, id: 'parent-2', children: { total: 1, done: 0, remaining: 1, next_due_at: '2026-10-29T00:00:00Z' } };
+  const { client } = fake({ items: [parent, soon, child, { ...child, parent: null }], next_cursor: null });
+  assert.equal((await client.listActionItems()).items.length, 4);
+});
+
+test('listActionItems asks for the items without a parent', async () => {
+  const { client, calls } = fake({ items: [item], next_cursor: null });
+  await client.listActionItems({ status: 'open', view: 'top', cursor: 'abc' });
+  await client.listActionItems({ view: 'top' });
+  assert.equal(calls[0].path, '/api/v1/action-items?status=open&view=top&cursor=abc');
+  assert.equal(calls[1].path, '/api/v1/action-items?view=top');
+});
+
+test('getActionItem and listChildren read one item and its subtasks', async () => {
+  const { client, calls } = fake(item);
+  assert.deepEqual(await client.getActionItem('item 1'), item);
+  assert.equal(calls[0].path, '/api/v1/action-items/item%201');
+  assert.equal(calls[0].init, undefined);
+  const child = { ...item, id: 'child-1', parent_id: 'item-1', parent: { id: 'item-1', content: '親', status: 'open' } };
+  const page = fake({ items: [child], next_cursor: null });
+  assert.deepEqual(await page.client.listChildren('item-1'), { items: [child], next_cursor: null });
+  await page.client.listChildren('a&b');
+  assert.equal(page.calls[0].path, '/api/v1/action-items?parent_id=item-1');
+  assert.equal(page.calls[1].path, '/api/v1/action-items?parent_id=a%26b');
+  await assert.rejects(fake({ ...item, status: 'closed' }).client.getActionItem('item-1'), /Unexpected action item response/);
+  await assert.rejects(fake({ items: [{ ...child, parent_id: 1 }], next_cursor: null }).client.listChildren('item-1'), /Unexpected action item list response/);
+});
+
+test('updateActionItem moves an item out of its parent', async () => {
+  const { client, calls } = fake(item);
+  await client.updateActionItem('item-1', { parent_id: null, version: 1 });
+  assert.deepEqual(JSON.parse(calls[0].init.body), { parent_id: null, version: 1 });
 });
 
 test('updateActionItem patches JSON', async () => {
@@ -101,7 +143,15 @@ test('malformed responses are rejected', async () => {
   const { refs: _omitted, ...withoutRefs } = item;
   const { kind: _kind, ...withoutKind } = item;
   const { event: _event, ...withoutEvent } = item;
-  for (const body of [null, [], { ...item, status: 'closed' }, { ...item, version: '1' }, { ...item, note: 1 }, withoutRefs, { ...item, refs: [{ url: 'https://example.com' }] },
+  const { parent_id: _parentID, ...withoutParentID } = item;
+  const { parent: _parent, ...withoutParent } = item;
+  const { children: _children, ...withoutChildren } = item;
+  const nesting = [withoutParentID, withoutParent, withoutChildren, { ...item, parent_id: '' }, { ...item, parent_id: 'item-1' }, { ...item, parent_id: 1 },
+    { ...item, parent: { id: 'p', content: 'x', status: 'open' } }, { ...item, parent_id: 'p', parent: { id: 'q', content: 'x', status: 'open' } },
+    { ...item, parent_id: 'p', parent: { id: 'p', content: 'x', status: 'closed' } }, { ...item, parent_id: 'p', parent: { id: 'p', status: 'open' } },
+    { ...item, children: { total: 1, done: 0 } }, { ...item, children: { total: 1, done: -1, remaining: 1, next_due_at: null } }, { ...item, children: { total: 1.5, done: 0, remaining: 1, next_due_at: null } }, { ...item, children: [] },
+    { ...item, children: { total: 1, done: 0, remaining: 1 } }, { ...item, children: { total: 1, done: 0, remaining: 1, next_due_at: 1 } }];
+  for (const body of [...nesting, null, [], { ...item, status: 'closed' }, { ...item, version: '1' }, { ...item, note: 1 }, withoutRefs, { ...item, refs: [{ url: 'https://example.com' }] },
     withoutKind, withoutEvent, { ...item, kind: 'meeting' }, { ...item, event: event.event }, { ...event, event: null }, { ...event, event: { title: 'x', start_at: 1, end_at: null } }, { ...event, event: { title: 'x', start_at: 'y' } }]) {
     await assert.rejects(fake(body).client.createActionItem({ content: 'x' }), /Unexpected action item response/);
     await assert.rejects(fake(body).client.updateActionItem('item-1', { status: 'done' }), /Unexpected action item response/);
@@ -125,4 +175,10 @@ test('the APIError status distinguishes conflicts', async () => {
   assert.equal(isConflict(new APIError(404)), false);
   assert.equal(isConflict(new Error('x')), false);
   assert.equal(isConflict({ status: 409 }), false);
+  assert.equal(isNotFound(new APIError(404)), true);
+  assert.equal(isNotFound(conflict), false);
+  assert.equal(isNotFound({ status: 404 }), false);
+  assert.equal(isInvalid(new APIError(400)), true);
+  assert.equal(isInvalid(new APIError(404)), false);
+  await assert.rejects(fake(new APIError(404)).client.getActionItem('missing'), (error) => isNotFound(error));
 });

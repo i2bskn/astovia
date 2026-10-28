@@ -523,10 +523,14 @@ func compareTS(a, b string) int {
 // tsTime returns the time of a timestamp, to the second.
 func tsTime(ts string) time.Time { return time.Unix(tsSeconds(ts), 0) }
 
-// Source key kinds.
+// Source key kinds. A group parent made by the AI for several tasks of one
+// matter has the key slack:{team}:g:{channel}:{thread}:{item}, where item is
+// the ID of the task it was made for; parseSourceKey rejects it, so that
+// detection and tracking never take it for a message.
 const (
 	kindMention = "m"
 	kindDM      = "d"
+	kindGroup   = "g"
 )
 
 // noThread is the thread part of a key outside threads.

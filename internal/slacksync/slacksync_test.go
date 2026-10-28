@@ -334,9 +334,15 @@ func aiNoAction(summary string) func(http.ResponseWriter) {
 }
 
 // aiJudged answers a judgment with a decision and an event (empty strings
-// for none).
+// for none), without a topic or a related task.
 func aiJudged(decision, task, summary, eventTitle, eventStart, eventEnd string) func(http.ResponseWriter) {
-	return aiText(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd})
+	return aiText(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd, "topic": "", "same_as": ""})
+}
+
+// aiGrouped answers a judgment with a task that the AI put in the same
+// matter as the related task sameAs.
+func aiGrouped(decision, task, topic, sameAs string) func(http.ResponseWriter) {
+	return aiText(map[string]any{"decision": decision, "task": task, "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs})
 }
 
 func aiResolved(v bool) func(http.ResponseWriter) {
@@ -412,7 +418,7 @@ func (st *syncTest) connect(team, user string, settings store.SlackSettings) sto
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	c, err := st.s.SaveSlackConnection(context.Background(), store.SlackConnection{UserID: "alice-id", TokenSealed: sealed, TokenLast4: "0001", TeamID: team, TeamName: "Acme", SlackUserID: user, SlackUserName: "alice", Scopes: strings.Join(RequiredScopes, ",")}, settings, "sid", st.now.Unix())
+	c, err := st.s.SaveSlackConnection(context.Background(), store.SlackConnection{UserID: "alice-id", TokenSealed: sealed, TokenLast4: "0001", TeamID: team, TeamName: "Acme", TeamURL: "https://acme.slack.com/", SlackUserID: user, SlackUserName: "alice", Scopes: strings.Join(RequiredScopes, ",")}, settings, "sid", st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}
@@ -550,7 +556,9 @@ func TestSourceKeys(t *testing.T) {
 		}
 	}
 	for _, v := range []string{"", "github:review:o/r#1", "slack:t1:m:C1:-:1.000001", "slack:T1:x:C1:-:1.000001", "slack:T1:m:C1:-:1.000001:2.000001", "slack:T1:d:C1:-:2.000001:1.000001",
-		"slack:T1:m:C1:x:1.000001", "slack:T1:m:C1:-:1", "slack:T1:m:C1:-:1.123456789", "slack:T1:m:C/1:-:1.000001", "slack:T1:d:C1:-:1.000001"} {
+		"slack:T1:m:C1:x:1.000001", "slack:T1:m:C1:-:1", "slack:T1:m:C1:-:1.123456789", "slack:T1:m:C/1:-:1.000001", "slack:T1:d:C1:-:1.000001",
+		// Group parents are not messages.
+		"slack:T1:g:C1:-:item-1", "slack:T1:g:C1:1.000001:item-1", "slack:T1:g:C1:-:1.000001:1.000002"} {
 		if _, ok := parseSourceKey(v); ok {
 			t.Fatalf("%q parsed", v)
 		}

@@ -283,21 +283,37 @@ func (t *sourceTx) LockItem(id string) (ActionItem, bool, error) {
 }
 
 // CreateItem inserts item unless the user already has an item with its
-// source key, and reports whether it was inserted.
+// source key, and reports whether it was inserted. An item with ParentID is
+// checked against the nesting rules (ErrInvalidParent) after locking the
+// parent, and the parent is synchronized after the insert.
 func (t *sourceTx) CreateItem(item ActionItem) (bool, error) {
 	item.UserID = t.userID
+	if item.ParentID.Valid {
+		if _, e := lockParent(t.ctx, t.q, t.userID, item.ParentID.String, item.ID); e != nil {
+			return false, e
+		}
+	}
 	n, e := t.q.insertSourcedActionItem(t.ctx, withKind(item))
-	return n == 1, e
+	if e != nil || n != 1 || !item.ParentID.Valid {
+		return n == 1, e
+	}
+	return true, syncParent(t.ctx, t.q, t.userID, item.ParentID.String, item.UpdatedAt)
 }
 
 // UpdateItem stores next, which must have been read with LockItem or
 // LockItemBySourceKey, with its version incremented and reports whether the
-// stored version still matched.
+// stored version still matched. ParentID cannot be changed here (see
+// SetParent); the item's parent is synchronized after the update.
 func (t *sourceTx) UpdateItem(current, next ActionItem) (ActionItem, bool, error) {
-	next.ID, next.UserID, next.CreatedAt, next.Version = current.ID, current.UserID, current.CreatedAt, current.Version+1
+	next.ID, next.UserID, next.CreatedAt, next.Version, next.ParentID = current.ID, current.UserID, current.CreatedAt, current.Version+1, current.ParentID
 	n, e := t.q.updateActionItem(t.ctx, next, current.Version)
 	if e != nil || n != 1 {
 		return ActionItem{}, false, e
+	}
+	if next.ParentID.Valid {
+		if e = syncParent(t.ctx, t.q, t.userID, next.ParentID.String, next.UpdatedAt); e != nil {
+			return ActionItem{}, false, e
+		}
 	}
 	return next, true, nil
 }

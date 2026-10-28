@@ -32,7 +32,7 @@ export default function CandidateList() {
     setError(null);
     if (!cursor) setConflict(false);
     try {
-      const page = await client.listActionItems({ status: 'candidate', cursor });
+      const page = await client.listActionItems({ status: 'candidate', view: 'top', cursor });
       if (expected !== sequence.current) return;
       setItems((previous) => cursor ? [...previous, ...page.items] : page.items);
       setNextCursor(page.next_cursor);
@@ -57,6 +57,9 @@ export default function CandidateList() {
       setItems((previous) => updated.status !== 'candidate'
         ? previous.filter((i) => i.id !== updated.id)
         : previous.some((i) => i.id === updated.id) ? previous.map((i) => i.id === updated.id ? updated : i) : [updated, ...previous]);
+      // The list is read again: a candidate made a task can bring its
+      // candidate subtasks into the list.
+      void load();
       void candidates.refresh();
       window.clearTimeout(toastTimer.current);
       if (undo) {

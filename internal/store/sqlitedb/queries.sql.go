@@ -70,6 +70,72 @@ func (q *Queries) CountAutoActionItemsSince(ctx context.Context, arg CountAutoAc
 	return count, err
 }
 
+const countChildActionItems = `-- name: CountChildActionItems :one
+SELECT COUNT(*) FROM action_items WHERE user_id = ?1 AND parent_id = ?2
+`
+
+type CountChildActionItemsParams struct {
+	UserID   string
+	ParentID sql.NullString
+}
+
+func (q *Queries) CountChildActionItems(ctx context.Context, arg CountChildActionItemsParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countChildActionItems, arg.UserID, arg.ParentID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countChildrenByParents = `-- name: CountChildrenByParents :many
+SELECT parent_id, CAST(COUNT(*) AS INTEGER) AS children, CAST(COALESCE(SUM(CASE WHEN status <> 'dismissed' THEN 1 ELSE 0 END), 0) AS INTEGER) AS total, CAST(COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS INTEGER) AS done, CAST(COALESCE(SUM(CASE WHEN status IN ('open','candidate') THEN 1 ELSE 0 END), 0) AS INTEGER) AS remaining, CAST(COALESCE(MIN(CASE WHEN status IN ('open','candidate') THEN due_at END), -1) AS INTEGER) AS next_due_at FROM action_items
+WHERE user_id = ?1 AND instr(',' || CAST(?2 AS TEXT) || ',', ',' || parent_id || ',') > 0
+GROUP BY parent_id
+`
+
+type CountChildrenByParentsParams struct {
+	UserID string
+	Ids    string
+}
+
+type CountChildrenByParentsRow struct {
+	ParentID  sql.NullString
+	Children  int64
+	Total     int64
+	Done      int64
+	Remaining int64
+	NextDueAt int64
+}
+
+func (q *Queries) CountChildrenByParents(ctx context.Context, arg CountChildrenByParentsParams) ([]CountChildrenByParentsRow, error) {
+	rows, err := q.db.QueryContext(ctx, countChildrenByParents, arg.UserID, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []CountChildrenByParentsRow
+	for rows.Next() {
+		var i CountChildrenByParentsRow
+		if err := rows.Scan(
+			&i.ParentID,
+			&i.Children,
+			&i.Total,
+			&i.Done,
+			&i.Remaining,
+			&i.NextDueAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countNotificationsByDedupeKey = `-- name: CountNotificationsByDedupeKey :one
 SELECT COUNT(*) FROM notifications WHERE user_id = ?1 AND dedupe_key = ?2
 `
@@ -162,8 +228,8 @@ func (q *Queries) CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) 
 }
 
 const createActionItem = `-- name: CreateActionItem :exec
-INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at)
-VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
 `
 
 type CreateActionItemParams struct {
@@ -189,6 +255,7 @@ type CreateActionItemParams struct {
 	EventTitle   sql.NullString
 	EventStartAt sql.NullInt64
 	EventEndAt   sql.NullInt64
+	ParentID     sql.NullString
 }
 
 func (q *Queries) CreateActionItem(ctx context.Context, arg CreateActionItemParams) error {
@@ -215,6 +282,7 @@ func (q *Queries) CreateActionItem(ctx context.Context, arg CreateActionItemPara
 		arg.EventTitle,
 		arg.EventStartAt,
 		arg.EventEndAt,
+		arg.ParentID,
 	)
 	return err
 }
@@ -861,9 +929,10 @@ func (q *Queries) EnqueueNotification(ctx context.Context, arg EnqueueNotificati
 	return result.RowsAffected()
 }
 
-const expireCandidates = `-- name: ExpireCandidates :execrows
+const expireCandidates = `-- name: ExpireCandidates :many
 UPDATE action_items SET status = 'dismissed', tracking = 0, auto_reason = 'candidate.expired', auto_ref = NULL, updated_at = ?1, auto_at = ?1, version = version + 1
 WHERE user_id = ?2 AND status = 'candidate' AND updated_at <= ?3
+RETURNING parent_id
 `
 
 type ExpireCandidatesParams struct {
@@ -872,17 +941,33 @@ type ExpireCandidatesParams struct {
 	UpdatedBefore int64
 }
 
-func (q *Queries) ExpireCandidates(ctx context.Context, arg ExpireCandidatesParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, expireCandidates, arg.Now, arg.UserID, arg.UpdatedBefore)
+func (q *Queries) ExpireCandidates(ctx context.Context, arg ExpireCandidatesParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, expireCandidates, arg.Now, arg.UserID, arg.UpdatedBefore)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected()
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var parent_id sql.NullString
+		if err := rows.Scan(&parent_id); err != nil {
+			return nil, err
+		}
+		items = append(items, parent_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
-const expireEvents = `-- name: ExpireEvents :execrows
+const expireEvents = `-- name: ExpireEvents :many
 UPDATE action_items SET status = 'dismissed', tracking = 0, auto_reason = 'event.passed', auto_ref = NULL, updated_at = ?1, auto_at = ?1, version = version + 1
 WHERE user_id = ?2 AND kind = 'event' AND status IN ('open','candidate') AND event_start_at IS NOT NULL AND event_start_at <= ?1
+RETURNING parent_id
 `
 
 type ExpireEventsParams struct {
@@ -890,12 +975,27 @@ type ExpireEventsParams struct {
 	UserID string
 }
 
-func (q *Queries) ExpireEvents(ctx context.Context, arg ExpireEventsParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, expireEvents, arg.Now, arg.UserID)
+func (q *Queries) ExpireEvents(ctx context.Context, arg ExpireEventsParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, expireEvents, arg.Now, arg.UserID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return result.RowsAffected()
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var parent_id sql.NullString
+		if err := rows.Scan(&parent_id); err != nil {
+			return nil, err
+		}
+		items = append(items, parent_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const extendOAuthGrant = `-- name: ExtendOAuthGrant :exec
@@ -955,7 +1055,7 @@ func (q *Queries) GetAPITokenByHash(ctx context.Context, tokenHash string) (GetA
 }
 
 const getActionItem = `-- name: GetActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE id = ?1 AND user_id = ?2
 `
 
@@ -990,8 +1090,89 @@ func (q *Queries) GetActionItem(ctx context.Context, arg GetActionItemParams) (A
 		&i.EventTitle,
 		&i.EventStartAt,
 		&i.EventEndAt,
+		&i.ParentID,
 	)
 	return i, err
+}
+
+const getActionItemBySourceKey = `-- name: GetActionItemBySourceKey :one
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = ?1 AND source_key = ?2
+`
+
+type GetActionItemBySourceKeyParams struct {
+	UserID    string
+	SourceKey sql.NullString
+}
+
+func (q *Queries) GetActionItemBySourceKey(ctx context.Context, arg GetActionItemBySourceKeyParams) (ActionItem, error) {
+	row := q.db.QueryRowContext(ctx, getActionItemBySourceKey, arg.UserID, arg.SourceKey)
+	var i ActionItem
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Content,
+		&i.Status,
+		&i.Note,
+		&i.DueAt,
+		&i.Refs,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Source,
+		&i.SourceKey,
+		&i.Tracking,
+		&i.AutoReason,
+		&i.AutoRef,
+		&i.AutoAt,
+		&i.DetectedAt,
+		&i.TrackedAt,
+		&i.Kind,
+		&i.EventTitle,
+		&i.EventStartAt,
+		&i.EventEndAt,
+		&i.ParentID,
+	)
+	return i, err
+}
+
+const getActionItemsByIDs = `-- name: GetActionItemsByIDs :many
+SELECT id, content, status FROM action_items
+WHERE user_id = ?1 AND instr(',' || CAST(?2 AS TEXT) || ',', ',' || id || ',') > 0
+`
+
+type GetActionItemsByIDsParams struct {
+	UserID string
+	Ids    string
+}
+
+type GetActionItemsByIDsRow struct {
+	ID      string
+	Content string
+	Status  string
+}
+
+func (q *Queries) GetActionItemsByIDs(ctx context.Context, arg GetActionItemsByIDsParams) ([]GetActionItemsByIDsRow, error) {
+	rows, err := q.db.QueryContext(ctx, getActionItemsByIDs, arg.UserID, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetActionItemsByIDsRow
+	for rows.Next() {
+		var i GetActionItemsByIDsRow
+		if err := rows.Scan(&i.ID, &i.Content, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getActiveSession = `-- name: GetActiveSession :one
@@ -1287,8 +1468,8 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 }
 
 const insertSourcedActionItem = `-- name: InsertSourcedActionItem :execrows
-INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at)
-VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
 ON CONFLICT (user_id, source_key) DO NOTHING
 `
 
@@ -1315,6 +1496,7 @@ type InsertSourcedActionItemParams struct {
 	EventTitle   sql.NullString
 	EventStartAt sql.NullInt64
 	EventEndAt   sql.NullInt64
+	ParentID     sql.NullString
 }
 
 func (q *Queries) InsertSourcedActionItem(ctx context.Context, arg InsertSourcedActionItemParams) (int64, error) {
@@ -1341,6 +1523,7 @@ func (q *Queries) InsertSourcedActionItem(ctx context.Context, arg InsertSourced
 		arg.EventTitle,
 		arg.EventStartAt,
 		arg.EventEndAt,
+		arg.ParentID,
 	)
 	if err != nil {
 		return 0, err
@@ -1408,7 +1591,7 @@ func (q *Queries) ListAPITokens(ctx context.Context, userID string) ([]ListAPITo
 }
 
 const listActionItems = `-- name: ListActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = ?1 AND (created_at < ?2 OR (created_at = ?3 AND id < ?4))
 ORDER BY created_at DESC, id DESC LIMIT ?5
 `
@@ -1459,6 +1642,7 @@ func (q *Queries) ListActionItems(ctx context.Context, arg ListActionItemsParams
 			&i.EventTitle,
 			&i.EventStartAt,
 			&i.EventEndAt,
+			&i.ParentID,
 		); err != nil {
 			return nil, err
 		}
@@ -1474,7 +1658,7 @@ func (q *Queries) ListActionItems(ctx context.Context, arg ListActionItemsParams
 }
 
 const listActionItemsByStatus = `-- name: ListActionItemsByStatus :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = ?1 AND status = ?2 AND (created_at < ?3 OR (created_at = ?4 AND id < ?5))
 ORDER BY created_at DESC, id DESC LIMIT ?6
 `
@@ -1527,6 +1711,7 @@ func (q *Queries) ListActionItemsByStatus(ctx context.Context, arg ListActionIte
 			&i.EventTitle,
 			&i.EventStartAt,
 			&i.EventEndAt,
+			&i.ParentID,
 		); err != nil {
 			return nil, err
 		}
@@ -1542,7 +1727,7 @@ func (q *Queries) ListActionItemsByStatus(ctx context.Context, arg ListActionIte
 }
 
 const listAutoActionItems = `-- name: ListAutoActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = ?1 AND auto_reason IS NOT NULL AND (auto_at < ?2 OR (auto_at = ?3 AND id < ?4))
 ORDER BY auto_at DESC, id DESC LIMIT ?5
 `
@@ -1593,6 +1778,7 @@ func (q *Queries) ListAutoActionItems(ctx context.Context, arg ListAutoActionIte
 			&i.EventTitle,
 			&i.EventStartAt,
 			&i.EventEndAt,
+			&i.ParentID,
 		); err != nil {
 			return nil, err
 		}
@@ -1608,7 +1794,7 @@ func (q *Queries) ListAutoActionItems(ctx context.Context, arg ListAutoActionIte
 }
 
 const listAutoActionItemsByStatus = `-- name: ListAutoActionItemsByStatus :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = ?1 AND status = ?2 AND auto_reason IS NOT NULL AND (auto_at < ?3 OR (auto_at = ?4 AND id < ?5))
 ORDER BY auto_at DESC, id DESC LIMIT ?6
 `
@@ -1661,6 +1847,7 @@ func (q *Queries) ListAutoActionItemsByStatus(ctx context.Context, arg ListAutoA
 			&i.EventTitle,
 			&i.EventStartAt,
 			&i.EventEndAt,
+			&i.ParentID,
 		); err != nil {
 			return nil, err
 		}
@@ -1694,6 +1881,135 @@ func (q *Queries) ListCandidateSweepUserIDs(ctx context.Context, now sql.NullInt
 			return nil, err
 		}
 		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listChildActionItems = `-- name: ListChildActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = ?1 AND parent_id = ?2
+ORDER BY created_at, id LIMIT ?3
+`
+
+type ListChildActionItemsParams struct {
+	UserID   string
+	ParentID sql.NullString
+	PageSize int64
+}
+
+func (q *Queries) ListChildActionItems(ctx context.Context, arg ListChildActionItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listChildActionItems, arg.UserID, arg.ParentID, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listConversationActionItems = `-- name: ListConversationActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = ?1 AND source = ?2 AND substr(source_key, 1, length(?3)) = ?3 AND created_at >= ?4
+AND (status = 'open' OR (status = 'done' AND auto_reason = 'children.done' AND auto_at >= ?5))
+ORDER BY created_at DESC, id DESC LIMIT ?6
+`
+
+type ListConversationActionItemsParams struct {
+	UserID       string
+	Source       sql.NullString
+	Prefix       interface{}
+	CreatedSince int64
+	ClosedSince  sql.NullInt64
+	PageSize     int64
+}
+
+func (q *Queries) ListConversationActionItems(ctx context.Context, arg ListConversationActionItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listConversationActionItems,
+		arg.UserID,
+		arg.Source,
+		arg.Prefix,
+		arg.CreatedSince,
+		arg.ClosedSince,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -2018,43 +2334,8 @@ func (q *Queries) ListSlackJudgedKeys(ctx context.Context, arg ListSlackJudgedKe
 	return items, nil
 }
 
-const listSlackOpenTasks = `-- name: ListSlackOpenTasks :many
-SELECT content FROM action_items
-WHERE user_id = ?1 AND source = 'slack' AND substr(source_key, 1, length(?2)) = ?2 AND status = 'open'
-ORDER BY created_at DESC, id DESC LIMIT ?3
-`
-
-type ListSlackOpenTasksParams struct {
-	UserID   string
-	Prefix   interface{}
-	PageSize int64
-}
-
-func (q *Queries) ListSlackOpenTasks(ctx context.Context, arg ListSlackOpenTasksParams) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, listSlackOpenTasks, arg.UserID, arg.Prefix, arg.PageSize)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var content string
-		if err := rows.Scan(&content); err != nil {
-			return nil, err
-		}
-		items = append(items, content)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listStaleActionItems = `-- name: ListStaleActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = ?1 AND status = 'open' AND created_at <= ?2
 ORDER BY created_at, id LIMIT ?3
 `
@@ -2097,6 +2378,147 @@ func (q *Queries) ListStaleActionItems(ctx context.Context, arg ListStaleActionI
 			&i.EventTitle,
 			&i.EventStartAt,
 			&i.EventEndAt,
+			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTopActionItems = `-- name: ListTopActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = ?1 AND parent_id IS NULL AND (created_at < ?2 OR (created_at = ?3 AND id < ?4))
+ORDER BY created_at DESC, id DESC LIMIT ?5
+`
+
+type ListTopActionItemsParams struct {
+	UserID          string
+	BeforeCreatedAt int64
+	TieCreatedAt    int64
+	BeforeID        string
+	PageSize        int64
+}
+
+func (q *Queries) ListTopActionItems(ctx context.Context, arg ListTopActionItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listTopActionItems,
+		arg.UserID,
+		arg.BeforeCreatedAt,
+		arg.TieCreatedAt,
+		arg.BeforeID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTopActionItemsByStatus = `-- name: ListTopActionItemsByStatus :many
+SELECT action_items.id, action_items.user_id, action_items.content, action_items.status, action_items.note, action_items.due_at, action_items.refs, action_items.version, action_items.created_at, action_items.updated_at, action_items.source, action_items.source_key, action_items.tracking, action_items.auto_reason, action_items.auto_ref, action_items.auto_at, action_items.detected_at, action_items.tracked_at, action_items.kind, action_items.event_title, action_items.event_start_at, action_items.event_end_at, action_items.parent_id FROM action_items
+WHERE action_items.user_id = ?1 AND action_items.status = ?2
+AND (action_items.parent_id IS NULL OR NOT EXISTS (SELECT 1 FROM action_items p WHERE p.user_id = action_items.user_id AND p.id = action_items.parent_id AND p.status = ?3))
+AND (action_items.created_at < ?4 OR (action_items.created_at = ?5 AND action_items.id < ?6))
+ORDER BY action_items.created_at DESC, action_items.id DESC LIMIT ?7
+`
+
+type ListTopActionItemsByStatusParams struct {
+	UserID          string
+	Status          string
+	ParentStatus    string
+	BeforeCreatedAt int64
+	TieCreatedAt    int64
+	BeforeID        string
+	PageSize        int64
+}
+
+func (q *Queries) ListTopActionItemsByStatus(ctx context.Context, arg ListTopActionItemsByStatusParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listTopActionItemsByStatus,
+		arg.UserID,
+		arg.Status,
+		arg.ParentStatus,
+		arg.BeforeCreatedAt,
+		arg.TieCreatedAt,
+		arg.BeforeID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
 		); err != nil {
 			return nil, err
 		}
@@ -2112,7 +2534,7 @@ func (q *Queries) ListStaleActionItems(ctx context.Context, arg ListStaleActionI
 }
 
 const listTrackedActionItems = `-- name: ListTrackedActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = ?1 AND source = ?2 AND tracking = 1 AND status IN ('open','candidate')
 ORDER BY COALESCE(tracked_at, 0), id LIMIT ?3
 `
@@ -2155,6 +2577,7 @@ func (q *Queries) ListTrackedActionItems(ctx context.Context, arg ListTrackedAct
 			&i.EventTitle,
 			&i.EventStartAt,
 			&i.EventEndAt,
+			&i.ParentID,
 		); err != nil {
 			return nil, err
 		}
@@ -2194,7 +2617,7 @@ func (q *Queries) LockAISettings(ctx context.Context, userID string) (AiSetting,
 }
 
 const lockActionItem = `-- name: LockActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE id = ?1 AND user_id = ?2
 `
 
@@ -2229,12 +2652,13 @@ func (q *Queries) LockActionItem(ctx context.Context, arg LockActionItemParams) 
 		&i.EventTitle,
 		&i.EventStartAt,
 		&i.EventEndAt,
+		&i.ParentID,
 	)
 	return i, err
 }
 
 const lockActionItemBySourceKey = `-- name: LockActionItemBySourceKey :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = ?1 AND source_key = ?2
 `
 
@@ -2269,6 +2693,7 @@ func (q *Queries) LockActionItemBySourceKey(ctx context.Context, arg LockActionI
 		&i.EventTitle,
 		&i.EventStartAt,
 		&i.EventEndAt,
+		&i.ParentID,
 	)
 	return i, err
 }
@@ -2786,8 +3211,8 @@ func (q *Queries) UpdateAISettingsStatus(ctx context.Context, arg UpdateAISettin
 }
 
 const updateActionItem = `-- name: UpdateActionItem :execrows
-UPDATE action_items SET content = ?1, status = ?2, note = ?3, due_at = ?4, refs = ?5, source = ?6, source_key = ?7, tracking = ?8, auto_reason = ?9, auto_ref = ?10, auto_at = ?11, detected_at = ?12, tracked_at = ?13, kind = ?14, event_title = ?15, event_start_at = ?16, event_end_at = ?17, version = ?18, updated_at = ?19
-WHERE id = ?20 AND user_id = ?21 AND version = ?22
+UPDATE action_items SET content = ?1, status = ?2, note = ?3, due_at = ?4, refs = ?5, source = ?6, source_key = ?7, tracking = ?8, auto_reason = ?9, auto_ref = ?10, auto_at = ?11, detected_at = ?12, tracked_at = ?13, kind = ?14, event_title = ?15, event_start_at = ?16, event_end_at = ?17, parent_id = ?18, version = ?19, updated_at = ?20
+WHERE id = ?21 AND user_id = ?22 AND version = ?23
 `
 
 type UpdateActionItemParams struct {
@@ -2808,6 +3233,7 @@ type UpdateActionItemParams struct {
 	EventTitle     sql.NullString
 	EventStartAt   sql.NullInt64
 	EventEndAt     sql.NullInt64
+	ParentID       sql.NullString
 	NewVersion     int64
 	UpdatedAt      int64
 	ID             string
@@ -2834,6 +3260,7 @@ func (q *Queries) UpdateActionItem(ctx context.Context, arg UpdateActionItemPara
 		arg.EventTitle,
 		arg.EventStartAt,
 		arg.EventEndAt,
+		arg.ParentID,
 		arg.NewVersion,
 		arg.UpdatedAt,
 		arg.ID,

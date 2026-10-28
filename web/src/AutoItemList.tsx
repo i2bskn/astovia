@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { request } from './auth';
 import { createActionItemsClient, isConflict } from './actionItems';
 import type { ActionItem } from './actionItems';
 import { autoReasonLabel, httpsURL } from './automation';
 import { fullDateTime, happenedAt } from './format';
 import { AutoIcon, ExternalIcon, UndoIcon } from './icons';
+import { taskPath } from './nesting';
 import Phrased from './Phrased';
 import RefChip from './RefChip';
 import { useNow } from './useNow';
@@ -19,7 +21,7 @@ function AutoRow({ item, busy, now, index, onReopen }: { item: ActionItem; busy:
   return <li className="task task-auto" style={{ '--i': Math.min(index, 12) } as React.CSSProperties}>
     <span className="task-mark" aria-hidden="true"><AutoIcon size={16} /></span>
     <div className="task-body">
-      <p className="task-title" id={titleID}><Phrased text={item.content} /></p>
+      <p className="task-title" id={titleID}><Link className="task-link" to={taskPath(item.id)}><Phrased text={item.content} /></Link></p>
       {auto ? <p className="auto-reason"><strong><Phrased text={autoReasonLabel(auto.reason)} /></strong><Phrased text="ので、自動で完了にしました。" /></p> : null}
       <div className="task-meta">
         {source ? <RefChip value={source} /> : null}

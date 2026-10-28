@@ -74,6 +74,10 @@ type ActionItem struct {
 	EventTitle   sql.NullString
 	EventStartAt sql.NullInt64
 	EventEndAt   sql.NullInt64
+	// ParentID is the item this one is a subtask of, or null. Items nest at
+	// most two levels: a parent has no parent, and an item with subtasks has
+	// no parent. The store keeps these rules; see lockParent.
+	ParentID sql.NullString
 }
 
 // Kinds of action items. Items are created as KindTask unless the caller
@@ -144,6 +148,7 @@ type queries interface {
 	actionItem(ctx context.Context, userID, id string) (ActionItem, error)
 	lockActionItem(ctx context.Context, userID, id string) (ActionItem, error)
 	listActionItems(ctx context.Context, userID, status string, after ActionItemCursor, limit int) ([]ActionItem, error)
+	listTopActionItems(ctx context.Context, userID, status string, after ActionItemCursor, limit int) ([]ActionItem, error)
 	updateActionItem(ctx context.Context, item ActionItem, currentVersion int64) (int64, error)
 	insertSourcedActionItem(ctx context.Context, item ActionItem) (int64, error)
 	lockActionItemBySourceKey(ctx context.Context, userID, sourceKey string) (ActionItem, error)
@@ -155,8 +160,14 @@ type queries interface {
 	touchActionItemTracked(ctx context.Context, userID, id string, version, now int64) (int64, error)
 	untrackSourceActionItems(ctx context.Context, userID, source string, now int64) error
 	listCandidateSweepUserIDs(ctx context.Context, now int64) ([]string, error)
-	expireCandidates(ctx context.Context, userID string, updatedBefore, now int64) (int64, error)
-	expireEvents(ctx context.Context, userID string, now int64) (int64, error)
+	expireCandidates(ctx context.Context, userID string, updatedBefore, now int64) ([]sql.NullString, error)
+	expireEvents(ctx context.Context, userID string, now int64) ([]sql.NullString, error)
+	listChildActionItems(ctx context.Context, userID, parentID string, limit int) ([]ActionItem, error)
+	countChildActionItems(ctx context.Context, userID, parentID string) (int64, error)
+	countChildrenByParents(ctx context.Context, userID, ids string) ([]ChildCount, error)
+	actionItemSummaries(ctx context.Context, userID, ids string) ([]ItemSummary, error)
+	listConversationActionItems(ctx context.Context, userID, source, prefix string, createdSince, closedSince int64, limit int) ([]ActionItem, error)
+	actionItemBySourceKey(ctx context.Context, userID, sourceKey string) (ActionItem, error)
 	createAPIToken(ctx context.Context, token APIToken, hash string) error
 	countAPITokens(ctx context.Context, userID string) (int64, error)
 	listAPITokens(ctx context.Context, userID string) ([]APIToken, error)
@@ -202,7 +213,6 @@ type queries interface {
 	deleteSlackConnection(ctx context.Context, userID string) error
 	listDueSlackConnections(ctx context.Context, now int64, limit int) ([]SlackConnection, error)
 	listSlackJudgedKeys(ctx context.Context, userID, prefix string, createdSince int64, limit int) ([]string, error)
-	listSlackOpenTasks(ctx context.Context, userID, prefix string, limit int) ([]string, error)
 	aiSettings(ctx context.Context, userID string) (AISettings, error)
 	lockAISettings(ctx context.Context, userID string) (AISettings, error)
 	createAISettings(ctx context.Context, a AISettings) (int64, error)
@@ -274,7 +284,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -491,8 +501,23 @@ func (s *Store) Authenticated(ctx context.Context, uid, sid string, now int64) (
 	return u, nil
 }
 
+// CreateActionItem stores a new item. An item with ParentID is created in a
+// transaction that first locks the parent and checks the nesting rules
+// (ErrInvalidParent), and synchronizes the parent after the insert.
 func (s *Store) CreateActionItem(ctx context.Context, item ActionItem) error {
-	return s.q.createActionItem(ctx, withKind(item))
+	item = withKind(item)
+	if !item.ParentID.Valid {
+		return s.q.createActionItem(ctx, item)
+	}
+	return s.transaction(ctx, func(q queries) error {
+		if _, e := lockParent(ctx, q, item.UserID, item.ParentID.String, item.ID); e != nil {
+			return e
+		}
+		if e := q.createActionItem(ctx, item); e != nil {
+			return e
+		}
+		return syncParent(ctx, q, item.UserID, item.ParentID.String, item.UpdatedAt)
+	})
 }
 
 // ActionItem returns the user's item, or ErrItemNotFound when the item does
@@ -516,10 +541,27 @@ func (s *Store) ListActionItems(ctx context.Context, userID, status string, afte
 	return s.q.listActionItems(ctx, userID, status, c, limit)
 }
 
+// ListTopActionItems is ListActionItems for the task list: it returns only
+// the items without a parent, and, for a status, also the subtasks whose
+// parent has another status (so that the parent's list does not show them).
+func (s *Store) ListTopActionItems(ctx context.Context, userID, status string, after *ActionItemCursor, limit int) ([]ActionItem, error) {
+	c := ActionItemCursor{CreatedAt: math.MaxInt64}
+	if after != nil {
+		c = *after
+	}
+	return s.q.listTopActionItems(ctx, userID, status, c, limit)
+}
+
 // UpdateActionItem locks the user's item, lets fn modify it and stores the
 // result with the version incremented. ID, UserID and CreatedAt cannot be
 // changed by fn. An error from fn is returned as is and nothing is stored.
-// The transaction explicitly locks only the target action_items row.
+//
+// The transaction locks the target row first. When fn changes ParentID, the
+// old and new parents are then locked in ID order and the nesting rules are
+// checked (ErrInvalidParent): the new parent has no parent and the item has
+// no subtasks. When the parent or the status changed, the old and new
+// parents are synchronized (completed or reopened); the item itself is not,
+// so that a parent reopened by hand stays open.
 func (s *Store) UpdateActionItem(ctx context.Context, userID, id string, fn func(*ActionItem) error) (ActionItem, error) {
 	var updated ActionItem
 	err := s.transaction(ctx, func(q queries) error {
@@ -535,12 +577,35 @@ func (s *Store) UpdateActionItem(ctx context.Context, userID, id string, fn func
 			return e
 		}
 		next.ID, next.UserID, next.CreatedAt, next.Version = item.ID, item.UserID, item.CreatedAt, item.Version+1
+		moved := next.ParentID != item.ParentID
+		if moved {
+			if e = lockParents(ctx, q, userID, item.ParentID.String, next.ParentID.String); e != nil {
+				return e
+			}
+			if next.ParentID.Valid {
+				if _, e = lockParent(ctx, q, userID, next.ParentID.String, item.ID); e != nil {
+					return e
+				}
+				children, e := q.countChildActionItems(ctx, userID, item.ID)
+				if e != nil {
+					return e
+				}
+				if children > 0 {
+					return ErrInvalidParent
+				}
+			}
+		}
 		n, e := q.updateActionItem(ctx, next, item.Version)
 		if e != nil {
 			return e
 		}
 		if n != 1 {
 			return ErrVersionConflict
+		}
+		if moved || next.Status != item.Status {
+			if e = syncParents(ctx, q, userID, next.UpdatedAt, item.ParentID.String, next.ParentID.String); e != nil {
+				return e
+			}
 		}
 		updated = next
 		return nil

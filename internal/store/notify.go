@@ -278,15 +278,45 @@ func (s *Store) CandidateSweepUserIDs(ctx context.Context, now int64) ([]string,
 }
 
 // ExpireCandidates dismisses the user's task candidates last changed at or
-// before updatedBefore, and returns how many it dismissed.
+// before updatedBefore, and returns how many it dismissed. The parents of
+// the dismissed items are synchronized in the same transaction.
 func (s *Store) ExpireCandidates(ctx context.Context, userID string, updatedBefore, now int64) (int64, error) {
-	return s.q.expireCandidates(ctx, userID, updatedBefore, now)
+	return s.expire(ctx, userID, now, func(q queries) ([]sql.NullString, error) {
+		return q.expireCandidates(ctx, userID, updatedBefore, now)
+	})
 }
 
 // ExpireEvents dismisses the user's open or candidate events that started at
-// or before now, and returns how many it dismissed.
+// or before now, and returns how many it dismissed. The parents of the
+// dismissed items are synchronized in the same transaction.
 func (s *Store) ExpireEvents(ctx context.Context, userID string, now int64) (int64, error) {
-	return s.q.expireEvents(ctx, userID, now)
+	return s.expire(ctx, userID, now, func(q queries) ([]sql.NullString, error) {
+		return q.expireEvents(ctx, userID, now)
+	})
+}
+
+// expire runs a sweep that returns the parent IDs of the items it changed,
+// then synchronizes those parents; a failure rolls back the whole sweep.
+func (s *Store) expire(ctx context.Context, userID string, now int64, sweep func(queries) ([]sql.NullString, error)) (int64, error) {
+	var n int64
+	err := s.transaction(ctx, func(q queries) error {
+		parents, e := sweep(q)
+		if e != nil {
+			return e
+		}
+		n = int64(len(parents))
+		ids := make([]string, 0, len(parents))
+		for _, p := range parents {
+			if p.Valid {
+				ids = append(ids, p.String)
+			}
+		}
+		return syncParents(ctx, q, userID, now, ids...)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // CountAutoActionItemsSince returns the number of the user's items completed

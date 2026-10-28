@@ -20,6 +20,20 @@ import (
 
 const (
 	kindMention = "mention"
+	// kindGroup is the source key kind of a group parent made by the AI
+	// for several tasks of one matter in an issue or pull request:
+	// github:group:{owner}/{repo}#{number}:{item}, where item is the ID of the
+	// task it was made for. parseSourceKey rejects it, so that tracking
+	// never takes it for a review request or assignment.
+	kindGroup = "group"
+	// relatedFetch is the number of items of an issue or pull request read
+	// to make at most relatedLimit related tasks for the AI, each group with
+	// at most subtaskLimit subtasks. groupWindow is how long a group whose
+	// subtasks were all done still takes new subtasks.
+	relatedFetch = 30
+	relatedLimit = 10
+	subtaskLimit = 5
+	groupWindow  = 72 * time.Hour
 	// ReasonMentionNoAction completes a mention the AI judged to need
 	// nothing from the user.
 	ReasonMentionNoAction = "github.mention_no_action"
@@ -287,8 +301,9 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 	if err != nil || exists {
 		return exists, err
 	}
+	var related map[string]store.RelatedTask
 	create := func(o mentionOutcome, res ai.MentionResult) (bool, error) {
-		return true, r.createMention(key, gref, issue, posts[i], o, res)
+		return true, r.createMention(key, gref, issue, posts[i], o, res, related)
 	}
 	switch {
 	case r.aiStopped:
@@ -336,6 +351,21 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 	}
 	for _, p := range posts {
 		in.Posts = append(in.Posts, p.Post)
+	}
+	group := SourceKey(kindGroup, gref) + ":"
+	tasks, err := r.s.Store.RelatedTasks(r.parent, r.conn.UserID, store.RelatedScope{
+		Source: store.SourceGitHub, Prefixes: []string{SourceKey(kindMention, gref) + ":", group}, GroupPrefixes: []string{group},
+		ClosedSince: r.s.Now().Add(-groupWindow).Unix(), FetchLimit: relatedFetch, Limit: relatedLimit, SubtaskLimit: subtaskLimit,
+	})
+	if err != nil {
+		return false, err
+	}
+	related = map[string]store.RelatedTask{}
+	in.RelatedTasks = []ai.RelatedTask{}
+	for n, t := range tasks {
+		id := "t" + strconv.Itoa(n+1)
+		related[id] = t
+		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: id, Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
 	}
 	r.aiCalls++
 	res, err := r.s.AI.JudgeMention(r.ctx, apiKey, cur.Model, in)
@@ -431,8 +461,10 @@ func (r *run) location() (*time.Location, error) {
 }
 
 // createMention creates the item of a mention unless it exists. Mention
-// items are not tracked. A candidate is not notified.
-func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p mentionPost, o mentionOutcome, res ai.MentionResult) error {
+// items are not tracked. A candidate is not notified. An open task the AI
+// judged to belong to the same matter as one of related is grouped with it
+// (see groupParent).
+func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p mentionPost, o mentionOutcome, res ai.MentionResult, related map[string]store.RelatedTask) error {
 	name := fmt.Sprintf("%s/%s#%d", gref.Owner, gref.Repo, gref.Number)
 	title := cleanTitle(issue.Title)
 	if title == "" {
@@ -470,16 +502,99 @@ func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p m
 		item.Content = "メンションを確認: " + title
 	}
 	item.Content = truncate(item.Content, 500)
+	// The group parent shares the reference, with a link to the issue or
+	// pull request itself.
+	groupRefs, err := json.Marshal([]ref{{Service: store.SourceGitHub, Account: r.conn.Login, ConversationID: name, URL: githubURL(issue.HTMLURL).String}})
+	if err != nil {
+		return err
+	}
 	return r.s.Store.GitHubSync(r.parent, r.conn.UserID, r.conn.Generation, func(tx *store.GitHubTx) error {
 		if _, found, e := tx.LockItemBySourceKey(key); e != nil || found {
 			return e
 		}
+		madeGroup := false
+		if o == mentionAction && item.Status == "open" {
+			parent, made, e := r.groupParent(tx, gref, res, related, item.ID, string(groupRefs), now)
+			if e != nil {
+				return e
+			}
+			item.ParentID, madeGroup = parent, made
+		}
 		created, e := tx.CreateItem(item)
+		if errors.Is(e, store.ErrInvalidParent) && !madeGroup {
+			// The group changed; the item is created on its own.
+			log.Printf("github sync: user=%s: mention grouping skipped: invalid parent", r.conn.UserID)
+			item.ParentID = sql.NullString{}
+			created, e = tx.CreateItem(item)
+		}
 		if e != nil || !created || item.Status != "open" || tx.Conn.ImmediateNotify != 1 {
 			return e
 		}
 		return tx.Enqueue(mentionNotification(name, item, now))
 	})
+}
+
+// groupParent returns the parent for a new open task that the AI judged to
+// belong to the same matter as a related task, and whether a group parent
+// was made for it. A related group takes the task while it is open, or
+// while it was completed by its subtasks within groupWindow. A related plain
+// task still open, without a parent and without subtasks, is put under a new
+// group parent named after the topic, and the new task joins it. Otherwise
+// the task stays on its own. Nothing is written before the checks pass, and
+// any error after the group parent was made rolls back the transaction.
+func (r *run) groupParent(tx *store.GitHubTx, gref github.Ref, res ai.MentionResult, related map[string]store.RelatedTask, itemID, refs string, now int64) (sql.NullString, bool, error) {
+	target, ok := related[res.SameAs]
+	if res.SameAs == "" || !ok {
+		return sql.NullString{}, false, nil
+	}
+	if target.Group {
+		p, found, e := tx.LockItem(target.ID)
+		if e != nil {
+			return sql.NullString{}, false, e
+		}
+		closedRecently := p.Status == "done" && p.AutoReason.String == store.ReasonChildrenDone && p.AutoAt.Valid && p.AutoAt.Int64 >= now-int64(groupWindow/time.Second)
+		if !found || p.ParentID.Valid || (p.Status != "open" && !closedRecently) {
+			log.Printf("github sync: user=%s: mention grouping skipped: group changed", r.conn.UserID)
+			return sql.NullString{}, false, nil
+		}
+		return nullString(p.ID), false, nil
+	}
+	if res.Topic == "" {
+		return sql.NullString{}, false, nil
+	}
+	t, found, e := tx.LockItem(target.ID)
+	if e != nil {
+		return sql.NullString{}, false, e
+	}
+	if !found || t.Status != "open" || t.ParentID.Valid {
+		log.Printf("github sync: user=%s: mention grouping skipped: task changed", r.conn.UserID)
+		return sql.NullString{}, false, nil
+	}
+	n, e := tx.ChildCount(t.ID)
+	if e != nil {
+		return sql.NullString{}, false, e
+	}
+	if n > 0 {
+		log.Printf("github sync: user=%s: mention grouping skipped: task changed", r.conn.UserID)
+		return sql.NullString{}, false, nil
+	}
+	id, e := auth.Random()
+	if e != nil {
+		return sql.NullString{}, false, e
+	}
+	group := store.ActionItem{ID: id, Content: truncate(res.Topic, 500), Status: "open", Refs: refs, Version: 1, CreatedAt: now, UpdatedAt: now,
+		Source: nullString(store.SourceGitHub), SourceKey: nullString(SourceKey(kindGroup, gref) + ":" + itemID), DetectedAt: nullInt(now), Kind: store.KindTask}
+	created, e := tx.CreateGroup(group)
+	if e != nil {
+		return sql.NullString{}, false, e
+	}
+	if !created {
+		return sql.NullString{}, false, errors.New("githubsync: group parent key already exists")
+	}
+	if e = tx.SetParent(t.ID, group.ID, now); e != nil {
+		return sql.NullString{}, false, e
+	}
+	return nullString(group.ID), true, nil
 }
 
 // setEvent makes item an event item when the AI found an event. An event
@@ -508,7 +623,7 @@ func mentionNotification(name string, item store.ActionItem, now int64) store.No
 	}
 	return store.Notification{ID: id, Kind: store.NotificationDetected, ActionItemID: nullString(item.ID),
 		DedupeKey: "detected:" + item.ID + ":" + strconv.FormatInt(item.Version, 10),
-		Title:     "メンション: " + name, Body: item.Content, URL: "/", ScheduledAt: now, CreatedAt: now}
+		Title:     "メンション: " + name, Body: item.Content, URL: "/tasks/" + item.ID, ScheduledAt: now, CreatedAt: now}
 }
 
 // mentions reports whether body mentions @login (ASCII case-insensitive).

@@ -33,6 +33,23 @@ export interface ActionItemEvent {
   end_at: string | null;
 }
 
+// ActionItemParent is the parent shown with a subtask.
+export interface ActionItemParent {
+  id: string;
+  content: string;
+  status: ActionItemStatus;
+}
+
+// ActionItemChildren counts the subtasks of a parent: total leaves out the
+// dismissed ones, remaining counts the open and candidate ones. next_due_at
+// is the earliest due date of the open and candidate ones, or null.
+export interface ActionItemChildren {
+  total: number;
+  done: number;
+  remaining: number;
+  next_due_at: string | null;
+}
+
 export interface ActionItem {
   id: string;
   content: string;
@@ -49,6 +66,11 @@ export interface ActionItem {
   kind: ActionItemKind;
   // event is set exactly when kind is event.
   event: ActionItemEvent | null;
+  // parent_id is the item this one is a subtask of; parent shows it.
+  // Items nest at most two levels. children is null without subtasks.
+  parent_id: string | null;
+  parent: ActionItemParent | null;
+  children: ActionItemChildren | null;
 }
 
 export interface ActionItemPage {
@@ -62,6 +84,8 @@ export interface ActionItemPatch {
   note?: string | null;
   due_at?: string | null;
   refs?: ActionItemRef[];
+  // null removes the parent.
+  parent_id?: string | null;
   version?: number;
 }
 
@@ -93,6 +117,29 @@ function isEvent(value: unknown): value is ActionItemEvent {
     (value.end_at === null || typeof value.end_at === 'string');
 }
 
+function isCount(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+function isParent(value: unknown): boolean {
+  return value === null || (isRecord(value) && typeof value.id === 'string' && value.id !== '' &&
+    typeof value.content === 'string' && typeof value.status === 'string' && statuses.includes(value.status));
+}
+
+function isChildren(value: unknown): boolean {
+  return value === null || (isRecord(value) && isCount(value.total) && isCount(value.done) && isCount(value.remaining) &&
+    (value.next_due_at === null || typeof value.next_due_at === 'string'));
+}
+
+// isNesting checks parent_id, parent and children together: parent is shown
+// only for an item with parent_id, and for that very item.
+function isNesting(value: Record<string, unknown>): boolean {
+  if (!isParent(value.parent) || !isChildren(value.children)) return false;
+  if (value.parent_id === null) return value.parent === null;
+  return typeof value.parent_id === 'string' && value.parent_id !== '' && value.parent_id !== value.id &&
+    (value.parent === null || (isRecord(value.parent) && value.parent.id === value.parent_id));
+}
+
 function isKindAndEvent(value: Record<string, unknown>): boolean {
   if (value.kind === 'task') return value.event === null;
   return value.kind === 'event' && isEvent(value.event);
@@ -111,7 +158,8 @@ function isActionItem(value: unknown): value is ActionItem {
     typeof value.updated_at === 'string' &&
     (value.source === undefined || value.source === null || typeof value.source === 'string') &&
     isAuto(value.auto) &&
-    isKindAndEvent(value);
+    isKindAndEvent(value) &&
+    isNesting(value);
 }
 
 function readItem(data: unknown): ActionItem {
@@ -166,6 +214,16 @@ export function isConflict(error: unknown): boolean {
   return error instanceof Error && 'status' in error && error.status === 409;
 }
 
+// isNotFound reports whether a request failed with 404, the same way.
+export function isNotFound(error: unknown): boolean {
+  return error instanceof Error && 'status' in error && error.status === 404;
+}
+
+// isInvalid reports whether a request failed with 400, the same way.
+export function isInvalid(error: unknown): boolean {
+  return error instanceof Error && 'status' in error && error.status === 400;
+}
+
 function json(method: 'POST' | 'PATCH', body: object): RequestInit {
   return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
 }
@@ -173,17 +231,31 @@ function json(method: 'POST' | 'PATCH', body: object): RequestInit {
 export function createActionItemsClient(request: RequestFunction) {
   return {
     // auto lists only items completed automatically, newest completion
-    // first. Its cursors cannot be used without auto and vice versa.
-    async listActionItems({ status, cursor, auto }: { status?: ActionItemStatus; cursor?: string; auto?: boolean } = {}): Promise<ActionItemPage> {
+    // first. Its cursors cannot be used without auto and vice versa. view
+    // top lists the items without a parent, and the subtasks whose parent
+    // has another status; it cannot be combined with auto.
+    async listActionItems({ status, cursor, auto, view }: { status?: ActionItemStatus; cursor?: string; auto?: boolean; view?: 'top' } = {}): Promise<ActionItemPage> {
       const params = new URLSearchParams();
       if (status) params.set('status', status);
       if (auto) params.set('auto', 'true');
+      if (view) params.set('view', view);
       if (cursor) params.set('cursor', cursor);
       const query = params.toString();
       return readPage(await request<unknown>(`/api/v1/action-items${query ? `?${query}` : ''}`));
     },
-    async createActionItem({ content, note }: { content: string; note?: string | null }): Promise<ActionItem> {
-      return readItem(await request<unknown>('/api/v1/action-items', json('POST', { content, note: note ?? null })));
+    async getActionItem(id: string): Promise<ActionItem> {
+      return readItem(await request<unknown>(`/api/v1/action-items/${encodeURIComponent(id)}`));
+    },
+    // listChildren lists the subtasks of a parent, oldest first, in one
+    // page (at most 100).
+    async listChildren(parentID: string): Promise<ActionItemPage> {
+      return readPage(await request<unknown>(`/api/v1/action-items?${new URLSearchParams({ parent_id: parentID }).toString()}`));
+    },
+    // parent_id makes the new item a subtask.
+    async createActionItem({ content, note, parent_id }: { content: string; note?: string | null; parent_id?: string }): Promise<ActionItem> {
+      const body: Record<string, unknown> = { content, note: note ?? null };
+      if (parent_id) body.parent_id = parent_id;
+      return readItem(await request<unknown>('/api/v1/action-items', json('POST', body)));
     },
     async updateActionItem(id: string, patch: ActionItemPatch): Promise<ActionItem> {
       return readItem(await request<unknown>(`/api/v1/action-items/${encodeURIComponent(id)}`, json('PATCH', patch)));

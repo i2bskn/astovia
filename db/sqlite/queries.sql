@@ -28,43 +28,53 @@ SELECT hash, session_id, consumed_at, created_at FROM refresh_tokens WHERE hash 
 -- name: ConsumeRefresh :execrows
 UPDATE refresh_tokens SET consumed_at = ? WHERE hash = ? AND consumed_at IS NULL;
 -- name: CreateActionItem :exec
-INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at)
-VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(content),sqlc.arg(status),sqlc.arg(note),sqlc.arg(due_at),sqlc.arg(refs),sqlc.arg(version),sqlc.arg(created_at),sqlc.arg(updated_at),sqlc.arg(source),sqlc.arg(source_key),sqlc.arg(tracking),sqlc.arg(auto_reason),sqlc.arg(auto_ref),sqlc.arg(auto_at),sqlc.arg(detected_at),sqlc.arg(tracked_at),sqlc.arg(kind),sqlc.arg(event_title),sqlc.arg(event_start_at),sqlc.arg(event_end_at));
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(content),sqlc.arg(status),sqlc.arg(note),sqlc.arg(due_at),sqlc.arg(refs),sqlc.arg(version),sqlc.arg(created_at),sqlc.arg(updated_at),sqlc.arg(source),sqlc.arg(source_key),sqlc.arg(tracking),sqlc.arg(auto_reason),sqlc.arg(auto_ref),sqlc.arg(auto_at),sqlc.arg(detected_at),sqlc.arg(tracked_at),sqlc.arg(kind),sqlc.arg(event_title),sqlc.arg(event_start_at),sqlc.arg(event_end_at),sqlc.arg(parent_id));
 -- name: InsertSourcedActionItem :execrows
-INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at)
-VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(content),sqlc.arg(status),sqlc.arg(note),sqlc.arg(due_at),sqlc.arg(refs),sqlc.arg(version),sqlc.arg(created_at),sqlc.arg(updated_at),sqlc.arg(source),sqlc.arg(source_key),sqlc.arg(tracking),sqlc.arg(auto_reason),sqlc.arg(auto_ref),sqlc.arg(auto_at),sqlc.arg(detected_at),sqlc.arg(tracked_at),sqlc.arg(kind),sqlc.arg(event_title),sqlc.arg(event_start_at),sqlc.arg(event_end_at))
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(content),sqlc.arg(status),sqlc.arg(note),sqlc.arg(due_at),sqlc.arg(refs),sqlc.arg(version),sqlc.arg(created_at),sqlc.arg(updated_at),sqlc.arg(source),sqlc.arg(source_key),sqlc.arg(tracking),sqlc.arg(auto_reason),sqlc.arg(auto_ref),sqlc.arg(auto_at),sqlc.arg(detected_at),sqlc.arg(tracked_at),sqlc.arg(kind),sqlc.arg(event_title),sqlc.arg(event_start_at),sqlc.arg(event_end_at),sqlc.arg(parent_id))
 ON CONFLICT (user_id, source_key) DO NOTHING;
 -- name: GetActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
 -- name: LockActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
 -- name: LockActionItemBySourceKey :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND source_key = sqlc.arg(source_key);
 -- name: ListActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND (created_at < sqlc.arg(before_created_at) OR (created_at = sqlc.arg(tie_created_at) AND id < sqlc.arg(before_id)))
 ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
 -- name: ListActionItemsByStatus :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND status = sqlc.arg(status) AND (created_at < sqlc.arg(before_created_at) OR (created_at = sqlc.arg(tie_created_at) AND id < sqlc.arg(before_id)))
 ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListTopActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND parent_id IS NULL AND (created_at < sqlc.arg(before_created_at) OR (created_at = sqlc.arg(tie_created_at) AND id < sqlc.arg(before_id)))
+ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListTopActionItemsByStatus :many
+SELECT action_items.id, action_items.user_id, action_items.content, action_items.status, action_items.note, action_items.due_at, action_items.refs, action_items.version, action_items.created_at, action_items.updated_at, action_items.source, action_items.source_key, action_items.tracking, action_items.auto_reason, action_items.auto_ref, action_items.auto_at, action_items.detected_at, action_items.tracked_at, action_items.kind, action_items.event_title, action_items.event_start_at, action_items.event_end_at, action_items.parent_id FROM action_items
+WHERE action_items.user_id = sqlc.arg(user_id) AND action_items.status = sqlc.arg(status)
+AND (action_items.parent_id IS NULL OR NOT EXISTS (SELECT 1 FROM action_items p WHERE p.user_id = action_items.user_id AND p.id = action_items.parent_id AND p.status = sqlc.arg(parent_status)))
+AND (action_items.created_at < sqlc.arg(before_created_at) OR (action_items.created_at = sqlc.arg(tie_created_at) AND action_items.id < sqlc.arg(before_id)))
+ORDER BY action_items.created_at DESC, action_items.id DESC LIMIT sqlc.arg(page_size);
 -- name: ListAutoActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND auto_reason IS NOT NULL AND (auto_at < sqlc.arg(before_auto_at) OR (auto_at = sqlc.arg(tie_auto_at) AND id < sqlc.arg(before_id)))
 ORDER BY auto_at DESC, id DESC LIMIT sqlc.arg(page_size);
 -- name: ListAutoActionItemsByStatus :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND status = sqlc.arg(status) AND auto_reason IS NOT NULL AND (auto_at < sqlc.arg(before_auto_at) OR (auto_at = sqlc.arg(tie_auto_at) AND id < sqlc.arg(before_id)))
 ORDER BY auto_at DESC, id DESC LIMIT sqlc.arg(page_size);
 -- name: ListTrackedActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND tracking = 1 AND status IN ('open','candidate')
 ORDER BY COALESCE(tracked_at, 0), id LIMIT sqlc.arg(page_size);
 -- name: ListStaleActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND status = 'open' AND created_at <= sqlc.arg(created_before)
 ORDER BY created_at, id LIMIT sqlc.arg(page_size);
 -- name: CountActionItemsByStatus :one
@@ -72,7 +82,7 @@ SELECT COUNT(*) FROM action_items WHERE user_id = sqlc.arg(user_id) AND status =
 -- name: CountAutoActionItemsSince :one
 SELECT COUNT(*) FROM action_items WHERE user_id = sqlc.arg(user_id) AND status = 'done' AND auto_reason IS NOT NULL AND auto_at > sqlc.arg(since);
 -- name: UpdateActionItem :execrows
-UPDATE action_items SET content = sqlc.arg(content), status = sqlc.arg(status), note = sqlc.arg(note), due_at = sqlc.arg(due_at), refs = sqlc.arg(refs), source = sqlc.arg(source), source_key = sqlc.arg(source_key), tracking = sqlc.arg(tracking), auto_reason = sqlc.arg(auto_reason), auto_ref = sqlc.arg(auto_ref), auto_at = sqlc.arg(auto_at), detected_at = sqlc.arg(detected_at), tracked_at = sqlc.arg(tracked_at), kind = sqlc.arg(kind), event_title = sqlc.arg(event_title), event_start_at = sqlc.arg(event_start_at), event_end_at = sqlc.arg(event_end_at), version = sqlc.arg(new_version), updated_at = sqlc.arg(updated_at)
+UPDATE action_items SET content = sqlc.arg(content), status = sqlc.arg(status), note = sqlc.arg(note), due_at = sqlc.arg(due_at), refs = sqlc.arg(refs), source = sqlc.arg(source), source_key = sqlc.arg(source_key), tracking = sqlc.arg(tracking), auto_reason = sqlc.arg(auto_reason), auto_ref = sqlc.arg(auto_ref), auto_at = sqlc.arg(auto_at), detected_at = sqlc.arg(detected_at), tracked_at = sqlc.arg(tracked_at), kind = sqlc.arg(kind), event_title = sqlc.arg(event_title), event_start_at = sqlc.arg(event_start_at), event_end_at = sqlc.arg(event_end_at), parent_id = sqlc.arg(parent_id), version = sqlc.arg(new_version), updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND version = sqlc.arg(current_version);
 -- name: TouchActionItemTracked :execrows
 UPDATE action_items SET tracked_at = sqlc.arg(tracked_at)
@@ -84,12 +94,14 @@ WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND (tracking = 
 SELECT DISTINCT user_id FROM action_items
 WHERE (status = 'candidate' OR (kind = 'event' AND status IN ('open','candidate') AND event_start_at IS NOT NULL AND event_start_at <= sqlc.arg(now)))
 AND user_id IN (SELECT id FROM users WHERE disabled = 0) ORDER BY user_id;
--- name: ExpireCandidates :execrows
+-- name: ExpireCandidates :many
 UPDATE action_items SET status = 'dismissed', tracking = 0, auto_reason = 'candidate.expired', auto_ref = NULL, updated_at = sqlc.arg(now), auto_at = sqlc.arg(now), version = version + 1
-WHERE user_id = sqlc.arg(user_id) AND status = 'candidate' AND updated_at <= sqlc.arg(updated_before);
--- name: ExpireEvents :execrows
+WHERE user_id = sqlc.arg(user_id) AND status = 'candidate' AND updated_at <= sqlc.arg(updated_before)
+RETURNING parent_id;
+-- name: ExpireEvents :many
 UPDATE action_items SET status = 'dismissed', tracking = 0, auto_reason = 'event.passed', auto_ref = NULL, updated_at = sqlc.arg(now), auto_at = sqlc.arg(now), version = version + 1
-WHERE user_id = sqlc.arg(user_id) AND kind = 'event' AND status IN ('open','candidate') AND event_start_at IS NOT NULL AND event_start_at <= sqlc.arg(now);
+WHERE user_id = sqlc.arg(user_id) AND kind = 'event' AND status IN ('open','candidate') AND event_start_at IS NOT NULL AND event_start_at <= sqlc.arg(now)
+RETURNING parent_id;
 -- name: CreateAPIToken :exec
 INSERT INTO api_tokens (id,user_id,name,token_hash,created_at,last_used_at)
 VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(name),sqlc.arg(token_hash),sqlc.arg(created_at),NULL);
@@ -215,10 +227,27 @@ ORDER BY next_poll_at, user_id LIMIT sqlc.arg(page_size);
 SELECT source_key FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND source = 'slack' AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix) AND created_at >= sqlc.arg(created_since)
 ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
--- name: ListSlackOpenTasks :many
-SELECT content FROM action_items
-WHERE user_id = sqlc.arg(user_id) AND source = 'slack' AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix) AND status = 'open'
+-- name: ListChildActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND parent_id = sqlc.arg(parent_id)
+ORDER BY created_at, id LIMIT sqlc.arg(page_size);
+-- name: CountChildActionItems :one
+SELECT COUNT(*) FROM action_items WHERE user_id = sqlc.arg(user_id) AND parent_id = sqlc.arg(parent_id);
+-- name: CountChildrenByParents :many
+SELECT parent_id, CAST(COUNT(*) AS INTEGER) AS children, CAST(COALESCE(SUM(CASE WHEN status <> 'dismissed' THEN 1 ELSE 0 END), 0) AS INTEGER) AS total, CAST(COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS INTEGER) AS done, CAST(COALESCE(SUM(CASE WHEN status IN ('open','candidate') THEN 1 ELSE 0 END), 0) AS INTEGER) AS remaining, CAST(COALESCE(MIN(CASE WHEN status IN ('open','candidate') THEN due_at END), -1) AS INTEGER) AS next_due_at FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND instr(',' || CAST(sqlc.arg(ids) AS TEXT) || ',', ',' || parent_id || ',') > 0
+GROUP BY parent_id;
+-- name: GetActionItemsByIDs :many
+SELECT id, content, status FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND instr(',' || CAST(sqlc.arg(ids) AS TEXT) || ',', ',' || id || ',') > 0;
+-- name: ListConversationActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix) AND created_at >= sqlc.arg(created_since)
+AND (status = 'open' OR (status = 'done' AND auto_reason = 'children.done' AND auto_at >= sqlc.arg(closed_since)))
 ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: GetActionItemBySourceKey :one
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source_key = sqlc.arg(source_key);
 -- name: GetAISettings :one
 SELECT user_id, generation, provider, model, api_key_sealed, key_last4, status, last_error, activated_at, created_at, updated_at FROM ai_settings
 WHERE user_id = sqlc.arg(user_id);

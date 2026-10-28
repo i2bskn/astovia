@@ -37,7 +37,7 @@ export const candidates = {
   async refresh(): Promise<void> {
     const expected = ++sequence;
     try {
-      const page = await client.listActionItems({ status: 'candidate' });
+      const page = await client.listActionItems({ status: 'candidate', view: 'top' });
       if (expected === sequence) publish({ items: page.items, more: page.next_cursor !== null });
     } catch {
       // The next refresh tries again.

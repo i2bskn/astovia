@@ -511,7 +511,7 @@ func detectedNotification(kind, name, title string, item store.ActionItem, again
 	}
 	return store.Notification{ID: id, Kind: store.NotificationDetected, ActionItemID: nullString(item.ID),
 		DedupeKey: "detected:" + item.ID + ":" + strconv.FormatInt(item.Version, 10),
-		Title:     label + ": " + name, Body: title, URL: "/", ScheduledAt: now, CreatedAt: now}
+		Title:     label + ": " + name, Body: title, URL: "/tasks/" + item.ID, ScheduledAt: now, CreatedAt: now}
 }
 
 // decision is the outcome of checking one tracked item: an automatic
