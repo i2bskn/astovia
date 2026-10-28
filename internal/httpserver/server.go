@@ -12,6 +12,7 @@ import (
 	"github.com/i2bskn/astovia/internal/notify"
 	"github.com/i2bskn/astovia/internal/oauth"
 	"github.com/i2bskn/astovia/internal/secretbox"
+	"github.com/i2bskn/astovia/internal/slack"
 	"github.com/i2bskn/astovia/internal/store"
 	"io"
 	"io/fs"
@@ -40,9 +41,10 @@ type Server struct {
 	cimdLimiter     *loginLimiter
 	// fetchCIMD fetches a Client ID Metadata Document. Tests replace it.
 	fetchCIMD func(ctx context.Context, clientID string) (oauth.Document, error)
-	// github verifies GitHub tokens and ai API keys. Tests replace their
-	// base URLs.
+	// github verifies GitHub tokens, slack Slack tokens and ai API keys.
+	// Tests replace their base URLs.
 	github *github.Client
+	slack  *slack.Client
 	ai     *ai.Client
 	// box seals stored credentials, and vapid manages the Web Push key
 	// pair; both are the ones the background loops use as well.
@@ -90,7 +92,7 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
-		github: github.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, pushTestLimiter: newKeyLimiter(3, time.Minute)}
+		github: github.New(now), slack: slack.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, pushTestLimiter: newKeyLimiter(3, time.Minute)}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -132,6 +134,12 @@ func (s *Server) handler() http.Handler {
 		http.MethodPut:    s.requireUser(requireJSON(http.HandlerFunc(s.handlePutGitHub))),
 		http.MethodPatch:  s.requireUser(requireJSON(http.HandlerFunc(s.handlePatchGitHub))),
 		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteGitHub)),
+	}))
+	mux.Handle("/api/v1/integrations/slack", allowMethods(map[string]http.Handler{
+		http.MethodGet:    s.requireUser(http.HandlerFunc(s.handleGetSlack)),
+		http.MethodPut:    s.requireUser(requireJSON(http.HandlerFunc(s.handlePutSlack))),
+		http.MethodPatch:  s.requireUser(requireJSON(http.HandlerFunc(s.handlePatchSlack))),
+		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteSlack)),
 	}))
 	mux.Handle("/api/v1/ai", allowMethods(map[string]http.Handler{
 		http.MethodGet:    s.requireUser(http.HandlerFunc(s.handleGetAI)),

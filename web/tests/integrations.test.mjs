@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { autoReasonLabel, githubErrorMessage, githubStatusMessage, httpsURL } from '../.test-build/automation.js';
+import { autoReasonLabel, githubErrorMessage, githubStatusMessage, httpsURL, slackErrorMessage, slackStatusMessage } from '../.test-build/automation.js';
 import { createIntegrationsClient } from '../.test-build/integrations.js';
+import { SLACK_APP_MANIFEST } from '../.test-build/slackManifest.js';
 import { base64URLToBytes, bytesToBase64URL, deviceLabel, isIOS, pushSupport, sameKey } from '../.test-build/notifications.js';
 import { views, viewURL } from '../.test-build/view.js';
 
@@ -13,7 +15,9 @@ test('automatic completion reasons have Japanese labels', () => {
   assert.equal(autoReasonLabel('github.issue_closed'), 'Issue がクローズされた');
   assert.equal(autoReasonLabel('github.unassigned'), '割り当てが外れた');
   assert.equal(autoReasonLabel('github.mention_no_action'), '対応は不要と判断した');
-  assert.equal(autoReasonLabel('slack.thread_resolved'), 'slack.thread_resolved');
+  assert.equal(autoReasonLabel('slack.no_action'), '対応不要と判定');
+  assert.equal(autoReasonLabel('slack.reply_resolved'), '返信で対応済み');
+  assert.equal(autoReasonLabel('chatwork.unknown'), 'chatwork.unknown');
   assert.equal(autoReasonLabel('toString'), 'toString');
 });
 
@@ -34,6 +38,30 @@ test('GitHub messages', () => {
   assert.match(githubStatusMessage('error', 'token_invalid'), /トークンが無効/);
   assert.match(githubStatusMessage('error', 'token_undecryptable'), /登録し直して/);
   assert.match(githubStatusMessage('error', null), /停止/);
+});
+
+test('Slack messages', () => {
+  assert.match(slackErrorMessage('slack_token_invalid'), /User OAuth Token（xoxp-）を貼ってください/);
+  assert.match(slackErrorMessage('slack_scopes_missing'), /権限が足りません/);
+  assert.equal(slackErrorMessage('slack_unavailable'), 'Slack に接続できませんでした。時間をおいて試してください。');
+  assert.equal(slackErrorMessage('invalid_request'), 'トークンの形式が正しくありません。');
+  assert.match(slackErrorMessage(null), /接続できませんでした/);
+  assert.equal(slackStatusMessage('active', null), '正常');
+  assert.match(slackStatusMessage('error', 'token_invalid'), /トークンが無効/);
+  assert.match(slackStatusMessage('error', 'token_undecryptable'), /登録し直して/);
+  assert.match(slackStatusMessage('error', 'scopes_missing'), /権限が足りません/);
+  assert.match(slackStatusMessage('active', 'rate_limited'), /Slack の利用上限/);
+  assert.match(slackStatusMessage('active', 'unavailable'), /Slack に接続できない/);
+  assert.match(slackStatusMessage('error', null), /停止/);
+});
+
+test('the Slack app manifest on screen is the one in deploy', async () => {
+  const file = await readFile(new URL('../../deploy/slack-app-manifest.yaml', import.meta.url), 'utf8');
+  assert.equal(SLACK_APP_MANIFEST, file);
+  for (const scope of ['search:read', 'users:read', 'channels:read', 'groups:read', 'im:read', 'mpim:read', 'channels:history', 'groups:history', 'im:history', 'mpim:history']) {
+    assert.match(file, new RegExp(`^      - ${scope}$`, 'm'), scope);
+  }
+  assert.match(file, /token_rotation_enabled: false/);
 });
 
 test('each screen has a path at the root', () => {
@@ -112,6 +140,29 @@ test('GitHub integration client', async () => {
   assert.equal(f.calls[0].init.method, 'DELETE');
   for (const bad of [null, {}, { connected: true }, { ...connection, scopes: 'repo' }, { ...connection, last_error: 1 }]) {
     await assert.rejects(fake(bad).client.getGitHub(), /Unexpected GitHub integration response/);
+  }
+});
+
+const slackConnection = { connected: true, team_name: 'Acme', team_url: 'https://acme.slack.com/', user_name: 'alice', token_last4: 'abcd', scopes: ['search:read'], immediate_notify: true, detect_mentions: true, detect_dms: true, detect_group_dms: false, status: 'active', last_error: null, last_synced_at: null, created_at: '2026-10-24T10:00:00Z' };
+
+test('Slack integration client', async () => {
+  let f = fake({ connected: false });
+  assert.deepEqual(await f.client.getSlack(), { connected: false });
+  assert.equal(f.calls[0].path, '/api/v1/integrations/slack');
+  f = fake(slackConnection);
+  assert.deepEqual(await f.client.connectSlack('xoxp-1'), slackConnection);
+  assert.equal(f.calls[0].init.method, 'PUT');
+  assert.deepEqual(JSON.parse(f.calls[0].init.body), { token: 'xoxp-1' });
+  await f.client.connectSlack('xoxp-2', { detect_group_dms: true });
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { detect_group_dms: true, token: 'xoxp-2' });
+  await f.client.updateSlackSettings({ detect_dms: false });
+  assert.equal(f.calls[2].init.method, 'PATCH');
+  assert.deepEqual(JSON.parse(f.calls[2].init.body), { detect_dms: false });
+  f = fake(undefined);
+  await f.client.disconnectSlack();
+  assert.equal(f.calls[0].init.method, 'DELETE');
+  for (const bad of [null, {}, { connected: true }, { ...slackConnection, detect_dms: 'yes' }, { ...slackConnection, team_url: null }]) {
+    await assert.rejects(fake(bad).client.getSlack(), /Unexpected Slack integration response/);
   }
 });
 

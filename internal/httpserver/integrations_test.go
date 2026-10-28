@@ -20,6 +20,7 @@ import (
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
 	"github.com/i2bskn/astovia/internal/githubsync"
+	"github.com/i2bskn/astovia/internal/slacksync"
 	"github.com/i2bskn/astovia/internal/store"
 	"github.com/i2bskn/astovia/internal/testutil"
 )
@@ -74,6 +75,7 @@ type integrationAPI struct {
 	handler http.Handler
 	now     *time.Time
 	gh      *fakeUser
+	sl      *fakeSlackAuth
 	alice   string
 	bob     string
 }
@@ -101,7 +103,11 @@ func newIntegrationAPI(t *testing.T, driver string) *integrationAPI {
 	t.Cleanup(srv.Close)
 	server := newServer(config.Config{PublicURL: "https://astovia.test", Secure: true, Secret: make([]byte, 32)}, a, fstest.MapFS{"sw.js": {Data: []byte("self")}, "manifest.webmanifest": {Data: []byte("{}")}, "icon-192.png": {Data: []byte("png")}, "index.html": {Data: []byte("<html>")}})
 	server.github.BaseURL = srv.URL
-	api := &integrationAPI{t: t, store: s, server: server, handler: server.handler(), now: &now, gh: gh}
+	sl := &fakeSlackAuth{team: "T1", user: "U1", scopes: strings.Join(slacksync.RequiredScopes, ",")}
+	slackSrv := httptest.NewServer(sl)
+	t.Cleanup(slackSrv.Close)
+	server.slack.BaseURL = slackSrv.URL
+	api := &integrationAPI{t: t, store: s, server: server, handler: server.handler(), now: &now, gh: gh, sl: sl}
 	tok := &tokenAPI{t: t, handler: api.handler}
 	api.alice = tok.login("alice")
 	api.bob = tok.login("bob")
@@ -260,6 +266,189 @@ func testGitHubIntegrationAPI(t *testing.T, driver string) {
 	tok := (&tokenAPI{t: t, handler: api.handler}).issue(api.alice, "x").Token
 	for _, r := range [][2]string{{"GET", path}, {"PUT", path}, {"PATCH", path}, {"DELETE", path}, {"GET", "/api/v1/push/public-key"}, {"GET", "/api/v1/push/subscriptions"}, {"POST", "/api/v1/push/subscriptions"}, {"DELETE", "/api/v1/push/subscriptions/abc"}, {"POST", "/api/v1/push/test"}, {"GET", "/api/v1/notification-settings"}, {"PUT", "/api/v1/notification-settings"}} {
 		expectStatus(t, api.do(r[0], r[1], tok, `{}`), 401, "unauthorized")
+	}
+}
+
+// fakeSlackAuth answers Slack's auth.test. status other than 200 is
+// returned as is; code makes the answer "ok": false.
+type fakeSlackAuth struct {
+	mu       sync.Mutex
+	status   int
+	code     string
+	scopes   string
+	team     string
+	user     string
+	url      string
+	requests []*http.Request
+}
+
+func (f *fakeSlackAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, r)
+	if f.status != 0 && f.status != 200 {
+		w.WriteHeader(f.status)
+		return
+	}
+	if f.code != "" {
+		_, _ = w.Write([]byte(`{"ok":false,"error":"` + f.code + `"}`))
+		return
+	}
+	w.Header().Set("X-OAuth-Scopes", f.scopes)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": f.url, "team": "Acme", "user": "alice", "team_id": f.team, "user_id": f.user})
+}
+
+func (f *fakeSlackAuth) set(fn func(f *fakeSlackAuth)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(f)
+}
+
+func (f *fakeSlackAuth) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests)
+}
+
+const slackToken = "xoxp-0123456789-abcdefWXYZ"
+
+func TestSlackIntegrationAPI(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) { testSlackIntegrationAPI(t, driver) })
+	}
+}
+
+func testSlackIntegrationAPI(t *testing.T, driver string) {
+	api := newIntegrationAPI(t, driver)
+	ctx := context.Background()
+	const path = "/api/v1/integrations/slack"
+	if w := api.do("GET", path, api.alice, ""); w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"connected":false}` {
+		t.Fatalf("disconnected: %d %s", w.Code, w.Body.String())
+	}
+
+	// Malformed input is rejected before Slack is called.
+	for _, body := range []string{`{}`, `{"token":""}`, `{"token":"xoxp- a"}`, `{"token":null}`, `{"token":"` + strings.Repeat("x", 256) + `"}`, `{"token":"xoxp-1","detect_dms":"no"}`, `{"token":"xoxp-1","detect_group_dms":null}`, `{"token":"xoxp-1","other":1}`} {
+		expectStatus(t, api.do("PUT", path, api.alice, body), 400, "invalid_request")
+	}
+	for _, token := range []string{"xoxb-bot-token-1234", "xoxe.xoxp-1-refresh", "ghp_0123456789"} {
+		expectStatus(t, api.do("PUT", path, api.alice, `{"token":"`+token+`"}`), 400, "slack_token_invalid")
+	}
+	if api.sl.count() != 0 {
+		t.Fatalf("Slack called %d times for invalid input", api.sl.count())
+	}
+
+	// Answers from Slack. Nothing is saved on failure.
+	all := strings.Join(slacksync.RequiredScopes, ",")
+	for _, tc := range []struct {
+		name   string
+		status int
+		code   string
+		scopes string
+		team   string
+		want   int
+		err    string
+	}{
+		{"invalid_auth", 200, "invalid_auth", all, "T1", 400, "slack_token_invalid"},
+		{"token_revoked", 200, "token_revoked", all, "T1", 400, "slack_token_invalid"},
+		{"other error", 200, "internal_error", all, "T1", 503, "slack_unavailable"},
+		{"429", 429, "", all, "T1", 503, "slack_unavailable"},
+		{"500", 500, "", all, "T1", 503, "slack_unavailable"},
+		{"unexpected team ID", 200, "", all, "t1/../x", 503, "slack_unavailable"},
+		{"scope missing", 200, "", strings.Replace(all, "mpim:history", "", 1), "T1", 400, "slack_scopes_missing"},
+		{"no scopes", 200, "", "", "T1", 400, "slack_scopes_missing"},
+	} {
+		api.sl.set(func(f *fakeSlackAuth) { f.status, f.code, f.scopes, f.team = tc.status, tc.code, tc.scopes, tc.team })
+		w := api.do("PUT", path, api.alice, `{"token":"`+slackToken+`"}`)
+		expectStatus(t, w, tc.want, tc.err)
+		if tc.err == "slack_scopes_missing" && !strings.Contains(w.Body.String(), "mpim:history") {
+			t.Fatalf("%s: missing scopes not named: %s", tc.name, w.Body.String())
+		}
+		if _, err := api.store.SlackConnection(ctx, "alice-id"); err == nil {
+			t.Fatalf("%s: saved", tc.name)
+		}
+	}
+
+	api.sl.set(func(f *fakeSlackAuth) {
+		f.status, f.code, f.scopes, f.team, f.url = 200, "", all+",chat:write", "T1", "https://acme.slack.com/"
+	})
+	w := api.do("PUT", path, api.alice, `{"token":"`+slackToken+`","detect_group_dms":true}`)
+	if w.Code != 200 || strings.Contains(w.Body.String(), "xoxp-") {
+		t.Fatalf("connect: %d %s", w.Code, w.Body.String())
+	}
+	_, keys := jsonKeys(t, w.Body.Bytes())
+	if !reflect.DeepEqual(keys, []string{"connected", "created_at", "detect_dms", "detect_group_dms", "detect_mentions", "immediate_notify", "last_error", "last_synced_at", "scopes", "status", "team_name", "team_url", "token_last4", "user_name"}) {
+		t.Fatalf("keys: %v", keys)
+	}
+	var got slackResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Connected || got.TeamName != "Acme" || got.TeamURL != "https://acme.slack.com/" || got.UserName != "alice" || got.TokenLast4 != "WXYZ" || len(got.Scopes) != 11 ||
+		!got.ImmediateNotify || !got.DetectMentions || !got.DetectDMs || !got.DetectGroupDMs || got.Status != "active" || got.LastError != nil || got.CreatedAt != "2026-10-24T01:02:03Z" {
+		t.Fatalf("connected: %+v", got)
+	}
+	api.sl.mu.Lock()
+	last := api.sl.requests[len(api.sl.requests)-1]
+	api.sl.mu.Unlock()
+	if last.URL.Path != "/auth.test" || last.Header.Get("Authorization") != "Bearer "+slackToken || last.URL.RawQuery != "" {
+		t.Fatalf("Slack request: %s %v", last.URL, last.Header)
+	}
+	c, err := api.store.SlackConnection(ctx, "alice-id")
+	if err != nil || c.TeamID != "T1" || c.SlackUserID != "U1" || strings.Contains(c.TokenSealed, "xoxp-") {
+		t.Fatalf("stored: %+v %v", c, err)
+	}
+	if plain, err := api.server.box.Open(slacksync.TokenPurpose("alice-id"), c.TokenSealed); err != nil || plain != slackToken {
+		t.Fatalf("open: %q %v", plain, err)
+	}
+
+	// PATCH merges; PUT keeps the settings when they are left out.
+	for _, body := range []string{`{}`, `{"detect_dms":null}`, `{"detect_dms":1}`, `{"detect_dms":false,"token":"x"}`} {
+		expectStatus(t, api.do("PATCH", path, api.alice, body), 400, "invalid_request")
+	}
+	if w = api.do("PATCH", path, api.alice, `{"detect_dms":false,"immediate_notify":false}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"detect_dms":false`) ||
+		!strings.Contains(w.Body.String(), `"immediate_notify":false`) || !strings.Contains(w.Body.String(), `"detect_group_dms":true`) {
+		t.Fatalf("PATCH: %d %s", w.Code, w.Body.String())
+	}
+	expectStatus(t, api.do("PATCH", path, api.bob, `{"detect_dms":true}`), 404, "not_found")
+	// A non-Slack workspace URL is not kept.
+	api.sl.set(func(f *fakeSlackAuth) { f.url = "https://evil.example/" })
+	if w = api.do("PUT", path, api.alice, `{"token":"`+slackToken+`"}`); w.Code != 200 || !strings.Contains(w.Body.String(), `"detect_dms":false`) || !strings.Contains(w.Body.String(), `"immediate_notify":false`) || !strings.Contains(w.Body.String(), `"team_url":""`) {
+		t.Fatalf("PUT keeps settings: %d %s", w.Code, w.Body.String())
+	}
+
+	// Another Slack user untracks the items of the previous one.
+	c, err = api.store.SlackConnection(ctx, "alice-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = api.store.SlackSync(ctx, "alice-id", c.Generation, func(tx *store.SlackTx) error {
+		_, e := tx.CreateItem(store.ActionItem{ID: "sl-item", Content: "x", Status: "open", Refs: "[]", Version: 1, CreatedAt: 1, UpdatedAt: 1, Source: sql.NullString{String: "slack", Valid: true}, SourceKey: sql.NullString{String: "slack:T1:m:C1:-:1.000001", Valid: true}, Tracking: 1})
+		return e
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sl.set(func(f *fakeSlackAuth) { f.user = "U2" })
+	if w = api.do("PUT", path, api.alice, `{"token":"`+slackToken+`"}`); w.Code != 200 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body.String())
+	}
+	if item, err := api.store.ActionItem(ctx, "alice-id", "sl-item"); err != nil || item.Tracking != 0 || item.SourceKey.Valid {
+		t.Fatalf("item after user change: %+v %v", item, err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if w = api.do("DELETE", path, api.alice, ""); w.Code != 204 {
+			t.Fatalf("DELETE: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if w = api.do("GET", path, api.alice, ""); strings.TrimSpace(w.Body.String()) != `{"connected":false}` {
+		t.Fatalf("after DELETE: %s", w.Body.String())
+	}
+
+	// API tokens cannot manage the integration.
+	tok := (&tokenAPI{t: t, handler: api.handler}).issue(api.alice, "x").Token
+	for _, m := range []string{"GET", "PUT", "PATCH", "DELETE"} {
+		expectStatus(t, api.do(m, path, tok, `{}`), 401, "unauthorized")
 	}
 }
 

@@ -157,6 +157,32 @@ type Session struct {
 	CreatedAt int64
 }
 
+type SlackConnection struct {
+	UserID          string
+	Generation      int64
+	TokenSealed     string
+	TokenLast4      string
+	TeamID          string
+	TeamName        string
+	TeamUrl         string
+	SlackUserID     string
+	SlackUserName   string
+	Scopes          string
+	ImmediateNotify int64
+	DetectMentions  int64
+	DetectDms       int64
+	DetectGroupDms  int64
+	Status          string
+	LastError       sql.NullString
+	FailureCount    int64
+	ConnectedAt     int64
+	NextPollAt      int64
+	LastSyncedAt    sql.NullInt64
+	LastTrackedAt   sql.NullInt64
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
 type User struct {
 	ID           string
 	Email        string

@@ -92,6 +92,18 @@ sql:
             go_type:
               import: database/sql
               type: NullInt64
+          - column: slack_connections.last_error
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: slack_connections.last_synced_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: slack_connections.last_tracked_at
+            go_type:
+              import: database/sql
+              type: NullInt64
           - column: ai_settings.last_error
             go_type:
               import: database/sql

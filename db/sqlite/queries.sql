@@ -177,6 +177,38 @@ DELETE FROM github_connections WHERE user_id = sqlc.arg(user_id);
 SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
 WHERE status = 'active' AND next_poll_at <= sqlc.arg(now) AND user_id IN (SELECT id FROM users WHERE disabled = 0)
 ORDER BY next_poll_at, user_id LIMIT sqlc.arg(page_size);
+-- name: GetSlackConnection :one
+SELECT user_id, generation, token_sealed, token_last4, team_id, team_name, team_url, slack_user_id, slack_user_name, scopes, immediate_notify, detect_mentions, detect_dms, detect_group_dms, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM slack_connections
+WHERE user_id = sqlc.arg(user_id);
+-- name: LockSlackConnection :one
+SELECT user_id, generation, token_sealed, token_last4, team_id, team_name, team_url, slack_user_id, slack_user_name, scopes, immediate_notify, detect_mentions, detect_dms, detect_group_dms, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM slack_connections
+WHERE user_id = sqlc.arg(user_id);
+-- name: CreateSlackConnection :exec
+INSERT INTO slack_connections (user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(generation),sqlc.arg(token_sealed),sqlc.arg(token_last4),sqlc.arg(team_id),sqlc.arg(team_name),sqlc.arg(team_url),sqlc.arg(slack_user_id),sqlc.arg(slack_user_name),sqlc.arg(scopes),sqlc.arg(immediate_notify),sqlc.arg(detect_mentions),sqlc.arg(detect_dms),sqlc.arg(detect_group_dms),sqlc.arg(status),sqlc.arg(last_error),sqlc.arg(failure_count),sqlc.arg(connected_at),sqlc.arg(next_poll_at),sqlc.arg(last_synced_at),sqlc.arg(last_tracked_at),sqlc.arg(created_at),sqlc.arg(updated_at));
+-- name: ReplaceSlackConnection :exec
+UPDATE slack_connections SET generation = sqlc.arg(generation), token_sealed = sqlc.arg(token_sealed), token_last4 = sqlc.arg(token_last4), team_id = sqlc.arg(team_id), team_name = sqlc.arg(team_name), team_url = sqlc.arg(team_url), slack_user_id = sqlc.arg(slack_user_id), slack_user_name = sqlc.arg(slack_user_name), scopes = sqlc.arg(scopes), immediate_notify = sqlc.arg(immediate_notify), detect_mentions = sqlc.arg(detect_mentions), detect_dms = sqlc.arg(detect_dms), detect_group_dms = sqlc.arg(detect_group_dms), status = sqlc.arg(status), last_error = sqlc.arg(last_error), failure_count = sqlc.arg(failure_count), connected_at = sqlc.arg(connected_at), next_poll_at = sqlc.arg(next_poll_at), last_synced_at = sqlc.arg(last_synced_at), last_tracked_at = sqlc.arg(last_tracked_at), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id);
+-- name: UpdateSlackSyncState :execrows
+UPDATE slack_connections SET status = sqlc.arg(status), last_error = sqlc.arg(last_error), failure_count = sqlc.arg(failure_count), next_poll_at = sqlc.arg(next_poll_at), last_synced_at = sqlc.arg(last_synced_at), last_tracked_at = sqlc.arg(last_tracked_at), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation);
+-- name: UpdateSlackSettings :execrows
+UPDATE slack_connections SET immediate_notify = sqlc.arg(immediate_notify), detect_mentions = sqlc.arg(detect_mentions), detect_dms = sqlc.arg(detect_dms), detect_group_dms = sqlc.arg(detect_group_dms), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id);
+-- name: DeleteSlackConnection :exec
+DELETE FROM slack_connections WHERE user_id = sqlc.arg(user_id);
+-- name: ListDueSlackConnections :many
+SELECT user_id, generation, token_sealed, token_last4, team_id, team_name, team_url, slack_user_id, slack_user_name, scopes, immediate_notify, detect_mentions, detect_dms, detect_group_dms, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM slack_connections
+WHERE status = 'active' AND next_poll_at <= sqlc.arg(now) AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY next_poll_at, user_id LIMIT sqlc.arg(page_size);
+-- name: ListSlackJudgedKeys :many
+SELECT source_key FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = 'slack' AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix) AND created_at >= sqlc.arg(created_since)
+ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListSlackOpenTasks :many
+SELECT content FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = 'slack' AND substr(source_key, 1, length(sqlc.arg(prefix))) = sqlc.arg(prefix) AND status = 'open' AND tracking = 1
+ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
 -- name: GetAISettings :one
 SELECT user_id, generation, provider, model, api_key_sealed, key_last4, status, last_error, activated_at, created_at, updated_at FROM ai_settings
 WHERE user_id = sqlc.arg(user_id);
@@ -253,8 +285,9 @@ WHERE id = sqlc.arg(id) AND sent_at IS NULL;
 DELETE FROM notifications WHERE user_id = sqlc.arg(user_id) AND action_item_id = sqlc.arg(action_item_id) AND sent_at IS NULL;
 -- name: DeleteUserPendingNotifications :exec
 DELETE FROM notifications WHERE user_id = sqlc.arg(user_id) AND sent_at IS NULL;
--- name: DeleteUserPendingNotificationsByKind :exec
-DELETE FROM notifications WHERE user_id = sqlc.arg(user_id) AND kind = sqlc.arg(kind) AND sent_at IS NULL;
+-- name: DeleteUserPendingNotificationsByKindAndSource :exec
+DELETE FROM notifications WHERE notifications.user_id = sqlc.arg(user_id) AND notifications.kind = sqlc.arg(kind) AND notifications.sent_at IS NULL
+AND notifications.action_item_id IN (SELECT action_items.id FROM action_items WHERE action_items.user_id = sqlc.arg(item_user_id) AND action_items.source = sqlc.arg(source));
 -- name: DeleteSentNotificationsBefore :exec
 DELETE FROM notifications WHERE sent_at IS NOT NULL AND sent_at < sqlc.arg(before);
 -- name: GetInstanceSecret :one

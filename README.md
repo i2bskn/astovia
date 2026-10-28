@@ -1,6 +1,6 @@
 # Astovia
 
-Astoviaは、「忘れてた！」を防ぐためのセルフホストのタスク管理です。Web画面でタスクを管理し、スマホなどへWeb Pushで通知します。GitHub連携では、レビュー依頼と割り当てを取り込んで、PR／Issueの状態から自動で完了にします。自分へのメンションは、AI（Anthropic）が読んでやることがあるものだけをタスクにします。AIクライアントや外部プログラムからは、REST APIとMCP（OAuthで接続）で操作できます。保存先はSQLiteかPostgreSQLです。GitHub以外の外部サービス連携は**まだ実装していません**。
+Astoviaは、「忘れてた！」を防ぐためのセルフホストのタスク管理です。Web画面でタスクを管理し、スマホなどへWeb Pushで通知します。GitHub連携では、レビュー依頼と割り当てを取り込んで、PR／Issueの状態から自動で完了にします。自分へのメンションは、AI（Anthropic）が読んでやることがあるものだけをタスクにします。AIクライアントや外部プログラムからは、REST APIとMCP（OAuthで接続）で操作できます。Slack連携では、自分へのメンションとDM（設定でグループDMも）をAIが読んでやることがあるものだけをタスクにし、自分の返信で用件が済んだとAIが判断したら自動で完了にします。保存先はSQLiteかPostgreSQLです。GitHubとSlack以外の外部サービス連携は**まだ実装していません**。
 
 使ってみる場合は「本番で動かす」を、開発する場合は「Dockerでローカル開発する」を読んでください。
 
@@ -101,6 +101,8 @@ docker run --rm -v astovia-data:/data -v "$PWD/backups/<日時>:/restore:ro" alp
 
 #### 更新する（VPS）
 
+Slack連携を追加したバージョンへ更新するときは、`slack_connections`テーブルが増えます。アプリは起動時にこのテーブルも確認するため、必ず下の手順どおり、新しいアプリを起動する前にスキーマを適用してください。
+
 1. 新しいバージョンのタグから`compose.yaml`、`Caddyfile`、`.env.example`を別名で取得し（例: `curl -fsSL -o compose.yaml.new https://raw.githubusercontent.com/i2bskn/astovia/vX.Y.Z/deploy/compose.yaml`）、手元のファイルとの差分を確認して反映します。必須の環境変数が増えた場合は`.env`にも追加します。
 2. アプリを止めます: `docker compose stop app`
 3. 「バックアップと復元（VPS）」の手順でバックアップを取ります。
@@ -187,6 +189,8 @@ echo "exit code: $?"
 
 #### 更新する（外部PostgreSQL）
 
+Slack連携を追加したバージョンへ更新するときは、`slack_connections`テーブルが増えます。アプリは起動時にこのテーブルも確認するため、必ず下の手順どおり、新しいアプリを起動する前にスキーマを適用してください。
+
 1. コンテナサービスでアプリを止めます（サービスを無効にする、またはインスタンス数を0にする）。古いアプリが新しいスキーマで動き続けることと、デプロイ中に新旧が並行して動いて通知が重複することを避けるためです。
 2. 「バックアップと復元（外部PostgreSQL）」の手順でバックアップを取ります。
 3. 新しいバージョンのタグから`compose.migrate-postgres.yaml`を取得し、`.env`の`ASTOVIA_VERSION`を新しいバージョンにして、スキーマを適用します（変更計画を確認してから承認してください）。
@@ -225,7 +229,7 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は「PostgreSQLを使用する」の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -351,7 +355,7 @@ make user-disable USER_EMAIL=alice@example.com
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）、未送信の通知をすべて削除します。ユーザー無効化はGitHub連携も削除します（パスワード再設定では残します。「GitHub連携と通知」を参照）。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）、未送信の通知をすべて削除します。ユーザー無効化はGitHub連携とSlack連携も削除します（パスワード再設定では残します。「GitHub連携と通知」「Slack連携」を参照）。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## 認証と運用上の制約
 
@@ -473,24 +477,72 @@ AIの設定（「AIの設定」を参照）がある場合、GitHubのIssueとPu
 - 「設定」の「通知」で「この端末で通知を受け取る」を押すと、ブラウザの通知許可を求め、この端末を登録します。1ユーザーあたり20台まで登録できます。「テスト通知を送る」で届くか確認できます（1分に3回まで）。
 - Web PushはHTTPSのページでだけ使えます（`localhost`は例外）。iPhone／iPadはiOS 16.4以降で、共有メニューの「ホーム画面に追加」で追加したAstoviaから登録してください。
 - Web画面のURLが`/admin/`から`/`に変わりました。以前の版でホーム画面に追加していた場合は、いったん削除してから追加し直し、追加し直したAstoviaで「この端末で通知を受け取る」をもう一度押してください。ブラウザのまま使っている端末は、登録済みの通知が新しい画面を開くよう自動で切り替わります（「この端末で通知を受け取る」を押し直しても二重には届きません）。
-- 通知の内容は、GitHubで新しく見つけた対応事項（「検出したらすぐ通知する」をオフにすると送りません）、作成から一定日数（既定3日）を過ぎても未完了の対応事項、毎日決まった時刻（既定8時）の朝のまとめ（未完了の件数と、前回以降に自動で処理した件数。対応不要と判断したメンションも含みます）です。時刻と日数とタイムゾーンは「通知」で変更できます。サーバーが止まっていて朝のまとめの時刻を過ぎた日は、まとめを送りません。
+- 通知の内容は、GitHubとSlackで新しく見つけた対応事項（「検出したらすぐ通知する」をオフにすると送りません）、作成から一定日数（既定3日）を過ぎても未完了の対応事項、毎日決まった時刻（既定8時）の朝のまとめ（未完了の件数と、前回以降に自動で処理した件数。対応不要と判断したメンションも含みます）です。時刻と日数とタイムゾーンは「通知」で変更できます。サーバーが止まっていて朝のまとめの時刻を過ぎた日は、まとめを送りません。
 - VAPIDの鍵は初回に自動で作成し、DB（`instance_secrets`）に暗号化して保存します。VAPIDの連絡先（`sub`）には`ASTOVIA_PUBLIC_URL`がHTTPSならそのURLを、そうでなければ`mailto:webpush@localhost`を使います。後者はローカル開発用で、AppleのPushサービスでは送信に失敗する場合があります。
 - 送信先は、名前解決後のアドレスがグローバルなものだけです（プライベートアドレス、ループバック等には送りません）。送信に失敗した通知は最大4回まで再送し、Pushサービスが購読の終了を返した端末は登録を削除します。送信済みの通知は30日後に削除します。
 
 ### 運用上の注意
 
-- バックグラウンド処理（GitHubの同期、通知の判定と送信）は`serve`のプロセス内で動きます。**同じDBに対してAstoviaのプロセスを1つだけ起動してください。**複数のプロセスを起動すると、同じ通知を重複して送る場合があります。
-- `ASTOVIA_JWT_SECRET`を変更すると、保存したGitHubトークン、AIのAPIキーとVAPIDの秘密鍵を復号できなくなります。GitHub連携は「保存したトークンを読み出せません」と表示して止まるため、トークンを登録し直してください。AIの設定も「保存した API キーを読み出せません」と表示して止まるため、キーを登録し直してください。VAPIDの鍵は自動で作り直し、すべての端末の登録を削除するため、各端末で「この端末で通知を受け取る」をもう一度押してください。
+- バックグラウンド処理（GitHubとSlackの同期、通知の判定と送信）は`serve`のプロセス内で動きます。**同じDBに対してAstoviaのプロセスを1つだけ起動してください。**複数のプロセスを起動すると、同じ通知を重複して送る場合があります。
+- `ASTOVIA_JWT_SECRET`を変更すると、保存したGitHubとSlackのトークン、AIのAPIキーとVAPIDの秘密鍵を復号できなくなります。GitHub連携とSlack連携は「保存したトークンを読み出せません」と表示して止まるため、トークンを登録し直してください。AIの設定も「保存した API キーを読み出せません」と表示して止まるため、キーを登録し直してください。VAPIDの鍵は自動で作り直し、すべての端末の登録を削除するため、各端末で「この端末で通知を受け取る」をもう一度押してください。
+
+## Slack連携
+
+Slackで自分へのメンション、自分宛てのDM、（設定すれば）参加中のグループDMを見つけ、AIに読ませて自分がやることがあるかを判断させます。やることがあるものは対応事項にし、その後に自分がその会話で返信したら、返信で用件が済んだかをAIに判断させて、済んでいれば自動で完了にします。**AIの設定（「AIの設定」を参照）がないと、検出も自動完了も行いません。**Slackへの書き込み（投稿・既読・リアクション）はしません。
+
+### Slackアプリを作って接続する
+
+自分のワークスペースに、自分用のSlackアプリを作ります。1ユーザーにつき1ワークスペースです。
+
+1. 管理画面の「設定」→「連携」の「Slack 連携」で、「Slack アプリを作る」のリンク（[直接開く](https://api.slack.com/apps?new_app=1)）を開き、「From a manifest」を選んでワークスペースを選びます。
+2. 画面に表示されるマニフェスト（[`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml)と同じ内容）を貼り付けて、アプリを作ります。
+3. アプリをワークスペースにインストールし、「OAuth & Permissions」の**User OAuth Token**（`xoxp-`で始まる）を「Slack 連携」に貼り付けて「接続する」を押します。Bot Token（`xoxb-`）には対応していません。
+
+登録時に`auth.test`でトークンと権限を確かめ、無効なトークンや権限が足りないトークンは保存しません。トークンは`ASTOVIA_JWT_SECRET`から派生した鍵（AES-256-GCM）で暗号化して保存し、画面・APIには末尾4文字だけを表示します。Slackへのリクエストは`https://slack.com/api`だけに送り、トークンは`Authorization`ヘッダーにだけ載せます。
+
+必要な権限（User Token Scopes）と用途は次のとおりです。
+
+| スコープ | 用途 |
+| --- | --- |
+| `search:read` | 自分へのメンションと自分宛てのDMを検索する |
+| `users:read` | 投稿者の表示名を調べる |
+| `channels:read` `groups:read` `im:read` `mpim:read` | 会話の情報と、参加中のグループDMの一覧を読む |
+| `channels:history` `groups:history` `im:history` `mpim:history` | メンションの前後の文脈、DM・グループDMの発言、返信を読む |
+
+### 検出のしくみ
+
+- 60秒ごとに同期します。メンションは`<@自分>`を含む発言を検索で、DMは自分宛てのDMを検索で見つけ、その会話（チャンネルかスレッド）の発言を読みます。グループDMは参加中のグループDMを会話IDの順に**20件まで**読みます（21件目以降は読みません。その中のメンションはメンションとして扱います）。
+- 検出対象は「設定」で個別に切り替えられます。チャンネルでのメンションとDMは既定でオン、グループDMは既定でオフです。DM／グループDMをオフにすると、その中のメンションはメンションとして扱います。
+- DMとグループDMは、自分の発言で区切った相手の発言のかたまり（最大10件）ごとに判断します。判断済みの発言の後に届いた発言は、新しいかたまりとして判断します。メンションは発言ごとに判断し、前の10件と後の3件（スレッドならそのスレッド）を文脈として渡します。
+- 自分の発言、ボットの発言、参加・退出などのシステムメッセージは対象外です。
+- やることがあると判断したものは、AIが書いたタスク文で対応事項にして通知します（「検出したらすぐ通知する」がオンの場合）。やることがないと判断したものは、理由付きで「自動で処理したもの」に残します。接続した直後の取り込みと、2時間より古い発言は通知しません。
+- 対象にするのは、直近72時間以内で、かつSlack連携の接続とAPIキーの登録の24時間前より後の発言です。
+- AIを呼ぶのは1回の同期で3回までです。残りと、AIに一時的につながらなかったものは次の同期で読み直します。2時間より古い発言でAIにつながらなかった場合と、6時間以上読み直しが続いた場合は、「Slack を確認: …」という対応事項にします。
+- AIに送るのは、ワークスペース名、チャンネル名、判断する発言と前後の発言の本文、投稿者の表示名とメンバーID、日時、同じ会話の未完了のタスク（最大3件）です。
+
+### 返信による自動完了
+
+- 5分ごとに、追跡中の対応事項（最大20件）について、元の発言の後に自分が同じ会話（スレッドならそのスレッド、そうでなければチャンネルとその発言のスレッド）で発言したかを確かめます。発言していれば、その返信で用件が済んだか（回答した、依頼に応じた、不要と伝えた等）をAIに判断させ、済んでいれば「返信で対応済み」として自動で完了にします。「確認します」のような受け止めだけでは完了にしません。AIを呼ぶのは1回の確認で3回までです。
+- 元の発言が消えた場合や会話が見えなくなった場合は、その対応事項を追跡の対象から外します（状態は変えません）。
+
+### 取りこぼしと制約
+
+- Slackの検索は反映が遅れることがあり、10分の重なりを持たせて読み直しても、検索に出るのが遅れた発言は取りこぼすことがあります。1回の検索で読むのは200件まで、1つの会話で読むのは200件までです。
+- Slackの呼び出し回数は1回の同期ごとに上限があり（検索4回、会話の読み取り40回など）、超えた分は次の同期で読み直します。6時間以上読み直しが続いた場合は先へ進み、読めなかった会話は取りこぼします。
+- Slackが会話の読み取りを拒否した場合（チャンネルが見つからない、参加していない等）、その会話は飛ばします。
+- トークンが無効になった場合と権限が足りなくなった場合は同期を止め、画面に表示します。トークンを更新すると再開します。Slackの利用上限（HTTP 429）に達した場合は、指定された時間だけ待ってから再開します。
+- 別のワークスペース・別のユーザーのトークンに付け替えた場合と、接続を解除した場合、それまでの対応事項は残し、自動処理の対象から外します。解除して同じワークスペースに接続し直すと、直前24時間の発言をもう一度判断して、重複した対応事項ができることがあります（GitHub連携と同じ制約です）。
+- パスワード再設定ではSlack連携を削除しません。アカウントを乗っ取られていた可能性がある場合は、設定画面で連携を確認し、必要なら解除してSlack側でアプリのトークンを無効にしてください。
 
 ## AIの設定
 
-GitHubのメンションを読んで、自分がやることがあるかを判断するAIを、ユーザーごとに設定します。今の接続先はAnthropicだけです。
+GitHubのメンションとSlackの発言を読んで、自分がやることがあるか（Slackでは返信で用件が済んだかも）を判断するAIを、ユーザーごとに設定します。今の接続先はAnthropicだけです。
 
 1. [Anthropic ConsoleのAPIキーのページ](https://platform.claude.com/settings/keys)でAPIキーを作ります。
 2. 管理画面の「設定」→「AI」にキーを貼り付け、モデル（Claude Haiku 5.5（既定）、Claude Sonnet 5.5、Claude Opus 5.5）を選んで「保存」を押します。
 
 - 保存時に、そのキーで選んだモデルを使えるかをAnthropicのModels API（トークンを消費しません）で確かめます。キーは`ASTOVIA_JWT_SECRET`から派生した鍵で暗号化して保存し、画面・APIには末尾4文字だけを表示します。`ASTOVIA_JWT_SECRET`を変えるとキーを復号できなくなるため、登録し直してください。サーバーの環境変数（`ANTHROPIC_API_KEY`等）は使いません。
-- 判断のため、メンションのあったIssue／PRについて、リポジトリ名（非公開のものを含む）、タイトルと本文、コメントの本文、投稿者のGitHubユーザー名と日時がAnthropicに送られます。費用は登録したキーの組織に請求されます。利用量の集計や上限はありません。
+- 判断のため、メンションのあったIssue／PRについて、リポジトリ名（非公開のものを含む）、タイトルと本文、コメントの本文、投稿者のGitHubユーザー名と日時がAnthropicに送られます。Slack連携では、判断する発言と前後の発言の本文、投稿者の表示名、ワークスペース名とチャンネル名も送られます（「Slack連携」を参照）。費用は登録したキーの組織に請求されます。利用量の集計や上限はありません。
 - AIが書いたタスク文と要約は外部の文章をもとにしています。画面ではテキストとして表示し、MCPでは他の対応事項と同じく`content`として返します。第三者がコメントに「対応不要」などと書くと、AIが対応不要と判断する場合があります。その結果は「自動で処理したもの」に残り、未完了に戻せます。
 - パスワード再設定とユーザー無効化では、AIの設定を削除します（乗っ取られていた間に登録されたキーで、本文が他人の組織へ送られ続けないようにするためです）。
 
@@ -521,6 +573,10 @@ GitHubのメンションを読んで、自分がやることがあるかを判�
 | `PUT /api/v1/integrations/github` | 本文`{token, immediate_notify?}`（16KiB以内）でトークンを登録・置き換える。無効なトークンは400`github_token_invalid`、`repo`がなければ400`github_scopes_missing`、GitHubに届かなければ503`github_unavailable`。Access JWTが必要 |
 | `PATCH /api/v1/integrations/github` | 本文`{immediate_notify}`だけを受け付ける。未接続は404。Access JWTが必要 |
 | `DELETE /api/v1/integrations/github` | 連携を解除し204を返す。未接続でも204。Access JWTが必要 |
+| `GET /api/v1/integrations/slack` | Slack連携の状態。未接続は`{connected: false}`、接続済みは`{connected, team_name, team_url, user_name, token_last4, scopes, immediate_notify, detect_mentions, detect_dms, detect_group_dms, status, last_error, last_synced_at, created_at}`。トークン本体は返さない。Access JWTが必要 |
+| `PUT /api/v1/integrations/slack` | 本文`{token, immediate_notify?, detect_mentions?, detect_dms?, detect_group_dms?}`（16KiB以内）でUser OAuth Tokenを登録・置き換える。省略した設定は今の値（新規は既定値）のまま。`xoxp-`以外や無効なトークンは400`slack_token_invalid`、権限が足りなければ400`slack_scopes_missing`、Slackに届かなければ503`slack_unavailable`。Access JWTが必要 |
+| `PATCH /api/v1/integrations/slack` | 本文`{immediate_notify?, detect_mentions?, detect_dms?, detect_group_dms?}`（1つ以上）で設定を変える。未接続は404。Access JWTが必要 |
+| `DELETE /api/v1/integrations/slack` | 連携を解除し204を返す。未接続でも204。Access JWTが必要 |
 | `GET /api/v1/ai` | AIの設定。未設定は`{configured: false}`、設定済みは`{configured, provider, model, key_last4, status, last_error, updated_at}`。キー本体は返さない。Access JWTが必要 |
 | `PUT /api/v1/ai` | 本文`{api_key?, model}`（16KiB以内）でAPIキーとモデルを登録・変更する。`api_key`を省くと保存済みのキーでモデルだけを変える。保存前にAnthropicで確かめ、無効なキーは400`ai_key_invalid`、モデルを使えなければ400`ai_model_unavailable`、残高・支払いの問題は400`ai_billing`、Anthropicに届かなければ503`ai_unavailable`、別の要求で設定が変わっていれば409`ai_conflict`。Access JWTが必要 |
 | `DELETE /api/v1/ai` | AIの設定を削除し204を返す。未設定でも204。Access JWTが必要 |
@@ -540,7 +596,7 @@ GitHubのメンションを読んで、自分がやることがあるかを判�
 
 LoginとRefreshは`{access_token, expires_in, user: {id, email}}`を返します。
 
-対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at, source, auto}`で（`source`は連携が作ったものなら`"github"`、それ以外は`null`。`auto`は自動で完了したものなら`{reason, ref_url, at}`、それ以外は`null`。MCPの応答も同じ形です）、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。`status`を変更すると（REST・MCPとも）、その対応事項は連携による自動完了・再オープンの対象から外れ、`auto`は`null`に戻ります。エラーは`{error: {code, message}}`です（`/oauth/*`の処理内で返すエラーだけは、OAuthの形式`{error, error_description}`です）。認証・非公開API・MCP・`/oauth/*`の応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
+対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at, source, auto}`で（`source`は連携が作ったものなら`"github"`か`"slack"`、それ以外は`null`。`auto`は自動で完了したものなら`{reason, ref_url, at}`、それ以外は`null`。MCPの応答も同じ形です）、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, message_id?, url?}`の配列（10件まで、`url`はhttp／https）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。`status`を変更すると（REST・MCPとも）、その対応事項は連携による自動完了・再オープンの対象から外れ、`auto`は`null`に戻ります。エラーは`{error: {code, message}}`です（`/oauth/*`の処理内で返すエラーだけは、OAuthの形式`{error, error_description}`です）。認証・非公開API・MCP・`/oauth/*`の応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
 
 ## コード生成と検証
 

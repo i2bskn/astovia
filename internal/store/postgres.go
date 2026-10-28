@@ -289,6 +289,58 @@ func (q postgresQueries) listDueGitHubConnections(ctx context.Context, now int64
 	}
 	return out, nil
 }
+func (q postgresQueries) slackConnection(ctx context.Context, userID string) (SlackConnection, error) {
+	row, err := q.q.GetSlackConnection(ctx, userID)
+	return fromPostgresSlack(row), err
+}
+func (q postgresQueries) lockSlackConnection(ctx context.Context, userID string) (SlackConnection, error) {
+	row, err := q.q.LockSlackConnection(ctx, userID)
+	return fromPostgresSlack(row), err
+}
+func (q postgresQueries) createSlackConnection(ctx context.Context, c SlackConnection) error {
+	return q.q.CreateSlackConnection(ctx, db.CreateSlackConnectionParams{UserID: c.UserID, Generation: c.Generation, TokenSealed: c.TokenSealed, TokenLast4: c.TokenLast4, TeamID: c.TeamID, TeamName: c.TeamName, TeamUrl: c.TeamURL, SlackUserID: c.SlackUserID, SlackUserName: c.SlackUserName, Scopes: c.Scopes, ImmediateNotify: c.ImmediateNotify, DetectMentions: c.DetectMentions, DetectDms: c.DetectDMs, DetectGroupDms: c.DetectGroupDMs, Status: c.Status, LastError: c.LastError, FailureCount: c.FailureCount, ConnectedAt: c.ConnectedAt, NextPollAt: c.NextPollAt, LastSyncedAt: c.LastSyncedAt, LastTrackedAt: c.LastTrackedAt, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt})
+}
+func (q postgresQueries) replaceSlackConnection(ctx context.Context, c SlackConnection) error {
+	return q.q.ReplaceSlackConnection(ctx, db.ReplaceSlackConnectionParams{Generation: c.Generation, TokenSealed: c.TokenSealed, TokenLast4: c.TokenLast4, TeamID: c.TeamID, TeamName: c.TeamName, TeamUrl: c.TeamURL, SlackUserID: c.SlackUserID, SlackUserName: c.SlackUserName, Scopes: c.Scopes, ImmediateNotify: c.ImmediateNotify, DetectMentions: c.DetectMentions, DetectDms: c.DetectDMs, DetectGroupDms: c.DetectGroupDMs, Status: c.Status, LastError: c.LastError, FailureCount: c.FailureCount, ConnectedAt: c.ConnectedAt, NextPollAt: c.NextPollAt, LastSyncedAt: c.LastSyncedAt, LastTrackedAt: c.LastTrackedAt, UpdatedAt: c.UpdatedAt, UserID: c.UserID})
+}
+func (q postgresQueries) updateSlackSyncState(ctx context.Context, c SlackConnection) (int64, error) {
+	return q.q.UpdateSlackSyncState(ctx, db.UpdateSlackSyncStateParams{Status: c.Status, LastError: c.LastError, FailureCount: c.FailureCount, NextPollAt: c.NextPollAt, LastSyncedAt: c.LastSyncedAt, LastTrackedAt: c.LastTrackedAt, UpdatedAt: c.UpdatedAt, UserID: c.UserID, Generation: c.Generation})
+}
+func (q postgresQueries) updateSlackSettings(ctx context.Context, c SlackConnection) (int64, error) {
+	return q.q.UpdateSlackSettings(ctx, db.UpdateSlackSettingsParams{ImmediateNotify: c.ImmediateNotify, DetectMentions: c.DetectMentions, DetectDms: c.DetectDMs, DetectGroupDms: c.DetectGroupDMs, UpdatedAt: c.UpdatedAt, UserID: c.UserID})
+}
+func (q postgresQueries) deleteSlackConnection(ctx context.Context, userID string) error {
+	return q.q.DeleteSlackConnection(ctx, userID)
+}
+func (q postgresQueries) listDueSlackConnections(ctx context.Context, now int64, limit int) ([]SlackConnection, error) {
+	rows, err := q.q.ListDueSlackConnections(ctx, db.ListDueSlackConnectionsParams{Now: now, PageSize: int32(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SlackConnection, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, fromPostgresSlack(row))
+	}
+	return out, nil
+}
+func (q postgresQueries) listSlackJudgedKeys(ctx context.Context, userID, prefix string, createdSince int64, limit int) ([]string, error) {
+	rows, err := q.q.ListSlackJudgedKeys(ctx, db.ListSlackJudgedKeysParams{UserID: userID, Prefix: prefix, CreatedSince: createdSince, PageSize: int32(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.String)
+	}
+	return out, nil
+}
+func (q postgresQueries) listSlackOpenTasks(ctx context.Context, userID, prefix string, limit int) ([]string, error) {
+	rows, err := q.q.ListSlackOpenTasks(ctx, db.ListSlackOpenTasksParams{UserID: userID, Prefix: prefix, PageSize: int32(limit)})
+	if rows == nil {
+		rows = []string{}
+	}
+	return rows, err
+}
 func (q postgresQueries) aiSettings(ctx context.Context, userID string) (AISettings, error) {
 	row, err := q.q.GetAISettings(ctx, userID)
 	return fromPostgresAISetting(row), err
@@ -394,8 +446,8 @@ func (q postgresQueries) deleteItemPendingNotifications(ctx context.Context, use
 func (q postgresQueries) deleteUserPendingNotifications(ctx context.Context, userID string) error {
 	return q.q.DeleteUserPendingNotifications(ctx, userID)
 }
-func (q postgresQueries) deleteUserPendingNotificationsByKind(ctx context.Context, userID, kind string) error {
-	return q.q.DeleteUserPendingNotificationsByKind(ctx, db.DeleteUserPendingNotificationsByKindParams{UserID: userID, Kind: kind})
+func (q postgresQueries) deleteUserPendingNotificationsBySource(ctx context.Context, userID, kind, source string) error {
+	return q.q.DeleteUserPendingNotificationsByKindAndSource(ctx, db.DeleteUserPendingNotificationsByKindAndSourceParams{UserID: userID, Kind: kind, ItemUserID: userID, Source: sql.NullString{String: source, Valid: true}})
 }
 func (q postgresQueries) deleteSentNotificationsBefore(ctx context.Context, before int64) error {
 	return q.q.DeleteSentNotificationsBefore(ctx, sql.NullInt64{Int64: before, Valid: true})
@@ -425,4 +477,8 @@ func (postgresQueries) actionItems(rows []db.ActionItem, err error) ([]ActionIte
 
 func fromPostgresAISetting(row db.AiSetting) AISettings {
 	return AISettings{UserID: row.UserID, Generation: row.Generation, Provider: row.Provider, Model: row.Model, APIKeySealed: row.ApiKeySealed, KeyLast4: row.KeyLast4, Status: row.Status, LastError: row.LastError, ActivatedAt: row.ActivatedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+}
+
+func fromPostgresSlack(row db.SlackConnection) SlackConnection {
+	return SlackConnection{UserID: row.UserID, Generation: row.Generation, TokenSealed: row.TokenSealed, TokenLast4: row.TokenLast4, TeamID: row.TeamID, TeamName: row.TeamName, TeamURL: row.TeamUrl, SlackUserID: row.SlackUserID, SlackUserName: row.SlackUserName, Scopes: row.Scopes, ImmediateNotify: row.ImmediateNotify, DetectMentions: row.DetectMentions, DetectDMs: row.DetectDms, DetectGroupDMs: row.DetectGroupDms, Status: row.Status, LastError: row.LastError, FailureCount: row.FailureCount, ConnectedAt: row.ConnectedAt, NextPollAt: row.NextPollAt, LastSyncedAt: row.LastSyncedAt, LastTrackedAt: row.LastTrackedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }

@@ -481,6 +481,116 @@ table "github_connections" {
     columns = [column.status, column.next_poll_at]
   }
 }
+table "slack_connections" {
+  schema = schema.main
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "generation" {
+    type = integer
+    null = false
+  }
+  column "token_sealed" {
+    type = text
+    null = false
+  }
+  column "token_last4" {
+    type = text
+    null = false
+  }
+  column "team_id" {
+    type = text
+    null = false
+  }
+  column "team_name" {
+    type = text
+    null = false
+  }
+  column "team_url" {
+    type = text
+    null = false
+  }
+  column "slack_user_id" {
+    type = text
+    null = false
+  }
+  column "slack_user_name" {
+    type = text
+    null = false
+  }
+  column "scopes" {
+    type = text
+    null = false
+  }
+  column "immediate_notify" {
+    type    = integer
+    null    = false
+    default = 1
+  }
+  column "detect_mentions" {
+    type    = integer
+    null    = false
+    default = 1
+  }
+  column "detect_dms" {
+    type    = integer
+    null    = false
+    default = 1
+  }
+  column "detect_group_dms" {
+    type    = integer
+    null    = false
+    default = 0
+  }
+  column "status" {
+    type = text
+    null = false
+  }
+  column "last_error" {
+    type = text
+    null = true
+  }
+  column "failure_count" {
+    type    = integer
+    null    = false
+    default = 0
+  }
+  column "connected_at" {
+    type = integer
+    null = false
+  }
+  column "next_poll_at" {
+    type = integer
+    null = false
+  }
+  column "last_synced_at" {
+    type = integer
+    null = true
+  }
+  column "last_tracked_at" {
+    type = integer
+    null = true
+  }
+  column "created_at" {
+    type = integer
+    null = false
+  }
+  column "updated_at" {
+    type = integer
+    null = false
+  }
+  primary_key {
+    columns = [column.user_id]
+  }
+  foreign_key "slack_connections_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "slack_connections_status_next_poll_idx" {
+    columns = [column.status, column.next_poll_at]
+  }
+}
 table "ai_settings" {
   schema = schema.main
   column "user_id" {

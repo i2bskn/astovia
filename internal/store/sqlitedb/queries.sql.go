@@ -472,6 +472,66 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 	return err
 }
 
+const createSlackConnection = `-- name: CreateSlackConnection :exec
+INSERT INTO slack_connections (user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at)
+VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
+`
+
+type CreateSlackConnectionParams struct {
+	UserID          string
+	Generation      int64
+	TokenSealed     string
+	TokenLast4      string
+	TeamID          string
+	TeamName        string
+	TeamUrl         string
+	SlackUserID     string
+	SlackUserName   string
+	Scopes          string
+	ImmediateNotify int64
+	DetectMentions  int64
+	DetectDms       int64
+	DetectGroupDms  int64
+	Status          string
+	LastError       sql.NullString
+	FailureCount    int64
+	ConnectedAt     int64
+	NextPollAt      int64
+	LastSyncedAt    sql.NullInt64
+	LastTrackedAt   sql.NullInt64
+	CreatedAt       int64
+	UpdatedAt       int64
+}
+
+func (q *Queries) CreateSlackConnection(ctx context.Context, arg CreateSlackConnectionParams) error {
+	_, err := q.db.ExecContext(ctx, createSlackConnection,
+		arg.UserID,
+		arg.Generation,
+		arg.TokenSealed,
+		arg.TokenLast4,
+		arg.TeamID,
+		arg.TeamName,
+		arg.TeamUrl,
+		arg.SlackUserID,
+		arg.SlackUserName,
+		arg.Scopes,
+		arg.ImmediateNotify,
+		arg.DetectMentions,
+		arg.DetectDms,
+		arg.DetectGroupDms,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.ConnectedAt,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastTrackedAt,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
 const createUser = `-- name: CreateUser :exec
 INSERT INTO users (id,email,password_hash,disabled,created_at) VALUES (?,?,?,0,?)
 `
@@ -662,6 +722,15 @@ func (q *Queries) DeleteSentNotificationsBefore(ctx context.Context, before sql.
 	return err
 }
 
+const deleteSlackConnection = `-- name: DeleteSlackConnection :exec
+DELETE FROM slack_connections WHERE user_id = ?1
+`
+
+func (q *Queries) DeleteSlackConnection(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteSlackConnection, userID)
+	return err
+}
+
 const deleteUserAPITokens = `-- name: DeleteUserAPITokens :exec
 DELETE FROM api_tokens WHERE user_id = ?1
 `
@@ -698,17 +767,25 @@ func (q *Queries) DeleteUserPendingNotifications(ctx context.Context, userID str
 	return err
 }
 
-const deleteUserPendingNotificationsByKind = `-- name: DeleteUserPendingNotificationsByKind :exec
-DELETE FROM notifications WHERE user_id = ?1 AND kind = ?2 AND sent_at IS NULL
+const deleteUserPendingNotificationsByKindAndSource = `-- name: DeleteUserPendingNotificationsByKindAndSource :exec
+DELETE FROM notifications WHERE notifications.user_id = ?1 AND notifications.kind = ?2 AND notifications.sent_at IS NULL
+AND notifications.action_item_id IN (SELECT action_items.id FROM action_items WHERE action_items.user_id = ?3 AND action_items.source = ?4)
 `
 
-type DeleteUserPendingNotificationsByKindParams struct {
-	UserID string
-	Kind   string
+type DeleteUserPendingNotificationsByKindAndSourceParams struct {
+	UserID     string
+	Kind       string
+	ItemUserID string
+	Source     sql.NullString
 }
 
-func (q *Queries) DeleteUserPendingNotificationsByKind(ctx context.Context, arg DeleteUserPendingNotificationsByKindParams) error {
-	_, err := q.db.ExecContext(ctx, deleteUserPendingNotificationsByKind, arg.UserID, arg.Kind)
+func (q *Queries) DeleteUserPendingNotificationsByKindAndSource(ctx context.Context, arg DeleteUserPendingNotificationsByKindAndSourceParams) error {
+	_, err := q.db.ExecContext(ctx, deleteUserPendingNotificationsByKindAndSource,
+		arg.UserID,
+		arg.Kind,
+		arg.ItemUserID,
+		arg.Source,
+	)
 	return err
 }
 
@@ -1083,6 +1160,42 @@ func (q *Queries) GetSession(ctx context.Context, id string) (Session, error) {
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getSlackConnection = `-- name: GetSlackConnection :one
+SELECT user_id, generation, token_sealed, token_last4, team_id, team_name, team_url, slack_user_id, slack_user_name, scopes, immediate_notify, detect_mentions, detect_dms, detect_group_dms, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM slack_connections
+WHERE user_id = ?1
+`
+
+func (q *Queries) GetSlackConnection(ctx context.Context, userID string) (SlackConnection, error) {
+	row := q.db.QueryRowContext(ctx, getSlackConnection, userID)
+	var i SlackConnection
+	err := row.Scan(
+		&i.UserID,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.TokenLast4,
+		&i.TeamID,
+		&i.TeamName,
+		&i.TeamUrl,
+		&i.SlackUserID,
+		&i.SlackUserName,
+		&i.Scopes,
+		&i.ImmediateNotify,
+		&i.DetectMentions,
+		&i.DetectDms,
+		&i.DetectGroupDms,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.ConnectedAt,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastTrackedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -1587,6 +1700,64 @@ func (q *Queries) ListDueNotifications(ctx context.Context, arg ListDueNotificat
 	return items, nil
 }
 
+const listDueSlackConnections = `-- name: ListDueSlackConnections :many
+SELECT user_id, generation, token_sealed, token_last4, team_id, team_name, team_url, slack_user_id, slack_user_name, scopes, immediate_notify, detect_mentions, detect_dms, detect_group_dms, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM slack_connections
+WHERE status = 'active' AND next_poll_at <= ?1 AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY next_poll_at, user_id LIMIT ?2
+`
+
+type ListDueSlackConnectionsParams struct {
+	Now      int64
+	PageSize int64
+}
+
+func (q *Queries) ListDueSlackConnections(ctx context.Context, arg ListDueSlackConnectionsParams) ([]SlackConnection, error) {
+	rows, err := q.db.QueryContext(ctx, listDueSlackConnections, arg.Now, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SlackConnection
+	for rows.Next() {
+		var i SlackConnection
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Generation,
+			&i.TokenSealed,
+			&i.TokenLast4,
+			&i.TeamID,
+			&i.TeamName,
+			&i.TeamUrl,
+			&i.SlackUserID,
+			&i.SlackUserName,
+			&i.Scopes,
+			&i.ImmediateNotify,
+			&i.DetectMentions,
+			&i.DetectDms,
+			&i.DetectGroupDms,
+			&i.Status,
+			&i.LastError,
+			&i.FailureCount,
+			&i.ConnectedAt,
+			&i.NextPollAt,
+			&i.LastSyncedAt,
+			&i.LastTrackedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOAuthGrants = `-- name: ListOAuthGrants :many
 SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
 WHERE user_id = ?1 AND code_used_at IS NOT NULL AND expires_at > ?2
@@ -1691,6 +1862,82 @@ func (q *Queries) ListPushUserIDs(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSlackJudgedKeys = `-- name: ListSlackJudgedKeys :many
+SELECT source_key FROM action_items
+WHERE user_id = ?1 AND source = 'slack' AND substr(source_key, 1, length(?2)) = ?2 AND created_at >= ?3
+ORDER BY created_at DESC, id DESC LIMIT ?4
+`
+
+type ListSlackJudgedKeysParams struct {
+	UserID       string
+	Prefix       interface{}
+	CreatedSince int64
+	PageSize     int64
+}
+
+func (q *Queries) ListSlackJudgedKeys(ctx context.Context, arg ListSlackJudgedKeysParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, listSlackJudgedKeys,
+		arg.UserID,
+		arg.Prefix,
+		arg.CreatedSince,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var source_key sql.NullString
+		if err := rows.Scan(&source_key); err != nil {
+			return nil, err
+		}
+		items = append(items, source_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSlackOpenTasks = `-- name: ListSlackOpenTasks :many
+SELECT content FROM action_items
+WHERE user_id = ?1 AND source = 'slack' AND substr(source_key, 1, length(?2)) = ?2 AND status = 'open' AND tracking = 1
+ORDER BY created_at DESC, id DESC LIMIT ?3
+`
+
+type ListSlackOpenTasksParams struct {
+	UserID   string
+	Prefix   interface{}
+	PageSize int64
+}
+
+func (q *Queries) ListSlackOpenTasks(ctx context.Context, arg ListSlackOpenTasksParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listSlackOpenTasks, arg.UserID, arg.Prefix, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			return nil, err
+		}
+		items = append(items, content)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -2013,6 +2260,42 @@ func (q *Queries) LockPushSubscriptionByEndpoint(ctx context.Context, endpoint s
 	return i, err
 }
 
+const lockSlackConnection = `-- name: LockSlackConnection :one
+SELECT user_id, generation, token_sealed, token_last4, team_id, team_name, team_url, slack_user_id, slack_user_name, scopes, immediate_notify, detect_mentions, detect_dms, detect_group_dms, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, created_at, updated_at FROM slack_connections
+WHERE user_id = ?1
+`
+
+func (q *Queries) LockSlackConnection(ctx context.Context, userID string) (SlackConnection, error) {
+	row := q.db.QueryRowContext(ctx, lockSlackConnection, userID)
+	var i SlackConnection
+	err := row.Scan(
+		&i.UserID,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.TokenLast4,
+		&i.TeamID,
+		&i.TeamName,
+		&i.TeamUrl,
+		&i.SlackUserID,
+		&i.SlackUserName,
+		&i.Scopes,
+		&i.ImmediateNotify,
+		&i.DetectMentions,
+		&i.DetectDms,
+		&i.DetectGroupDms,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.ConnectedAt,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastTrackedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const lockUserByID = `-- name: LockUserByID :one
 SELECT id, email, password_hash, disabled, created_at FROM users WHERE id = ?1
 `
@@ -2159,6 +2442,64 @@ func (q *Queries) ReplaceInstanceSecret(ctx context.Context, arg ReplaceInstance
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const replaceSlackConnection = `-- name: ReplaceSlackConnection :exec
+UPDATE slack_connections SET generation = ?1, token_sealed = ?2, token_last4 = ?3, team_id = ?4, team_name = ?5, team_url = ?6, slack_user_id = ?7, slack_user_name = ?8, scopes = ?9, immediate_notify = ?10, detect_mentions = ?11, detect_dms = ?12, detect_group_dms = ?13, status = ?14, last_error = ?15, failure_count = ?16, connected_at = ?17, next_poll_at = ?18, last_synced_at = ?19, last_tracked_at = ?20, updated_at = ?21
+WHERE user_id = ?22
+`
+
+type ReplaceSlackConnectionParams struct {
+	Generation      int64
+	TokenSealed     string
+	TokenLast4      string
+	TeamID          string
+	TeamName        string
+	TeamUrl         string
+	SlackUserID     string
+	SlackUserName   string
+	Scopes          string
+	ImmediateNotify int64
+	DetectMentions  int64
+	DetectDms       int64
+	DetectGroupDms  int64
+	Status          string
+	LastError       sql.NullString
+	FailureCount    int64
+	ConnectedAt     int64
+	NextPollAt      int64
+	LastSyncedAt    sql.NullInt64
+	LastTrackedAt   sql.NullInt64
+	UpdatedAt       int64
+	UserID          string
+}
+
+func (q *Queries) ReplaceSlackConnection(ctx context.Context, arg ReplaceSlackConnectionParams) error {
+	_, err := q.db.ExecContext(ctx, replaceSlackConnection,
+		arg.Generation,
+		arg.TokenSealed,
+		arg.TokenLast4,
+		arg.TeamID,
+		arg.TeamName,
+		arg.TeamUrl,
+		arg.SlackUserID,
+		arg.SlackUserName,
+		arg.Scopes,
+		arg.ImmediateNotify,
+		arg.DetectMentions,
+		arg.DetectDms,
+		arg.DetectGroupDms,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.ConnectedAt,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastTrackedAt,
+		arg.UpdatedAt,
+		arg.UserID,
+	)
+	return err
 }
 
 const resetPassword = `-- name: ResetPassword :exec
@@ -2482,6 +2823,70 @@ func (q *Queries) UpdatePushSubscriptionKeys(ctx context.Context, arg UpdatePush
 		arg.UserID,
 	)
 	return err
+}
+
+const updateSlackSettings = `-- name: UpdateSlackSettings :execrows
+UPDATE slack_connections SET immediate_notify = ?1, detect_mentions = ?2, detect_dms = ?3, detect_group_dms = ?4, updated_at = ?5
+WHERE user_id = ?6
+`
+
+type UpdateSlackSettingsParams struct {
+	ImmediateNotify int64
+	DetectMentions  int64
+	DetectDms       int64
+	DetectGroupDms  int64
+	UpdatedAt       int64
+	UserID          string
+}
+
+func (q *Queries) UpdateSlackSettings(ctx context.Context, arg UpdateSlackSettingsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateSlackSettings,
+		arg.ImmediateNotify,
+		arg.DetectMentions,
+		arg.DetectDms,
+		arg.DetectGroupDms,
+		arg.UpdatedAt,
+		arg.UserID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateSlackSyncState = `-- name: UpdateSlackSyncState :execrows
+UPDATE slack_connections SET status = ?1, last_error = ?2, failure_count = ?3, next_poll_at = ?4, last_synced_at = ?5, last_tracked_at = ?6, updated_at = ?7
+WHERE user_id = ?8 AND generation = ?9
+`
+
+type UpdateSlackSyncStateParams struct {
+	Status        string
+	LastError     sql.NullString
+	FailureCount  int64
+	NextPollAt    int64
+	LastSyncedAt  sql.NullInt64
+	LastTrackedAt sql.NullInt64
+	UpdatedAt     int64
+	UserID        string
+	Generation    int64
+}
+
+func (q *Queries) UpdateSlackSyncState(ctx context.Context, arg UpdateSlackSyncStateParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateSlackSyncState,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastTrackedAt,
+		arg.UpdatedAt,
+		arg.UserID,
+		arg.Generation,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const upsertCIMDClient = `-- name: UpsertCIMDClient :exec

@@ -158,6 +158,36 @@ CREATE TABLE "github_connections" (
 );
 -- Create index "github_connections_status_next_poll_idx" to table: "github_connections"
 CREATE INDEX "github_connections_status_next_poll_idx" ON "github_connections" ("status", "next_poll_at");
+-- Create "slack_connections" table
+CREATE TABLE "slack_connections" (
+  "user_id" text NOT NULL,
+  "generation" integer NOT NULL,
+  "token_sealed" text NOT NULL,
+  "token_last4" text NOT NULL,
+  "team_id" text NOT NULL,
+  "team_name" text NOT NULL,
+  "team_url" text NOT NULL,
+  "slack_user_id" text NOT NULL,
+  "slack_user_name" text NOT NULL,
+  "scopes" text NOT NULL,
+  "immediate_notify" integer NOT NULL DEFAULT 1,
+  "detect_mentions" integer NOT NULL DEFAULT 1,
+  "detect_dms" integer NOT NULL DEFAULT 1,
+  "detect_group_dms" integer NOT NULL DEFAULT 0,
+  "status" text NOT NULL,
+  "last_error" text NULL,
+  "failure_count" integer NOT NULL DEFAULT 0,
+  "connected_at" integer NOT NULL,
+  "next_poll_at" integer NOT NULL,
+  "last_synced_at" integer NULL,
+  "last_tracked_at" integer NULL,
+  "created_at" integer NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "slack_connections_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "slack_connections_status_next_poll_idx" to table: "slack_connections"
+CREATE INDEX "slack_connections_status_next_poll_idx" ON "slack_connections" ("status", "next_poll_at");
 -- Create "ai_settings" table
 CREATE TABLE "ai_settings" (
   "user_id" text NOT NULL,

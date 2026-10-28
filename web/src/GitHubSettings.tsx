@@ -16,7 +16,10 @@ function formatDate(value: string): string {
   return dateTime(value, new Date());
 }
 
-function TokenForm({ submitLabel, busy, error, onSubmit, onCancel }: {
+// TokenForm asks for a token. label names the kind of token (a GitHub
+// classic personal access token unless given).
+export function TokenForm({ label = 'Personal access token (classic)', submitLabel, busy, error, onSubmit, onCancel }: {
+  label?: string;
   submitLabel: string;
   busy: boolean;
   error: string | null;
@@ -43,7 +46,7 @@ function TokenForm({ submitLabel, busy, error, onSubmit, onCancel }: {
 
   return <form className="action-form" onSubmit={submit} aria-busy={busy}>
     <div className="field">
-      <label htmlFor={inputID}>Personal access token (classic)</label>
+      <label htmlFor={inputID}>{label}</label>
       <input id={inputID} name="token" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={255} value={token} onChange={(e) => { setToken(e.target.value); setValidation(null); }} disabled={busy} aria-describedby={message ? errorID : undefined} />
     </div>
     {message ? <p id={errorID} className="notice error" role="alert">{message}</p> : null}

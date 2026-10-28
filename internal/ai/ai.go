@@ -186,6 +186,17 @@ func (c *Client) JudgeMention(ctx context.Context, key, model string, in Mention
 	if err != nil {
 		return MentionResult{}, err
 	}
+	text, err := c.structured(ctx, key, model, SystemPrompt, user, outputSchema)
+	if err != nil {
+		return MentionResult{}, err
+	}
+	return parseResult(text)
+}
+
+// structured sends one judgment with a fixed system prompt and a JSON
+// schema for the answer, and returns the answer's text. Errors are
+// classified like those of JudgeMention.
+func (c *Client) structured(ctx context.Context, key, model, system, user string, schema map[string]any) (string, error) {
 	rctx, cancel := context.WithTimeout(ctx, c.RequestTimeout)
 	defer cancel()
 	client := c.sdk(key)
@@ -194,18 +205,18 @@ func (c *Client) JudgeMention(ctx context.Context, key, model string, in Mention
 	msg, err := client.Messages.New(rctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
 		MaxTokens: maxTokens,
-		System:    []anthropic.TextBlockParam{{Text: SystemPrompt}},
+		System:    []anthropic.TextBlockParam{{Text: system}},
 		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(user))},
 		OutputConfig: anthropic.OutputConfigParam{
 			Effort: anthropic.OutputConfigEffortLow,
-			Format: anthropic.JSONOutputFormatParam{Schema: outputSchema},
+			Format: anthropic.JSONOutputFormatParam{Schema: schema},
 		},
 	})
 	if err != nil {
-		return MentionResult{}, classify(ctx, err)
+		return "", classify(ctx, err)
 	}
 	if msg.StopReason == anthropic.StopReasonRefusal || msg.StopReason == anthropic.StopReasonMaxTokens {
-		return MentionResult{}, fmt.Errorf("%w (stop reason %s)", ErrUnusable, msg.StopReason)
+		return "", fmt.Errorf("%w (stop reason %s)", ErrUnusable, msg.StopReason)
 	}
 	var text strings.Builder
 	for _, b := range msg.Content {
@@ -213,7 +224,7 @@ func (c *Client) JudgeMention(ctx context.Context, key, model string, in Mention
 			text.WriteString(b.Text)
 		}
 	}
-	return parseResult(text.String())
+	return text.String(), nil
 }
 
 // parseResult decodes and checks the structured output.

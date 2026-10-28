@@ -7,12 +7,15 @@ import (
 	"strings"
 )
 
-var ErrConnectionNotFound = errors.New("GitHub connection not found")
+// ErrConnectionNotFound is returned when the user has no connection of the
+// integration (GitHub or Slack).
+var ErrConnectionNotFound = errors.New("integration connection not found")
 
-// ErrStaleConnection is returned by GitHubSync when the connection was
-// replaced (a new generation), deleted, or its user disabled after the
-// synchronization step started. The step's results must be discarded.
-var ErrStaleConnection = errors.New("GitHub connection was changed or removed")
+// ErrStaleConnection is returned by GitHubSync and SlackSync when the
+// connection was replaced (a new generation), deleted, or its user disabled
+// after the synchronization step started. The step's results must be
+// discarded.
+var ErrStaleConnection = errors.New("integration connection was changed or removed")
 
 // SourceGitHub is action_items.source for items created by the GitHub
 // integration.
@@ -156,8 +159,8 @@ func (s *Store) SetGitHubImmediateNotify(ctx context.Context, userID string, imm
 
 // DeleteGitHubConnection removes the user's connection. The user's GitHub
 // items are kept, but stop being tracked and lose their source key, and
-// detection notifications that were not sent yet are dropped. Deleting a
-// missing connection succeeds.
+// detection notifications of GitHub items that were not sent yet are dropped.
+// Deleting a missing connection succeeds.
 func (s *Store) DeleteGitHubConnection(ctx context.Context, userID, sessionID string, now int64) error {
 	return s.transaction(ctx, func(q queries) error {
 		// Lock order: users, github_connections, action_items, notifications.
@@ -170,7 +173,7 @@ func (s *Store) DeleteGitHubConnection(ctx context.Context, userID, sessionID st
 		if e := q.untrackSourceActionItems(ctx, userID, SourceGitHub, now); e != nil {
 			return e
 		}
-		return q.deleteUserPendingNotificationsByKind(ctx, userID, NotificationDetected)
+		return q.deleteUserPendingNotificationsBySource(ctx, userID, NotificationDetected, SourceGitHub)
 	})
 }
 
@@ -194,8 +197,7 @@ func (s *Store) TrackedActionItems(ctx context.Context, userID, source string, l
 // action_items, notifications: GitHubSync has locked users and
 // github_connections, so callers write items before notifications.
 type GitHubTx struct {
-	ctx  context.Context
-	q    queries
+	sourceTx
 	Conn GitHubConnection
 }
 
@@ -205,15 +207,8 @@ type GitHubTx struct {
 // returned. External requests must never be made inside fn.
 func (s *Store) GitHubSync(ctx context.Context, userID string, generation int64, fn func(*GitHubTx) error) error {
 	return s.transaction(ctx, func(q queries) error {
-		u, e := q.lockUser(ctx, userID)
-		if errors.Is(e, sql.ErrNoRows) {
-			return ErrStaleConnection
-		}
-		if e != nil {
+		if e := lockSyncUser(ctx, q, userID); e != nil {
 			return e
-		}
-		if u.Disabled != 0 {
-			return ErrStaleConnection
 		}
 		c, e := q.lockGitHubConnection(ctx, userID)
 		if errors.Is(e, sql.ErrNoRows) {
@@ -225,8 +220,24 @@ func (s *Store) GitHubSync(ctx context.Context, userID string, generation int64,
 		if c.Generation != generation {
 			return ErrStaleConnection
 		}
-		return fn(&GitHubTx{ctx: ctx, q: q, Conn: c})
+		return fn(&GitHubTx{sourceTx: sourceTx{ctx: ctx, q: q, userID: userID}, Conn: c})
 	})
+}
+
+// lockSyncUser locks the user row of a synchronization step and checks that
+// the user exists and is enabled.
+func lockSyncUser(ctx context.Context, q queries, userID string) error {
+	u, e := q.lockUser(ctx, userID)
+	if errors.Is(e, sql.ErrNoRows) {
+		return ErrStaleConnection
+	}
+	if e != nil {
+		return e
+	}
+	if u.Disabled != 0 {
+		return ErrStaleConnection
+	}
+	return nil
 }
 
 // SaveState stores the synchronization fields of c (status, errors, poll
@@ -244,9 +255,18 @@ func (t *GitHubTx) SaveState(c GitHubConnection) error {
 	return nil
 }
 
+// sourceTx holds the item and notification writes shared by the
+// synchronization steps of every integration (GitHubTx, SlackTx). It only
+// touches the rows of userID.
+type sourceTx struct {
+	ctx    context.Context
+	q      queries
+	userID string
+}
+
 // LockItemBySourceKey locks the user's item with the source key.
-func (t *GitHubTx) LockItemBySourceKey(key string) (ActionItem, bool, error) {
-	item, e := t.q.lockActionItemBySourceKey(t.ctx, t.Conn.UserID, key)
+func (t *sourceTx) LockItemBySourceKey(key string) (ActionItem, bool, error) {
+	item, e := t.q.lockActionItemBySourceKey(t.ctx, t.userID, key)
 	if errors.Is(e, sql.ErrNoRows) {
 		return ActionItem{}, false, nil
 	}
@@ -254,8 +274,8 @@ func (t *GitHubTx) LockItemBySourceKey(key string) (ActionItem, bool, error) {
 }
 
 // LockItem locks the user's item.
-func (t *GitHubTx) LockItem(id string) (ActionItem, bool, error) {
-	item, e := t.q.lockActionItem(t.ctx, t.Conn.UserID, id)
+func (t *sourceTx) LockItem(id string) (ActionItem, bool, error) {
+	item, e := t.q.lockActionItem(t.ctx, t.userID, id)
 	if errors.Is(e, sql.ErrNoRows) {
 		return ActionItem{}, false, nil
 	}
@@ -264,8 +284,8 @@ func (t *GitHubTx) LockItem(id string) (ActionItem, bool, error) {
 
 // CreateItem inserts item unless the user already has an item with its
 // source key, and reports whether it was inserted.
-func (t *GitHubTx) CreateItem(item ActionItem) (bool, error) {
-	item.UserID = t.Conn.UserID
+func (t *sourceTx) CreateItem(item ActionItem) (bool, error) {
+	item.UserID = t.userID
 	n, e := t.q.insertSourcedActionItem(t.ctx, item)
 	return n == 1, e
 }
@@ -273,7 +293,7 @@ func (t *GitHubTx) CreateItem(item ActionItem) (bool, error) {
 // UpdateItem stores next, which must have been read with LockItem or
 // LockItemBySourceKey, with its version incremented and reports whether the
 // stored version still matched.
-func (t *GitHubTx) UpdateItem(current, next ActionItem) (ActionItem, bool, error) {
+func (t *sourceTx) UpdateItem(current, next ActionItem) (ActionItem, bool, error) {
 	next.ID, next.UserID, next.CreatedAt, next.Version = current.ID, current.UserID, current.CreatedAt, current.Version+1
 	n, e := t.q.updateActionItem(t.ctx, next, current.Version)
 	if e != nil || n != 1 {
@@ -284,23 +304,23 @@ func (t *GitHubTx) UpdateItem(current, next ActionItem) (ActionItem, bool, error
 
 // TouchItem records that item was checked, without changing its version.
 // Nothing is written when the item changed since it was locked.
-func (t *GitHubTx) TouchItem(item ActionItem, now int64) error {
-	_, e := t.q.touchActionItemTracked(t.ctx, t.Conn.UserID, item.ID, item.Version, now)
+func (t *sourceTx) TouchItem(item ActionItem, now int64) error {
+	_, e := t.q.touchActionItemTracked(t.ctx, t.userID, item.ID, item.Version, now)
 	return e
 }
 
 // Enqueue adds n to the notifications to send unless the user already has
 // one with its dedupe key.
-func (t *GitHubTx) Enqueue(n Notification) error {
-	n.UserID = t.Conn.UserID
+func (t *sourceTx) Enqueue(n Notification) error {
+	n.UserID = t.userID
 	_, e := t.q.enqueueNotification(t.ctx, n)
 	return e
 }
 
 // DropPendingNotifications deletes the notifications of the item that were
 // not sent yet.
-func (t *GitHubTx) DropPendingNotifications(itemID string) error {
-	return t.q.deleteItemPendingNotifications(t.ctx, t.Conn.UserID, itemID)
+func (t *sourceTx) DropPendingNotifications(itemID string) error {
+	return t.q.deleteItemPendingNotifications(t.ctx, t.userID, itemID)
 }
 
 func boolInt(v bool) int64 {

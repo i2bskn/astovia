@@ -1,5 +1,5 @@
-// Clients of the GitHub integration, Web Push subscription and notification
-// settings APIs. The request function is injected (normally auth.ts's
+// Clients of the GitHub and Slack integration, Web Push subscription and
+// notification settings APIs. The request function is injected (normally auth.ts's
 // request) so that this module can be tested with a fake.
 import type { RequestFunction } from './actionItems';
 
@@ -16,6 +16,28 @@ export interface GitHubConnection {
 }
 
 export type GitHubState = { connected: false } | GitHubConnection;
+
+export interface SlackSettings {
+  immediate_notify: boolean;
+  detect_mentions: boolean;
+  detect_dms: boolean;
+  detect_group_dms: boolean;
+}
+
+export interface SlackConnection extends SlackSettings {
+  connected: true;
+  team_name: string;
+  team_url: string;
+  user_name: string;
+  token_last4: string;
+  scopes: string[];
+  status: string;
+  last_error: string | null;
+  last_synced_at: string | null;
+  created_at: string;
+}
+
+export type SlackState = { connected: false } | SlackConnection;
 
 export interface PushDevice {
   id: string;
@@ -57,6 +79,19 @@ function readGitHub(data: unknown): GitHubState {
   throw new Error('Unexpected GitHub integration response');
 }
 
+function readSlack(data: unknown): SlackState {
+  if (isRecord(data) && data.connected === false) return { connected: false };
+  if (
+    isRecord(data) && data.connected === true &&
+    typeof data.team_name === 'string' && typeof data.team_url === 'string' && typeof data.user_name === 'string' &&
+    typeof data.token_last4 === 'string' && Array.isArray(data.scopes) && data.scopes.every((s) => typeof s === 'string') &&
+    typeof data.immediate_notify === 'boolean' && typeof data.detect_mentions === 'boolean' &&
+    typeof data.detect_dms === 'boolean' && typeof data.detect_group_dms === 'boolean' && typeof data.status === 'string' &&
+    nullableString(data.last_error) && nullableString(data.last_synced_at) && typeof data.created_at === 'string'
+  ) return data as unknown as SlackConnection;
+  throw new Error('Unexpected Slack integration response');
+}
+
 function isDevice(value: unknown): value is PushDevice {
   return isRecord(value) && typeof value.id === 'string' && value.id !== '' && typeof value.label === 'string' &&
     typeof value.created_at === 'string' && nullableString(value.last_used_at);
@@ -96,6 +131,19 @@ export function createIntegrationsClient(request: RequestFunction) {
     },
     async disconnectGitHub(): Promise<void> {
       await request<unknown>('/api/v1/integrations/github', { method: 'DELETE' });
+    },
+    async getSlack(): Promise<SlackState> {
+      return readSlack(await request<unknown>('/api/v1/integrations/slack'));
+    },
+    // Settings left out keep their current values.
+    async connectSlack(token: string, settings: Partial<SlackSettings> = {}): Promise<SlackState> {
+      return readSlack(await request<unknown>('/api/v1/integrations/slack', json('PUT', { ...settings, token })));
+    },
+    async updateSlackSettings(settings: Partial<SlackSettings>): Promise<SlackState> {
+      return readSlack(await request<unknown>('/api/v1/integrations/slack', json('PATCH', settings)));
+    },
+    async disconnectSlack(): Promise<void> {
+      await request<unknown>('/api/v1/integrations/slack', { method: 'DELETE' });
     },
     async getPushPublicKey(): Promise<string> {
       const data = await request<unknown>('/api/v1/push/public-key');

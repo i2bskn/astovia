@@ -153,6 +153,42 @@ func testGitHubConnections(t *testing.T, driver string) {
 	}
 }
 
+// Disconnecting one integration drops only its own pending detections.
+func TestDeleteConnectionKeepsOtherSources(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := apiTokenFixture(t, driver)
+			c := saveConnection(t, s, "alice-id", "octocat", nil)
+			err := s.GitHubSync(ctx, "alice-id", c.Generation, func(tx *store.GitHubTx) error {
+				other := githubItem("slack-item", "slack:T1:m:C1:-:1.000001", 100)
+				other.Source = sql.NullString{String: store.SourceSlack, Valid: true}
+				for _, item := range []store.ActionItem{githubItem("gh-item", "github:review:o/r#1", 100), other} {
+					if _, e := tx.CreateItem(item); e != nil {
+						return e
+					}
+					if e := tx.Enqueue(notification("n-"+item.ID, store.NotificationDetected, "detected:"+item.ID+":1", item.ID, 100)); e != nil {
+						return e
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = s.DeleteGitHubConnection(ctx, "alice-id", "alice-session", tokenTestNow); err != nil {
+				t.Fatal(err)
+			}
+			if has, err := s.HasNotification(ctx, "alice-id", "detected:gh-item:1"); err != nil || has {
+				t.Fatalf("GitHub detection kept: %v %v", has, err)
+			}
+			if has, err := s.HasNotification(ctx, "alice-id", "detected:slack-item:1"); err != nil || !has {
+				t.Fatalf("Slack detection dropped by the GitHub disconnect: %v %v", has, err)
+			}
+		})
+	}
+}
+
 func TestSourcedActionItems(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) { testSourcedActionItems(t, driver) })

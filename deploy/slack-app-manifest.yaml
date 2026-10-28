@@ -1,0 +1,20 @@
+display_information:
+  name: Astovia
+  description: Reads your mentions and direct messages so that Astovia can turn them into tasks.
+oauth_config:
+  scopes:
+    user:
+      - search:read
+      - users:read
+      - channels:read
+      - groups:read
+      - im:read
+      - mpim:read
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

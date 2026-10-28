@@ -13,6 +13,8 @@ import (
 	"github.com/i2bskn/astovia/internal/httpserver"
 	"github.com/i2bskn/astovia/internal/notify"
 	"github.com/i2bskn/astovia/internal/secretbox"
+	"github.com/i2bskn/astovia/internal/slack"
+	"github.com/i2bskn/astovia/internal/slacksync"
 	"github.com/i2bskn/astovia/internal/store"
 	"github.com/i2bskn/astovia/internal/worker"
 	"github.com/i2bskn/astovia/web"
@@ -94,14 +96,17 @@ func run(args []string) error {
 }
 
 // startWorkers starts the background loops of serve: GitHub synchronization
-// (with the AI judging mentions), the notification engine, the dispatcher
+// (with the AI judging mentions), Slack synchronization (with the AI judging
+// messages and replies), the notification engine, the dispatcher
 // and the cleanup of sent notifications. They share the authentication
 // service's clock. They stop when ctx is canceled; the returned group
 // finishes when they have returned.
 func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.Service) *sync.WaitGroup {
 	now := func() time.Time { return a.Now() }
 	box := secretbox.New(c.Secret)
-	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: ai.New(), Box: box, Now: now}
+	aiClient := ai.New()
+	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: aiClient, Box: box, Now: now}
+	slackSyncer := &slacksync.Syncer{Store: s, Slack: slack.New(now), AI: aiClient, Box: box, Now: now}
 	engine := &notify.Engine{Store: s, Now: now}
 	vapid := &notify.VAPID{Store: s, Box: box, Now: now}
 	dispatcher := &notify.Dispatcher{Store: s, Channel: notify.NewWebPush(s, vapid, c.PublicURL, now), Now: now}
@@ -112,6 +117,7 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 		fn       func(context.Context)
 	}{
 		{"github sync", 15 * time.Second, syncer.RunOnce},
+		{"slack sync", 15 * time.Second, slackSyncer.RunOnce},
 		{"notification engine", time.Minute, engine.RunOnce},
 		{"notification dispatcher", 5 * time.Second, dispatcher.RunOnce},
 		{"notification cleanup", time.Hour, dispatcher.Cleanup},

@@ -1,5 +1,5 @@
-// Labels and checks for automatically processed items and the GitHub
-// integration. Pure functions, tested without a browser.
+// Labels and checks for automatically processed items and the GitHub and
+// Slack integrations. Pure functions, tested without a browser.
 
 const reasonLabels: Readonly<Record<string, string>> = {
   'github.review_submitted': 'レビューを提出した',
@@ -9,6 +9,8 @@ const reasonLabels: Readonly<Record<string, string>> = {
   'github.issue_closed': 'Issue がクローズされた',
   'github.unassigned': '割り当てが外れた',
   'github.mention_no_action': '対応は不要と判断した',
+  'slack.no_action': '対応不要と判定',
+  'slack.reply_resolved': '返信で対応済み',
 };
 
 // autoReasonLabel returns the Japanese label of an automatic completion
@@ -62,3 +64,38 @@ export function githubErrorMessage(code: string | null): string {
 // GITHUB_TOKEN_URL opens GitHub's classic token page with the scopes Astovia
 // needs.
 export const GITHUB_TOKEN_URL = 'https://github.com/settings/tokens/new?scopes=repo,notifications&description=Astovia';
+
+const slackConnectionErrors: Readonly<Record<string, string>> = {
+  token_invalid: 'トークンが無効になりました。トークンを更新してください。',
+  token_undecryptable: '保存したトークンを読み出せません。トークンを登録し直してください。',
+  scopes_missing: '必要な権限が足りません。アプリの権限を確認して、トークンを更新してください。',
+  rate_limited: 'Slack の利用上限に達したため、一時的に止まっています。',
+  unavailable: 'Slack に接続できない状態が続いています。',
+};
+
+// slackStatusMessage describes the synchronization state of a Slack
+// connection.
+export function slackStatusMessage(status: string, lastError: string | null): string {
+  if (lastError && Object.hasOwn(slackConnectionErrors, lastError)) return slackConnectionErrors[lastError] ?? lastError;
+  if (status === 'error') return 'エラーで停止しています。トークンを更新してください。';
+  return '正常';
+}
+
+// SLACK_TOKEN_PREFIX starts every Slack user token (User OAuth Token).
+export const SLACK_TOKEN_PREFIX = 'xoxp-';
+
+// slackErrorMessage describes why registering a Slack token failed, from the
+// error code of the response.
+export function slackErrorMessage(code: string | null): string {
+  switch (code) {
+    case 'slack_token_invalid':
+      return 'トークンが無効です。User OAuth Token（xoxp-）を貼ってください。';
+    case 'slack_scopes_missing':
+      return '必要な権限が足りません。下のマニフェストで作ったアプリのトークンを貼ってください。';
+    case 'slack_unavailable':
+      return 'Slack に接続できませんでした。時間をおいて試してください。';
+    case 'invalid_request':
+      return 'トークンの形式が正しくありません。';
+  }
+  return 'Slack と接続できませんでした。接続を確認して、もう一度お試しください。';
+}

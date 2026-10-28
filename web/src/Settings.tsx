@@ -12,7 +12,8 @@ import { createIntegrationsClient } from './integrations';
 import NotificationSettings from './NotificationSettings';
 import { createOAuthClient } from './oauth';
 import Phrased from './Phrased';
-import { clientsStatus, devicesStatus, githubStatus, settingsPageAt, settingsPages } from './settingsPages';
+import SlackSettings from './SlackSettings';
+import { clientsStatus, devicesStatus, integrationsStatus, settingsPageAt, settingsPages } from './settingsPages';
 import type { SettingsPage } from './settingsPages';
 
 const integrations = createIntegrationsClient(request);
@@ -60,12 +61,12 @@ function SettingsIndex({ email }: { email: string }) {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([integrations.getGitHub(), ai.getAI(), integrations.listPushDevices(), oauth.listConnections(), apiTokens.listAPITokens()])
-      .then(([github, aiState, devices, connections, tokens]) => {
+    void Promise.allSettled([integrations.getGitHub(), integrations.getSlack(), ai.getAI(), integrations.listPushDevices(), oauth.listConnections(), apiTokens.listAPITokens()])
+      .then(([github, slack, aiState, devices, connections, tokens]) => {
         if (!active) return;
         // A page whose state could not be read keeps its summary.
         setStatus({
-          integrations: github.status === 'fulfilled' ? githubStatus(github.value) : undefined,
+          integrations: integrationsStatus(github.status === 'fulfilled' ? github.value : undefined, slack.status === 'fulfilled' ? slack.value : undefined),
           ai: aiState.status === 'fulfilled' ? aiStatus(aiState.value) : undefined,
           notifications: devices.status === 'fulfilled' ? devicesStatus(devices.value) : undefined,
           'ai-clients': connections.status === 'fulfilled' && tokens.status === 'fulfilled' ? clientsStatus(connections.value, tokens.value) : undefined,
@@ -106,7 +107,7 @@ export default function Settings({ email }: { email: string }) {
     </nav>
     <Routes>
       <Route index element={phone ? <SettingsIndex email={email} /> : <Navigate to="/settings/integrations" replace />} />
-      <Route path="integrations" element={<GitHubSettings />} />
+      <Route path="integrations" element={<div className="settings-stack"><GitHubSettings /><SlackSettings /></div>} />
       <Route path="ai" element={<AISettings />} />
       <Route path="notifications" element={<NotificationSettings />} />
       <Route path="ai-clients" element={<div className="settings-stack"><ConnectionList /><APITokenList /></div>} />
