@@ -102,6 +102,9 @@ WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND version = sqlc.arg(v
 -- name: UntrackSourceActionItems :exec
 UPDATE action_items SET tracking = 0, source_key = NULL, version = version + 1, updated_at = sqlc.arg(updated_at)
 WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND (tracking = 1 OR source_key IS NOT NULL);
+-- name: StopTrackingSourceActionItems :exec
+UPDATE action_items SET tracking = 0, version = version + 1, updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND tracking = 1;
 -- name: ListCandidateSweepUserIDs :many
 SELECT DISTINCT user_id FROM action_items
 WHERE (status = 'candidate' OR (kind = 'event' AND status IN ('open','candidate') AND event_start_at IS NOT NULL AND event_start_at <= sqlc.arg(now)))
@@ -239,6 +242,38 @@ ORDER BY next_poll_at, user_id LIMIT sqlc.arg(page_size);
 SELECT source_key FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND source = 'slack' AND substr(source_key, 1, length(sqlc.arg(prefix)::text)) = sqlc.arg(prefix)::text AND created_at >= sqlc.arg(created_since)
 ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: GetChatworkConnection :one
+SELECT user_id, generation, token_sealed, token_last4, account_id, account_name, organization_name, immediate_notify, detect_mentions, detect_dms, import_tasks, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, last_tasks_at, created_at, updated_at FROM chatwork_connections
+WHERE user_id = sqlc.arg(user_id);
+-- name: LockChatworkConnection :one
+SELECT user_id, generation, token_sealed, token_last4, account_id, account_name, organization_name, immediate_notify, detect_mentions, detect_dms, import_tasks, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, last_tasks_at, created_at, updated_at FROM chatwork_connections
+WHERE user_id = sqlc.arg(user_id) FOR UPDATE;
+-- name: CreateChatworkConnection :exec
+INSERT INTO chatwork_connections (user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(generation),sqlc.arg(token_sealed),sqlc.arg(token_last4),sqlc.arg(account_id),sqlc.arg(account_name),sqlc.arg(organization_name),sqlc.arg(immediate_notify),sqlc.arg(detect_mentions),sqlc.arg(detect_dms),sqlc.arg(import_tasks),sqlc.arg(status),sqlc.arg(last_error),sqlc.arg(failure_count),sqlc.arg(connected_at),sqlc.arg(next_poll_at),sqlc.arg(last_synced_at),sqlc.arg(last_tracked_at),sqlc.arg(last_tasks_at),sqlc.arg(created_at),sqlc.arg(updated_at));
+-- name: ReplaceChatworkConnection :exec
+UPDATE chatwork_connections SET generation = sqlc.arg(generation), token_sealed = sqlc.arg(token_sealed), token_last4 = sqlc.arg(token_last4), account_id = sqlc.arg(account_id), account_name = sqlc.arg(account_name), organization_name = sqlc.arg(organization_name), immediate_notify = sqlc.arg(immediate_notify), detect_mentions = sqlc.arg(detect_mentions), detect_dms = sqlc.arg(detect_dms), import_tasks = sqlc.arg(import_tasks), status = sqlc.arg(status), last_error = sqlc.arg(last_error), failure_count = sqlc.arg(failure_count), connected_at = sqlc.arg(connected_at), next_poll_at = sqlc.arg(next_poll_at), last_synced_at = sqlc.arg(last_synced_at), last_tracked_at = sqlc.arg(last_tracked_at), last_tasks_at = sqlc.arg(last_tasks_at), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id);
+-- name: UpdateChatworkSyncState :execrows
+UPDATE chatwork_connections SET status = sqlc.arg(status), last_error = sqlc.arg(last_error), failure_count = sqlc.arg(failure_count), next_poll_at = sqlc.arg(next_poll_at), last_synced_at = sqlc.arg(last_synced_at), last_tracked_at = sqlc.arg(last_tracked_at), last_tasks_at = sqlc.arg(last_tasks_at), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation);
+-- name: UpdateChatworkSettings :execrows
+UPDATE chatwork_connections SET immediate_notify = sqlc.arg(immediate_notify), detect_mentions = sqlc.arg(detect_mentions), detect_dms = sqlc.arg(detect_dms), import_tasks = sqlc.arg(import_tasks), updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id);
+-- name: DeleteChatworkConnection :exec
+DELETE FROM chatwork_connections WHERE user_id = sqlc.arg(user_id);
+-- name: ListDueChatworkConnections :many
+SELECT user_id, generation, token_sealed, token_last4, account_id, account_name, organization_name, immediate_notify, detect_mentions, detect_dms, import_tasks, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, last_tasks_at, created_at, updated_at FROM chatwork_connections
+WHERE status = 'active' AND next_poll_at <= sqlc.arg(now) AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY next_poll_at, user_id LIMIT sqlc.arg(page_size);
+-- name: ListChatworkJudgedKeys :many
+SELECT source_key FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = 'chatwork' AND substr(source_key, 1, length(sqlc.arg(prefix)::text)) = sqlc.arg(prefix)::text AND created_at >= sqlc.arg(created_since)
+ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListChatworkTaskItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = 'chatwork' AND status = 'open' AND substr(source_key, 1, length(sqlc.arg(prefix)::text)) = sqlc.arg(prefix)::text
+ORDER BY created_at, id LIMIT sqlc.arg(page_size);
 -- name: ListChildActionItems :many
 SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND parent_id = sqlc.arg(parent_id)

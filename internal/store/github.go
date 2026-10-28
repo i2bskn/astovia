@@ -11,9 +11,9 @@ import (
 // integration (GitHub or Slack).
 var ErrConnectionNotFound = errors.New("integration connection not found")
 
-// ErrStaleConnection is returned by GitHubSync and SlackSync when the
-// connection was replaced (a new generation), deleted, or its user disabled
-// after the synchronization step started. The step's results must be
+// ErrStaleConnection is returned by GitHubSync, SlackSync and ChatworkSync
+// when the connection was replaced (a new generation), deleted, or its user
+// disabled after the synchronization step started. The step's results must be
 // discarded.
 var ErrStaleConnection = errors.New("integration connection was changed or removed")
 

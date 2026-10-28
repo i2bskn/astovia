@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { accountPageAt, accountPages, clientsStatus, devicesStatus, githubStatus, integrationsStatus, legacyAccountPath, settingsPageAt, settingsPages, slackStatus, visibleAccountPages } from '../.test-build/settingsPages.js';
+import { accountPageAt, accountPages, chatworkStatus, clientsStatus, devicesStatus, githubStatus, integrationsStatus, legacyAccountPath, settingsPageAt, settingsPages, slackStatus, visibleAccountPages } from '../.test-build/settingsPages.js';
 
 test('settings has four pages under /settings', () => {
   assert.deepEqual(settingsPages.map((p) => p.path), ['integrations', 'ai', 'notifications', 'ai-clients']);
@@ -55,6 +55,22 @@ test('the integrations page sums up GitHub and Slack', () => {
   assert.equal(integrationsStatus(github, { ...slack, status: 'error' }), 'Slack（Acme）の接続を確認してください');
   assert.equal(integrationsStatus(undefined, slack), 'Slack（Acme）と連携中');
   assert.equal(integrationsStatus(undefined, undefined), undefined);
+});
+
+const chatwork = { connected: true, account_name: 'alice', organization_name: 'Acme', token_last4: '1234', immediate_notify: true, detect_mentions: true, detect_dms: true, import_tasks: true, status: 'active', last_error: null, last_synced_at: null, created_at: '2026-10-01T00:00:00Z' };
+
+test('the integrations page sums up Chatwork too', () => {
+  assert.equal(settingsPages[0].summary, 'GitHub・Slack・Chatwork からタスクを見つける');
+  assert.equal(chatworkStatus({ connected: false }), 'Chatwork は未接続');
+  assert.equal(chatworkStatus(chatwork), 'Chatwork（alice）と連携中');
+  assert.equal(chatworkStatus({ ...chatwork, last_error: 'rate_limited' }), 'Chatwork（alice）の接続を確認してください');
+  assert.equal(chatworkStatus({ ...chatwork, status: 'error' }), 'Chatwork（alice）の接続を確認してください');
+  assert.equal(integrationsStatus(github, slack, chatwork), 'GitHub（octo）と連携中 · Slack（Acme）と連携中 · Chatwork（alice）と連携中');
+  assert.equal(integrationsStatus({ connected: false }, { connected: false }, { connected: false }), 'GitHub は未接続 · Slack は未接続 · Chatwork は未接続');
+  assert.equal(integrationsStatus(github, slack, { ...chatwork, status: 'error' }), 'Chatwork（alice）の接続を確認してください');
+  assert.equal(integrationsStatus(undefined, undefined, chatwork), 'Chatwork（alice）と連携中');
+  assert.equal(integrationsStatus({ connected: false }, undefined, chatwork), 'Chatwork（alice）と連携中');
+  assert.equal(integrationsStatus(undefined, undefined, undefined), undefined);
 });
 
 test('the user management page is shown to owners only', () => {

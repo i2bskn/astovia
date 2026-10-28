@@ -1,5 +1,5 @@
-// Labels and checks for automatically processed items and the GitHub and
-// Slack integrations. Pure functions, tested without a browser.
+// Labels and checks for automatically processed items and the GitHub, Slack
+// and Chatwork integrations. Pure functions, tested without a browser.
 
 const reasonLabels: Readonly<Record<string, string>> = {
   'github.review_submitted': 'レビューを提出した',
@@ -11,6 +11,11 @@ const reasonLabels: Readonly<Record<string, string>> = {
   'github.mention_no_action': '対応は不要と判断した',
   'slack.no_action': '対応不要と判定',
   'slack.reply_resolved': '返信で対応済み',
+  'chatwork.no_action': '対応不要と判定',
+  'chatwork.reply_resolved': '返信で対応済み',
+  // Given when the task left the list for any reason (completed, deleted,
+  // reassigned or the room left), so the cause is not named.
+  'chatwork.task_closed': 'Chatwork のタスク一覧から外れた',
   'candidate.expired': '候補のまま期間が過ぎた',
   'event.passed': '予定の時刻を過ぎた',
   'children.done': '子タスクがすべて完了した',
@@ -107,4 +112,33 @@ export function slackErrorMessage(code: string | null): string {
       return 'トークンの形式が正しくありません。';
   }
   return 'Slack と接続できませんでした。接続を確認して、もう一度お試しください。';
+}
+
+const chatworkConnectionErrors: Readonly<Record<string, string>> = {
+  token_invalid: 'トークンが無効になりました。トークンを更新してください。',
+  token_undecryptable: '保存したトークンを読み出せません。トークンを登録し直してください。',
+  rate_limited: 'Chatwork の利用上限に達したため、一時的に止まっています。',
+  unavailable: 'Chatwork に接続できない状態が続いています。',
+};
+
+// chatworkStatusMessage describes the synchronization state of a Chatwork
+// connection.
+export function chatworkStatusMessage(status: string, lastError: string | null): string {
+  if (lastError && Object.hasOwn(chatworkConnectionErrors, lastError)) return chatworkConnectionErrors[lastError] ?? lastError;
+  if (status === 'error') return 'エラーで停止しています。トークンを更新してください。';
+  return '正常';
+}
+
+// chatworkErrorMessage describes why registering a Chatwork API token
+// failed, from the error code of the response.
+export function chatworkErrorMessage(code: string | null): string {
+  switch (code) {
+    case 'chatwork_token_invalid':
+      return 'トークンが無効です。';
+    case 'chatwork_unavailable':
+      return 'Chatwork に接続できませんでした。時間をおいて試してください。';
+    case 'invalid_request':
+      return 'トークンの形式が正しくありません。';
+  }
+  return 'Chatwork と接続できませんでした。接続を確認して、もう一度お試しください。';
 }

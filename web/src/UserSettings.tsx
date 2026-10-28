@@ -180,7 +180,7 @@ function UserRow({ user, actions, confirming, busy, onAsk, onCancel, onChange, o
         <div><dt>状態</dt><dd className={user.disabled ? 'status-error' : undefined}>{user.disabled ? '無効' : '有効'}</dd></div>
         <div><dt>作成</dt><dd>{formatDate(user.created_at)}</dd></div>
       </dl>
-      {confirming === 'disable' ? <p className="action-note"><Phrased text="無効にすると、すぐにログアウトされ、API トークン、AI クライアントの接続、GitHub と Slack の連携、AI の設定、通知を受け取る端末の登録を削除します。タスクと通知の設定は残ります。再開しても、削除したものは戻りません。" /></p> : null}
+      {confirming === 'disable' ? <p className="action-note"><Phrased text="無効にすると、すぐにログアウトされ、API トークン、AI クライアントの接続、GitHub・Slack・Chatwork の連携、AI の設定、通知を受け取る端末の登録を削除します。タスクと通知の設定は残ります。再開しても、削除したものは戻りません。" /></p> : null}
       {confirming === 'demote-self' ? <p className="action-note"><Phrased text="メンバーになると、このユーザー管理の画面はすぐに使えなくなります。" /></p> : null}
       {confirming === 'reset' ? <p className="action-note"><Phrased text="リンクを開くとパスワードを決め直して、このユーザーとしてログインできます。以前に発行したこのユーザーのリンクは使えなくなります。" /></p> : null}
     </div>

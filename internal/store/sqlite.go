@@ -259,6 +259,9 @@ func (q sqliteQueries) touchActionItemTracked(ctx context.Context, userID, id st
 func (q sqliteQueries) untrackSourceActionItems(ctx context.Context, userID, source string, now int64) error {
 	return q.q.UntrackSourceActionItems(ctx, db.UntrackSourceActionItemsParams{UpdatedAt: now, UserID: userID, Source: sql.NullString{String: source, Valid: true}})
 }
+func (q sqliteQueries) stopTrackingSourceActionItems(ctx context.Context, userID, source string, now int64) error {
+	return q.q.StopTrackingSourceActionItems(ctx, db.StopTrackingSourceActionItemsParams{UpdatedAt: now, UserID: userID, Source: sql.NullString{String: source, Valid: true}})
+}
 func (q sqliteQueries) listCandidateSweepUserIDs(ctx context.Context, now int64) ([]string, error) {
 	ids, err := q.q.ListCandidateSweepUserIDs(ctx, sql.NullInt64{Int64: now, Valid: true})
 	if ids == nil {
@@ -385,6 +388,54 @@ func (q sqliteQueries) listSlackJudgedKeys(ctx context.Context, userID, prefix s
 		out = append(out, row.String)
 	}
 	return out, nil
+}
+func (q sqliteQueries) chatworkConnection(ctx context.Context, userID string) (ChatworkConnection, error) {
+	row, err := q.q.GetChatworkConnection(ctx, userID)
+	return fromSQLiteChatwork(row), err
+}
+func (q sqliteQueries) lockChatworkConnection(ctx context.Context, userID string) (ChatworkConnection, error) {
+	row, err := q.q.LockChatworkConnection(ctx, userID)
+	return fromSQLiteChatwork(row), err
+}
+func (q sqliteQueries) createChatworkConnection(ctx context.Context, c ChatworkConnection) error {
+	return q.q.CreateChatworkConnection(ctx, db.CreateChatworkConnectionParams{UserID: c.UserID, Generation: c.Generation, TokenSealed: c.TokenSealed, TokenLast4: c.TokenLast4, AccountID: c.AccountID, AccountName: c.AccountName, OrganizationName: c.OrganizationName, ImmediateNotify: c.ImmediateNotify, DetectMentions: c.DetectMentions, DetectDms: c.DetectDMs, ImportTasks: c.ImportTasks, Status: c.Status, LastError: c.LastError, FailureCount: c.FailureCount, ConnectedAt: c.ConnectedAt, NextPollAt: c.NextPollAt, LastSyncedAt: c.LastSyncedAt, LastTrackedAt: c.LastTrackedAt, LastTasksAt: c.LastTasksAt, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt})
+}
+func (q sqliteQueries) replaceChatworkConnection(ctx context.Context, c ChatworkConnection) error {
+	return q.q.ReplaceChatworkConnection(ctx, db.ReplaceChatworkConnectionParams{Generation: c.Generation, TokenSealed: c.TokenSealed, TokenLast4: c.TokenLast4, AccountID: c.AccountID, AccountName: c.AccountName, OrganizationName: c.OrganizationName, ImmediateNotify: c.ImmediateNotify, DetectMentions: c.DetectMentions, DetectDms: c.DetectDMs, ImportTasks: c.ImportTasks, Status: c.Status, LastError: c.LastError, FailureCount: c.FailureCount, ConnectedAt: c.ConnectedAt, NextPollAt: c.NextPollAt, LastSyncedAt: c.LastSyncedAt, LastTrackedAt: c.LastTrackedAt, LastTasksAt: c.LastTasksAt, UpdatedAt: c.UpdatedAt, UserID: c.UserID})
+}
+func (q sqliteQueries) updateChatworkSyncState(ctx context.Context, c ChatworkConnection) (int64, error) {
+	return q.q.UpdateChatworkSyncState(ctx, db.UpdateChatworkSyncStateParams{Status: c.Status, LastError: c.LastError, FailureCount: c.FailureCount, NextPollAt: c.NextPollAt, LastSyncedAt: c.LastSyncedAt, LastTrackedAt: c.LastTrackedAt, LastTasksAt: c.LastTasksAt, UpdatedAt: c.UpdatedAt, UserID: c.UserID, Generation: c.Generation})
+}
+func (q sqliteQueries) updateChatworkSettings(ctx context.Context, c ChatworkConnection) (int64, error) {
+	return q.q.UpdateChatworkSettings(ctx, db.UpdateChatworkSettingsParams{ImmediateNotify: c.ImmediateNotify, DetectMentions: c.DetectMentions, DetectDms: c.DetectDMs, ImportTasks: c.ImportTasks, UpdatedAt: c.UpdatedAt, UserID: c.UserID})
+}
+func (q sqliteQueries) deleteChatworkConnection(ctx context.Context, userID string) error {
+	return q.q.DeleteChatworkConnection(ctx, userID)
+}
+func (q sqliteQueries) listDueChatworkConnections(ctx context.Context, now int64, limit int) ([]ChatworkConnection, error) {
+	rows, err := q.q.ListDueChatworkConnections(ctx, db.ListDueChatworkConnectionsParams{Now: now, PageSize: int64(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ChatworkConnection, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, fromSQLiteChatwork(row))
+	}
+	return out, nil
+}
+func (q sqliteQueries) listChatworkJudgedKeys(ctx context.Context, userID, prefix string, createdSince int64, limit int) ([]string, error) {
+	rows, err := q.q.ListChatworkJudgedKeys(ctx, db.ListChatworkJudgedKeysParams{UserID: userID, Prefix: prefix, CreatedSince: createdSince, PageSize: int64(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.String)
+	}
+	return out, nil
+}
+func (q sqliteQueries) listChatworkTaskItems(ctx context.Context, userID, prefix string, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListChatworkTaskItems(ctx, db.ListChatworkTaskItemsParams{UserID: userID, Prefix: prefix, PageSize: int64(limit)}))
 }
 func (q sqliteQueries) aiSettings(ctx context.Context, userID string) (AISettings, error) {
 	row, err := q.q.GetAISettings(ctx, userID)
@@ -526,6 +577,9 @@ func fromSQLiteAISetting(row db.AiSetting) AISettings {
 
 func fromSQLiteSlack(row db.SlackConnection) SlackConnection {
 	return SlackConnection{UserID: row.UserID, Generation: row.Generation, TokenSealed: row.TokenSealed, TokenLast4: row.TokenLast4, TeamID: row.TeamID, TeamName: row.TeamName, TeamURL: row.TeamUrl, SlackUserID: row.SlackUserID, SlackUserName: row.SlackUserName, Scopes: row.Scopes, ImmediateNotify: row.ImmediateNotify, DetectMentions: row.DetectMentions, DetectDMs: row.DetectDms, DetectGroupDMs: row.DetectGroupDms, Status: row.Status, LastError: row.LastError, FailureCount: row.FailureCount, ConnectedAt: row.ConnectedAt, NextPollAt: row.NextPollAt, LastSyncedAt: row.LastSyncedAt, LastTrackedAt: row.LastTrackedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+}
+func fromSQLiteChatwork(row db.ChatworkConnection) ChatworkConnection {
+	return ChatworkConnection{UserID: row.UserID, Generation: row.Generation, TokenSealed: row.TokenSealed, TokenLast4: row.TokenLast4, AccountID: row.AccountID, AccountName: row.AccountName, OrganizationName: row.OrganizationName, ImmediateNotify: row.ImmediateNotify, DetectMentions: row.DetectMentions, DetectDMs: row.DetectDms, ImportTasks: row.ImportTasks, Status: row.Status, LastError: row.LastError, FailureCount: row.FailureCount, ConnectedAt: row.ConnectedAt, NextPollAt: row.NextPollAt, LastSyncedAt: row.LastSyncedAt, LastTrackedAt: row.LastTrackedAt, LastTasksAt: row.LastTasksAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 }
 
 func (q sqliteQueries) enableUser(ctx context.Context, id string) error {

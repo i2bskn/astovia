@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { autoOutcome, autoReasonLabel, githubErrorMessage, githubStatusMessage, httpsURL, slackErrorMessage, slackStatusMessage } from '../.test-build/automation.js';
+import { autoOutcome, autoReasonLabel, chatworkErrorMessage, chatworkStatusMessage, githubErrorMessage, githubStatusMessage, httpsURL, slackErrorMessage, slackStatusMessage } from '../.test-build/automation.js';
 import { createIntegrationsClient } from '../.test-build/integrations.js';
 import { SLACK_APP_MANIFEST } from '../.test-build/slackManifest.js';
 import { base64URLToBytes, bytesToBase64URL, deviceLabel, isIOS, pushSupport, sameKey } from '../.test-build/notifications.js';
@@ -17,6 +17,9 @@ test('automatic completion reasons have Japanese labels', () => {
   assert.equal(autoReasonLabel('github.mention_no_action'), '対応は不要と判断した');
   assert.equal(autoReasonLabel('slack.no_action'), '対応不要と判定');
   assert.equal(autoReasonLabel('slack.reply_resolved'), '返信で対応済み');
+  assert.equal(autoReasonLabel('chatwork.no_action'), '対応不要と判定');
+  assert.equal(autoReasonLabel('chatwork.reply_resolved'), '返信で対応済み');
+  assert.equal(autoReasonLabel('chatwork.task_closed'), 'Chatwork のタスク一覧から外れた');
   assert.equal(autoReasonLabel('candidate.expired'), '候補のまま期間が過ぎた');
   assert.equal(autoReasonLabel('event.passed'), '予定の時刻を過ぎた');
   assert.equal(autoReasonLabel('chatwork.unknown'), 'chatwork.unknown');
@@ -61,6 +64,19 @@ test('Slack messages', () => {
   assert.match(slackStatusMessage('active', 'rate_limited'), /Slack の利用上限/);
   assert.match(slackStatusMessage('active', 'unavailable'), /Slack に接続できない/);
   assert.match(slackStatusMessage('error', null), /停止/);
+});
+
+test('Chatwork messages', () => {
+  assert.equal(chatworkErrorMessage('chatwork_token_invalid'), 'トークンが無効です。');
+  assert.equal(chatworkErrorMessage('chatwork_unavailable'), 'Chatwork に接続できませんでした。時間をおいて試してください。');
+  assert.equal(chatworkErrorMessage('invalid_request'), 'トークンの形式が正しくありません。');
+  assert.match(chatworkErrorMessage(null), /Chatwork と接続できませんでした/);
+  assert.equal(chatworkStatusMessage('active', null), '正常');
+  assert.match(chatworkStatusMessage('error', 'token_invalid'), /トークンが無効/);
+  assert.match(chatworkStatusMessage('error', 'token_undecryptable'), /登録し直して/);
+  assert.equal(chatworkStatusMessage('active', 'rate_limited'), 'Chatwork の利用上限に達したため、一時的に止まっています。');
+  assert.equal(chatworkStatusMessage('active', 'unavailable'), 'Chatwork に接続できない状態が続いています。');
+  assert.match(chatworkStatusMessage('error', null), /停止/);
 });
 
 test('the Slack app manifest on screen is the one in deploy', async () => {
@@ -177,6 +193,30 @@ test('Slack integration client', async () => {
   assert.equal(f.calls[0].init.method, 'DELETE');
   for (const bad of [null, {}, { connected: true }, { ...slackConnection, detect_dms: 'yes' }, { ...slackConnection, team_url: null }]) {
     await assert.rejects(fake(bad).client.getSlack(), /Unexpected Slack integration response/);
+  }
+});
+
+const chatworkConnection = { connected: true, account_name: 'alice', organization_name: 'Acme', token_last4: 'abcd', immediate_notify: true, detect_mentions: true, detect_dms: true, import_tasks: true, status: 'active', last_error: null, last_synced_at: null, created_at: '2026-10-24T10:00:00Z' };
+
+test('Chatwork integration client', async () => {
+  let f = fake({ connected: false });
+  assert.deepEqual(await f.client.getChatwork(), { connected: false });
+  assert.equal(f.calls[0].path, '/api/v1/integrations/chatwork');
+  f = fake(chatworkConnection);
+  assert.deepEqual(await f.client.connectChatwork('token-1'), chatworkConnection);
+  assert.equal(f.calls[0].init.method, 'PUT');
+  assert.deepEqual(JSON.parse(f.calls[0].init.body), { token: 'token-1' });
+  await f.client.connectChatwork('token-2', { import_tasks: false });
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), { import_tasks: false, token: 'token-2' });
+  await f.client.updateChatworkSettings({ detect_dms: false });
+  assert.equal(f.calls[2].init.method, 'PATCH');
+  assert.deepEqual(JSON.parse(f.calls[2].init.body), { detect_dms: false });
+  f = fake(undefined);
+  await f.client.disconnectChatwork();
+  assert.equal(f.calls[0].init.method, 'DELETE');
+  assert.equal(f.calls[0].path, '/api/v1/integrations/chatwork');
+  for (const bad of [null, {}, { connected: true }, { ...chatworkConnection, import_tasks: 'yes' }, { ...chatworkConnection, organization_name: null }, { ...chatworkConnection, last_synced_at: 1 }]) {
+    await assert.rejects(fake(bad).client.getChatwork(), /Unexpected Chatwork integration response/);
   }
 });
 

@@ -1,5 +1,5 @@
 import type { APIToken } from './apiTokens';
-import type { GitHubState, PushDevice, SlackState } from './integrations';
+import type { ChatworkState, GitHubState, PushDevice, SlackState } from './integrations';
 import type { Connection } from './oauth';
 
 // Pages of Settings, one per errand. path is relative to /settings.
@@ -7,7 +7,7 @@ export type SettingsPage = 'integrations' | 'ai' | 'notifications' | 'ai-clients
 
 // summary describes the page in the phone list until its status is loaded.
 export const settingsPages: readonly { value: SettingsPage; label: string; path: string; summary: string }[] = [
-  { value: 'integrations', label: '連携', path: 'integrations', summary: 'GitHub と Slack からタスクを見つける' },
+  { value: 'integrations', label: '連携', path: 'integrations', summary: 'GitHub・Slack・Chatwork からタスクを見つける' },
   { value: 'ai', label: 'AI', path: 'ai', summary: 'タスクを判断する AI のキーとモデル' },
   { value: 'notifications', label: '通知', path: 'notifications', summary: '受け取る端末と通知のタイミング' },
   { value: 'ai-clients', label: 'AI クライアント', path: 'ai-clients', summary: '接続のしかたと API トークン' },
@@ -62,18 +62,25 @@ export function slackStatus(state: SlackState): string {
   return state.status === 'error' || state.last_error ? `Slack（${state.team_name}）の接続を確認してください` : `Slack（${state.team_name}）と連携中`;
 }
 
-function needsAttention(state: GitHubState | SlackState): boolean {
+export function chatworkStatus(state: ChatworkState): string {
+  if (!state.connected) return 'Chatwork は未接続';
+  return state.status === 'error' || state.last_error ? `Chatwork（${state.account_name}）の接続を確認してください` : `Chatwork（${state.account_name}）と連携中`;
+}
+
+function needsAttention(state: GitHubState | SlackState | ChatworkState): boolean {
   return state.connected && (state.status === 'error' || state.last_error !== null);
 }
 
-// integrationsStatus sums up the GitHub and Slack states for the phone list:
-// the connections that need attention when there are any, otherwise the
-// connected ones, otherwise that neither is connected. A state that could
-// not be read is left out; the result is undefined when neither was read.
-export function integrationsStatus(github?: GitHubState, slack?: SlackState): string | undefined {
-  const states: { state: GitHubState | SlackState; text: string }[] = [];
+// integrationsStatus sums up the GitHub, Slack and Chatwork states for the
+// phone list: the connections that need attention when there are any,
+// otherwise the connected ones, otherwise that none is connected. A state
+// that could not be read is left out; the result is undefined when none was
+// read.
+export function integrationsStatus(github?: GitHubState, slack?: SlackState, chatwork?: ChatworkState): string | undefined {
+  const states: { state: GitHubState | SlackState | ChatworkState; text: string }[] = [];
   if (github) states.push({ state: github, text: githubStatus(github) });
   if (slack) states.push({ state: slack, text: slackStatus(slack) });
+  if (chatwork) states.push({ state: chatwork, text: chatworkStatus(chatwork) });
   if (states.length === 0) return undefined;
   const failing = states.filter((s) => needsAttention(s.state));
   const connected = states.filter((s) => s.state.connected);

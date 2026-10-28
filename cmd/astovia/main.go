@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/auth"
+	"github.com/i2bskn/astovia/internal/chatwork"
+	"github.com/i2bskn/astovia/internal/chatworksync"
 	"github.com/i2bskn/astovia/internal/config"
 	"github.com/i2bskn/astovia/internal/github"
 	"github.com/i2bskn/astovia/internal/githubsync"
@@ -96,11 +98,11 @@ func run(args []string) error {
 }
 
 // startWorkers starts the background loops of serve: GitHub synchronization
-// (with the AI judging mentions), Slack synchronization (with the AI judging
-// messages and replies), the notification engine, the dispatcher, the
-// cleanup of sent notifications and the sweep of task candidates and passed
-// events. They share the authentication
-// service's clock. They stop when ctx is canceled; the returned group
+// (with the AI judging mentions), Slack and Chatwork synchronization (with
+// the AI judging messages and replies; Chatwork also imports tasks), the
+// notification engine, the dispatcher, the cleanup of sent notifications
+// and the sweep of task candidates and passed events. They share the
+// authentication service's clock. They stop when ctx is canceled; the returned group
 // finishes when they have returned.
 func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.Service) *sync.WaitGroup {
 	now := func() time.Time { return a.Now() }
@@ -108,6 +110,7 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 	aiClient := ai.New()
 	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: aiClient, Box: box, Now: now}
 	slackSyncer := &slacksync.Syncer{Store: s, Slack: slack.New(now), AI: aiClient, Box: box, Now: now}
+	chatworkSyncer := &chatworksync.Syncer{Store: s, Chatwork: chatwork.New(now), AI: aiClient, Box: box, Now: now}
 	engine := &notify.Engine{Store: s, Now: now}
 	sweeper := &notify.Sweeper{Store: s, Now: now}
 	vapid := &notify.VAPID{Store: s, Box: box, Now: now}
@@ -120,6 +123,7 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 	}{
 		{"github sync", 15 * time.Second, syncer.RunOnce},
 		{"slack sync", 15 * time.Second, slackSyncer.RunOnce},
+		{"chatwork sync", 15 * time.Second, chatworkSyncer.RunOnce},
 		{"notification engine", time.Minute, engine.RunOnce},
 		{"notification dispatcher", 5 * time.Second, dispatcher.RunOnce},
 		{"notification cleanup", time.Hour, dispatcher.Cleanup},

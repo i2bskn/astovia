@@ -196,6 +196,34 @@ CREATE TABLE "slack_connections" (
 );
 -- Create index "slack_connections_status_next_poll_idx" to table: "slack_connections"
 CREATE INDEX "slack_connections_status_next_poll_idx" ON "slack_connections" ("status", "next_poll_at");
+-- Create "chatwork_connections" table
+CREATE TABLE "chatwork_connections" (
+  "user_id" text NOT NULL,
+  "generation" integer NOT NULL,
+  "token_sealed" text NOT NULL,
+  "token_last4" text NOT NULL,
+  "account_id" text NOT NULL,
+  "account_name" text NOT NULL,
+  "organization_name" text NOT NULL,
+  "immediate_notify" integer NOT NULL DEFAULT 1,
+  "detect_mentions" integer NOT NULL DEFAULT 1,
+  "detect_dms" integer NOT NULL DEFAULT 1,
+  "import_tasks" integer NOT NULL DEFAULT 1,
+  "status" text NOT NULL,
+  "last_error" text NULL,
+  "failure_count" integer NOT NULL DEFAULT 0,
+  "connected_at" integer NOT NULL,
+  "next_poll_at" integer NOT NULL,
+  "last_synced_at" integer NULL,
+  "last_tracked_at" integer NULL,
+  "last_tasks_at" integer NULL,
+  "created_at" integer NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "chatwork_connections_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "chatwork_connections_status_next_poll_idx" to table: "chatwork_connections"
+CREATE INDEX "chatwork_connections_status_next_poll_idx" ON "chatwork_connections" ("status", "next_poll_at");
 -- Create "ai_settings" table
 CREATE TABLE "ai_settings" (
   "user_id" text NOT NULL,

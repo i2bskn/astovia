@@ -57,6 +57,30 @@ type ApiToken struct {
 	LastUsedAt sql.NullInt64
 }
 
+type ChatworkConnection struct {
+	UserID           string
+	Generation       int64
+	TokenSealed      string
+	TokenLast4       string
+	AccountID        string
+	AccountName      string
+	OrganizationName string
+	ImmediateNotify  int64
+	DetectMentions   int64
+	DetectDms        int64
+	ImportTasks      int64
+	Status           string
+	LastError        sql.NullString
+	FailureCount     int64
+	ConnectedAt      int64
+	NextPollAt       int64
+	LastSyncedAt     sql.NullInt64
+	LastTrackedAt    sql.NullInt64
+	LastTasksAt      sql.NullInt64
+	CreatedAt        int64
+	UpdatedAt        int64
+}
+
 type GithubConnection struct {
 	UserID               string
 	Generation           int64

@@ -1,4 +1,4 @@
-// Clients of the GitHub and Slack integration, Web Push subscription and
+// Clients of the GitHub, Slack and Chatwork integration, Web Push subscription and
 // notification settings APIs. The request function is injected (normally auth.ts's
 // request) so that this module can be tested with a fake.
 import type { RequestFunction } from './actionItems';
@@ -38,6 +38,26 @@ export interface SlackConnection extends SlackSettings {
 }
 
 export type SlackState = { connected: false } | SlackConnection;
+
+export interface ChatworkSettings {
+  immediate_notify: boolean;
+  detect_mentions: boolean;
+  detect_dms: boolean;
+  import_tasks: boolean;
+}
+
+export interface ChatworkConnection extends ChatworkSettings {
+  connected: true;
+  account_name: string;
+  organization_name: string;
+  token_last4: string;
+  status: string;
+  last_error: string | null;
+  last_synced_at: string | null;
+  created_at: string;
+}
+
+export type ChatworkState = { connected: false } | ChatworkConnection;
 
 export interface PushDevice {
   id: string;
@@ -95,6 +115,18 @@ function readSlack(data: unknown): SlackState {
   throw new Error('Unexpected Slack integration response');
 }
 
+function readChatwork(data: unknown): ChatworkState {
+  if (isRecord(data) && data.connected === false) return { connected: false };
+  if (
+    isRecord(data) && data.connected === true &&
+    typeof data.account_name === 'string' && typeof data.organization_name === 'string' && typeof data.token_last4 === 'string' &&
+    typeof data.immediate_notify === 'boolean' && typeof data.detect_mentions === 'boolean' &&
+    typeof data.detect_dms === 'boolean' && typeof data.import_tasks === 'boolean' && typeof data.status === 'string' &&
+    nullableString(data.last_error) && nullableString(data.last_synced_at) && typeof data.created_at === 'string'
+  ) return data as unknown as ChatworkConnection;
+  throw new Error('Unexpected Chatwork integration response');
+}
+
 function isDevice(value: unknown): value is PushDevice {
   return isRecord(value) && typeof value.id === 'string' && value.id !== '' && typeof value.label === 'string' &&
     typeof value.created_at === 'string' && nullableString(value.last_used_at);
@@ -148,6 +180,19 @@ export function createIntegrationsClient(request: RequestFunction) {
     },
     async disconnectSlack(): Promise<void> {
       await request<unknown>('/api/v1/integrations/slack', { method: 'DELETE' });
+    },
+    async getChatwork(): Promise<ChatworkState> {
+      return readChatwork(await request<unknown>('/api/v1/integrations/chatwork'));
+    },
+    // Settings left out keep their current values.
+    async connectChatwork(token: string, settings: Partial<ChatworkSettings> = {}): Promise<ChatworkState> {
+      return readChatwork(await request<unknown>('/api/v1/integrations/chatwork', json('PUT', { ...settings, token })));
+    },
+    async updateChatworkSettings(settings: Partial<ChatworkSettings>): Promise<ChatworkState> {
+      return readChatwork(await request<unknown>('/api/v1/integrations/chatwork', json('PATCH', settings)));
+    },
+    async disconnectChatwork(): Promise<void> {
+      await request<unknown>('/api/v1/integrations/chatwork', { method: 'DELETE' });
     },
     async getPushPublicKey(): Promise<string> {
       const data = await request<unknown>('/api/v1/push/public-key');

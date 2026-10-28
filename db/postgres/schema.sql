@@ -89,6 +89,34 @@ CREATE TABLE "api_tokens" (
 CREATE UNIQUE INDEX "api_tokens_token_hash_key" ON "api_tokens" ("token_hash");
 -- Create index "api_tokens_user_created_idx" to table: "api_tokens"
 CREATE INDEX "api_tokens_user_created_idx" ON "api_tokens" ("user_id", "created_at", "id");
+-- Create "chatwork_connections" table
+CREATE TABLE "chatwork_connections" (
+  "user_id" text NOT NULL,
+  "generation" bigint NOT NULL,
+  "token_sealed" text NOT NULL,
+  "token_last4" text NOT NULL,
+  "account_id" text NOT NULL,
+  "account_name" text NOT NULL,
+  "organization_name" text NOT NULL,
+  "immediate_notify" bigint NOT NULL DEFAULT 1,
+  "detect_mentions" bigint NOT NULL DEFAULT 1,
+  "detect_dms" bigint NOT NULL DEFAULT 1,
+  "import_tasks" bigint NOT NULL DEFAULT 1,
+  "status" text NOT NULL,
+  "last_error" text NULL,
+  "failure_count" bigint NOT NULL DEFAULT 0,
+  "connected_at" bigint NOT NULL,
+  "next_poll_at" bigint NOT NULL,
+  "last_synced_at" bigint NULL,
+  "last_tracked_at" bigint NULL,
+  "last_tasks_at" bigint NULL,
+  "created_at" bigint NOT NULL,
+  "updated_at" bigint NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "chatwork_connections_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
+);
+-- Create index "chatwork_connections_status_next_poll_idx" to table: "chatwork_connections"
+CREATE INDEX "chatwork_connections_status_next_poll_idx" ON "chatwork_connections" ("status", "next_poll_at");
 -- Create "github_connections" table
 CREATE TABLE "github_connections" (
   "user_id" text NOT NULL,

@@ -312,6 +312,62 @@ func (q *Queries) CreateActionItem(ctx context.Context, arg CreateActionItemPara
 	return err
 }
 
+const createChatworkConnection = `-- name: CreateChatworkConnection :exec
+INSERT INTO chatwork_connections (user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+`
+
+type CreateChatworkConnectionParams struct {
+	UserID           string
+	Generation       int64
+	TokenSealed      string
+	TokenLast4       string
+	AccountID        string
+	AccountName      string
+	OrganizationName string
+	ImmediateNotify  int64
+	DetectMentions   int64
+	DetectDms        int64
+	ImportTasks      int64
+	Status           string
+	LastError        sql.NullString
+	FailureCount     int64
+	ConnectedAt      int64
+	NextPollAt       int64
+	LastSyncedAt     sql.NullInt64
+	LastTrackedAt    sql.NullInt64
+	LastTasksAt      sql.NullInt64
+	CreatedAt        int64
+	UpdatedAt        int64
+}
+
+func (q *Queries) CreateChatworkConnection(ctx context.Context, arg CreateChatworkConnectionParams) error {
+	_, err := q.db.ExecContext(ctx, createChatworkConnection,
+		arg.UserID,
+		arg.Generation,
+		arg.TokenSealed,
+		arg.TokenLast4,
+		arg.AccountID,
+		arg.AccountName,
+		arg.OrganizationName,
+		arg.ImmediateNotify,
+		arg.DetectMentions,
+		arg.DetectDms,
+		arg.ImportTasks,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.ConnectedAt,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastTrackedAt,
+		arg.LastTasksAt,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
 const createGitHubConnection = `-- name: CreateGitHubConnection :exec
 INSERT INTO github_connections (user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
@@ -744,6 +800,15 @@ DELETE FROM web_push_subscriptions
 
 func (q *Queries) DeleteAllPushSubscriptions(ctx context.Context) error {
 	_, err := q.db.ExecContext(ctx, deleteAllPushSubscriptions)
+	return err
+}
+
+const deleteChatworkConnection = `-- name: DeleteChatworkConnection :exec
+DELETE FROM chatwork_connections WHERE user_id = $1
+`
+
+func (q *Queries) DeleteChatworkConnection(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteChatworkConnection, userID)
 	return err
 }
 
@@ -1285,6 +1350,40 @@ func (q *Queries) GetActiveSession(ctx context.Context, arg GetActiveSessionPara
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getChatworkConnection = `-- name: GetChatworkConnection :one
+SELECT user_id, generation, token_sealed, token_last4, account_id, account_name, organization_name, immediate_notify, detect_mentions, detect_dms, import_tasks, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, last_tasks_at, created_at, updated_at FROM chatwork_connections
+WHERE user_id = $1
+`
+
+func (q *Queries) GetChatworkConnection(ctx context.Context, userID string) (ChatworkConnection, error) {
+	row := q.db.QueryRowContext(ctx, getChatworkConnection, userID)
+	var i ChatworkConnection
+	err := row.Scan(
+		&i.UserID,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.TokenLast4,
+		&i.AccountID,
+		&i.AccountName,
+		&i.OrganizationName,
+		&i.ImmediateNotify,
+		&i.DetectMentions,
+		&i.DetectDms,
+		&i.ImportTasks,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.ConnectedAt,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastTrackedAt,
+		&i.LastTasksAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -2131,6 +2230,106 @@ func (q *Queries) ListCandidateSweepUserIDs(ctx context.Context, now sql.NullInt
 	return items, nil
 }
 
+const listChatworkJudgedKeys = `-- name: ListChatworkJudgedKeys :many
+SELECT source_key FROM action_items
+WHERE user_id = $1 AND source = 'chatwork' AND substr(source_key, 1, length($2::text)) = $2::text AND created_at >= $3
+ORDER BY created_at DESC, id DESC LIMIT $4
+`
+
+type ListChatworkJudgedKeysParams struct {
+	UserID       string
+	Prefix       string
+	CreatedSince int64
+	PageSize     int32
+}
+
+func (q *Queries) ListChatworkJudgedKeys(ctx context.Context, arg ListChatworkJudgedKeysParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, listChatworkJudgedKeys,
+		arg.UserID,
+		arg.Prefix,
+		arg.CreatedSince,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var source_key sql.NullString
+		if err := rows.Scan(&source_key); err != nil {
+			return nil, err
+		}
+		items = append(items, source_key)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listChatworkTaskItems = `-- name: ListChatworkTaskItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = $1 AND source = 'chatwork' AND status = 'open' AND substr(source_key, 1, length($2::text)) = $2::text
+ORDER BY created_at, id LIMIT $3
+`
+
+type ListChatworkTaskItemsParams struct {
+	UserID   string
+	Prefix   string
+	PageSize int32
+}
+
+func (q *Queries) ListChatworkTaskItems(ctx context.Context, arg ListChatworkTaskItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listChatworkTaskItems, arg.UserID, arg.Prefix, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listChildActionItems = `-- name: ListChildActionItems :many
 SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = $1 AND parent_id = $2
@@ -2246,6 +2445,62 @@ func (q *Queries) ListConversationActionItems(ctx context.Context, arg ListConve
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDueChatworkConnections = `-- name: ListDueChatworkConnections :many
+SELECT user_id, generation, token_sealed, token_last4, account_id, account_name, organization_name, immediate_notify, detect_mentions, detect_dms, import_tasks, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, last_tasks_at, created_at, updated_at FROM chatwork_connections
+WHERE status = 'active' AND next_poll_at <= $1 AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY next_poll_at, user_id LIMIT $2
+`
+
+type ListDueChatworkConnectionsParams struct {
+	Now      int64
+	PageSize int32
+}
+
+func (q *Queries) ListDueChatworkConnections(ctx context.Context, arg ListDueChatworkConnectionsParams) ([]ChatworkConnection, error) {
+	rows, err := q.db.QueryContext(ctx, listDueChatworkConnections, arg.Now, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ChatworkConnection
+	for rows.Next() {
+		var i ChatworkConnection
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Generation,
+			&i.TokenSealed,
+			&i.TokenLast4,
+			&i.AccountID,
+			&i.AccountName,
+			&i.OrganizationName,
+			&i.ImmediateNotify,
+			&i.DetectMentions,
+			&i.DetectDms,
+			&i.ImportTasks,
+			&i.Status,
+			&i.LastError,
+			&i.FailureCount,
+			&i.ConnectedAt,
+			&i.NextPollAt,
+			&i.LastSyncedAt,
+			&i.LastTrackedAt,
+			&i.LastTasksAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -3016,6 +3271,40 @@ func (q *Queries) LockActivePasswordResets(ctx context.Context, arg LockActivePa
 	return items, nil
 }
 
+const lockChatworkConnection = `-- name: LockChatworkConnection :one
+SELECT user_id, generation, token_sealed, token_last4, account_id, account_name, organization_name, immediate_notify, detect_mentions, detect_dms, import_tasks, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, last_tasks_at, created_at, updated_at FROM chatwork_connections
+WHERE user_id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockChatworkConnection(ctx context.Context, userID string) (ChatworkConnection, error) {
+	row := q.db.QueryRowContext(ctx, lockChatworkConnection, userID)
+	var i ChatworkConnection
+	err := row.Scan(
+		&i.UserID,
+		&i.Generation,
+		&i.TokenSealed,
+		&i.TokenLast4,
+		&i.AccountID,
+		&i.AccountName,
+		&i.OrganizationName,
+		&i.ImmediateNotify,
+		&i.DetectMentions,
+		&i.DetectDms,
+		&i.ImportTasks,
+		&i.Status,
+		&i.LastError,
+		&i.FailureCount,
+		&i.ConnectedAt,
+		&i.NextPollAt,
+		&i.LastSyncedAt,
+		&i.LastTrackedAt,
+		&i.LastTasksAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const lockGitHubConnection = `-- name: LockGitHubConnection :one
 SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
 WHERE user_id = $1 FOR UPDATE
@@ -3299,6 +3588,60 @@ func (q *Queries) ReplaceAISettings(ctx context.Context, arg ReplaceAISettingsPa
 	return result.RowsAffected()
 }
 
+const replaceChatworkConnection = `-- name: ReplaceChatworkConnection :exec
+UPDATE chatwork_connections SET generation = $1, token_sealed = $2, token_last4 = $3, account_id = $4, account_name = $5, organization_name = $6, immediate_notify = $7, detect_mentions = $8, detect_dms = $9, import_tasks = $10, status = $11, last_error = $12, failure_count = $13, connected_at = $14, next_poll_at = $15, last_synced_at = $16, last_tracked_at = $17, last_tasks_at = $18, updated_at = $19
+WHERE user_id = $20
+`
+
+type ReplaceChatworkConnectionParams struct {
+	Generation       int64
+	TokenSealed      string
+	TokenLast4       string
+	AccountID        string
+	AccountName      string
+	OrganizationName string
+	ImmediateNotify  int64
+	DetectMentions   int64
+	DetectDms        int64
+	ImportTasks      int64
+	Status           string
+	LastError        sql.NullString
+	FailureCount     int64
+	ConnectedAt      int64
+	NextPollAt       int64
+	LastSyncedAt     sql.NullInt64
+	LastTrackedAt    sql.NullInt64
+	LastTasksAt      sql.NullInt64
+	UpdatedAt        int64
+	UserID           string
+}
+
+func (q *Queries) ReplaceChatworkConnection(ctx context.Context, arg ReplaceChatworkConnectionParams) error {
+	_, err := q.db.ExecContext(ctx, replaceChatworkConnection,
+		arg.Generation,
+		arg.TokenSealed,
+		arg.TokenLast4,
+		arg.AccountID,
+		arg.AccountName,
+		arg.OrganizationName,
+		arg.ImmediateNotify,
+		arg.DetectMentions,
+		arg.DetectDms,
+		arg.ImportTasks,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.ConnectedAt,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastTrackedAt,
+		arg.LastTasksAt,
+		arg.UpdatedAt,
+		arg.UserID,
+	)
+	return err
+}
+
 const replaceGitHubConnection = `-- name: ReplaceGitHubConnection :exec
 UPDATE github_connections SET generation = $1, token_sealed = $2, token_last4 = $3, login = $4, scopes = $5, immediate_notify = $6, status = $7, last_error = $8, failure_count = $9, last_modified = $10, initial_import_pending = $11, next_poll_at = $12, last_synced_at = $13, last_reconciled_at = $14, last_tracked_at = $15, updated_at = $16
 WHERE user_id = $17
@@ -3551,6 +3894,22 @@ func (q *Queries) SetUserRole(ctx context.Context, arg SetUserRoleParams) error 
 	return err
 }
 
+const stopTrackingSourceActionItems = `-- name: StopTrackingSourceActionItems :exec
+UPDATE action_items SET tracking = 0, version = version + 1, updated_at = $1
+WHERE user_id = $2 AND source = $3 AND tracking = 1
+`
+
+type StopTrackingSourceActionItemsParams struct {
+	UpdatedAt int64
+	UserID    string
+	Source    sql.NullString
+}
+
+func (q *Queries) StopTrackingSourceActionItems(ctx context.Context, arg StopTrackingSourceActionItemsParams) error {
+	_, err := q.db.ExecContext(ctx, stopTrackingSourceActionItems, arg.UpdatedAt, arg.UserID, arg.Source)
+	return err
+}
+
 const touchAPIToken = `-- name: TouchAPIToken :exec
 UPDATE api_tokens SET last_used_at = $1
 WHERE id = $2 AND (last_used_at IS NULL OR last_used_at < $3)
@@ -3727,6 +4086,72 @@ func (q *Queries) UpdateActionItem(ctx context.Context, arg UpdateActionItemPara
 		arg.ID,
 		arg.UserID,
 		arg.CurrentVersion,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateChatworkSettings = `-- name: UpdateChatworkSettings :execrows
+UPDATE chatwork_connections SET immediate_notify = $1, detect_mentions = $2, detect_dms = $3, import_tasks = $4, updated_at = $5
+WHERE user_id = $6
+`
+
+type UpdateChatworkSettingsParams struct {
+	ImmediateNotify int64
+	DetectMentions  int64
+	DetectDms       int64
+	ImportTasks     int64
+	UpdatedAt       int64
+	UserID          string
+}
+
+func (q *Queries) UpdateChatworkSettings(ctx context.Context, arg UpdateChatworkSettingsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateChatworkSettings,
+		arg.ImmediateNotify,
+		arg.DetectMentions,
+		arg.DetectDms,
+		arg.ImportTasks,
+		arg.UpdatedAt,
+		arg.UserID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const updateChatworkSyncState = `-- name: UpdateChatworkSyncState :execrows
+UPDATE chatwork_connections SET status = $1, last_error = $2, failure_count = $3, next_poll_at = $4, last_synced_at = $5, last_tracked_at = $6, last_tasks_at = $7, updated_at = $8
+WHERE user_id = $9 AND generation = $10
+`
+
+type UpdateChatworkSyncStateParams struct {
+	Status        string
+	LastError     sql.NullString
+	FailureCount  int64
+	NextPollAt    int64
+	LastSyncedAt  sql.NullInt64
+	LastTrackedAt sql.NullInt64
+	LastTasksAt   sql.NullInt64
+	UpdatedAt     int64
+	UserID        string
+	Generation    int64
+}
+
+func (q *Queries) UpdateChatworkSyncState(ctx context.Context, arg UpdateChatworkSyncStateParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateChatworkSyncState,
+		arg.Status,
+		arg.LastError,
+		arg.FailureCount,
+		arg.NextPollAt,
+		arg.LastSyncedAt,
+		arg.LastTrackedAt,
+		arg.LastTasksAt,
+		arg.UpdatedAt,
+		arg.UserID,
+		arg.Generation,
 	)
 	if err != nil {
 		return 0, err

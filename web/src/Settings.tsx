@@ -5,6 +5,7 @@ import AISettings from './AISettings';
 import { request } from './auth';
 import APITokenList from './APITokenList';
 import { createAPITokensClient } from './apiTokens';
+import ChatworkSettings from './ChatworkSettings';
 import ConnectionList from './ConnectionList';
 import GitHubSettings from './GitHubSettings';
 import { BellIcon, ChevronLeftIcon, ChevronRightIcon, PlugIcon, SourceIcon, SparkleIcon } from './icons';
@@ -47,12 +48,12 @@ function SettingsIndex() {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([integrations.getGitHub(), integrations.getSlack(), ai.getAI(), integrations.listPushDevices(), oauth.listConnections(), apiTokens.listAPITokens()])
-      .then(([github, slack, aiState, devices, connections, tokens]) => {
+    void Promise.allSettled([integrations.getGitHub(), integrations.getSlack(), integrations.getChatwork(), ai.getAI(), integrations.listPushDevices(), oauth.listConnections(), apiTokens.listAPITokens()])
+      .then(([github, slack, chatwork, aiState, devices, connections, tokens]) => {
         if (!active) return;
         // A page whose state could not be read keeps its summary.
         setStatus({
-          integrations: integrationsStatus(github.status === 'fulfilled' ? github.value : undefined, slack.status === 'fulfilled' ? slack.value : undefined),
+          integrations: integrationsStatus(github.status === 'fulfilled' ? github.value : undefined, slack.status === 'fulfilled' ? slack.value : undefined, chatwork.status === 'fulfilled' ? chatwork.value : undefined),
           ai: aiState.status === 'fulfilled' ? aiStatus(aiState.value) : undefined,
           notifications: devices.status === 'fulfilled' ? devicesStatus(devices.value) : undefined,
           'ai-clients': connections.status === 'fulfilled' && tokens.status === 'fulfilled' ? clientsStatus(connections.value, tokens.value) : undefined,
@@ -94,7 +95,7 @@ export default function Settings() {
     </nav>
     <Routes>
       <Route index element={phone ? <SettingsIndex /> : <Navigate to="/settings/integrations" replace />} />
-      <Route path="integrations" element={<div className="settings-stack"><GitHubSettings /><SlackSettings /></div>} />
+      <Route path="integrations" element={<div className="settings-stack"><GitHubSettings /><SlackSettings /><ChatworkSettings /></div>} />
       <Route path="ai" element={<AISettings />} />
       <Route path="notifications" element={<NotificationSettings />} />
       <Route path="ai-clients" element={<div className="settings-stack"><ConnectionList /><APITokenList /></div>} />

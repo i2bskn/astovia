@@ -620,6 +620,108 @@ table "slack_connections" {
     columns = [column.status, column.next_poll_at]
   }
 }
+table "chatwork_connections" {
+  schema = schema.main
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "generation" {
+    type = integer
+    null = false
+  }
+  column "token_sealed" {
+    type = text
+    null = false
+  }
+  column "token_last4" {
+    type = text
+    null = false
+  }
+  column "account_id" {
+    type = text
+    null = false
+  }
+  column "account_name" {
+    type = text
+    null = false
+  }
+  column "organization_name" {
+    type = text
+    null = false
+  }
+  column "immediate_notify" {
+    type    = integer
+    null    = false
+    default = 1
+  }
+  column "detect_mentions" {
+    type    = integer
+    null    = false
+    default = 1
+  }
+  column "detect_dms" {
+    type    = integer
+    null    = false
+    default = 1
+  }
+  column "import_tasks" {
+    type    = integer
+    null    = false
+    default = 1
+  }
+  column "status" {
+    type = text
+    null = false
+  }
+  column "last_error" {
+    type = text
+    null = true
+  }
+  column "failure_count" {
+    type    = integer
+    null    = false
+    default = 0
+  }
+  column "connected_at" {
+    type = integer
+    null = false
+  }
+  column "next_poll_at" {
+    type = integer
+    null = false
+  }
+  column "last_synced_at" {
+    type = integer
+    null = true
+  }
+  column "last_tracked_at" {
+    type = integer
+    null = true
+  }
+  column "last_tasks_at" {
+    type = integer
+    null = true
+  }
+  column "created_at" {
+    type = integer
+    null = false
+  }
+  column "updated_at" {
+    type = integer
+    null = false
+  }
+  primary_key {
+    columns = [column.user_id]
+  }
+  foreign_key "chatwork_connections_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "chatwork_connections_status_next_poll_idx" {
+    columns = [column.status, column.next_poll_at]
+  }
+}
 table "ai_settings" {
   schema = schema.main
   column "user_id" {

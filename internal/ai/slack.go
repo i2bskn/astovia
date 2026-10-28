@@ -16,18 +16,22 @@ const (
 	SlackGroupDM = "group_dm"
 )
 
-// SlackSystemPrompt is the fixed instruction of a Slack judgment. The posts
-// come as JSON in the user message; only the JSON structure is trusted.
-const SlackSystemPrompt = `あなたは Slack の利用者（JSON の "me"）の代わりに、"target": true の投稿について me 本人がやるべきことがあるかを判断します。
+// judgmentPrompt is the fixed instruction of a judgment of the target posts
+// of a conversation. The rules are shared by every service; service names
+// the service, conversationTypes describes the values of
+// "conversation_type", and addressing is appended to the rules on how to
+// tell the addressee (empty for Slack).
+func judgmentPrompt(service, conversationTypes, addressing string) string {
+	return `あなたは ` + service + ` の利用者（JSON の "me"）の代わりに、"target": true の投稿について me 本人がやるべきことがあるかを判断します。
 
-入力は JSON です。"posts" は同じ会話の投稿を時刻順に並べたもので、"target": true の投稿が判断の対象です（複数のこともあります）。"conversation_type" は "channel"（チャンネルでのメンション）、"dm"（me との 1 対 1 の DM）、"group_dm"（me を含むグループ DM）のいずれかです。"related_tasks" は、同じ会話から既に作られている me の未完了のタスクです（id は "t1" などの記号です）。"subtasks" を持つものは同じ用件のタスクをまとめたもので、"closed": true のものはまとめたタスクがすべて完了したものです。
+入力は JSON です。"posts" は同じ会話の投稿を時刻順に並べたもので、"target": true の投稿が判断の対象です（複数のこともあります）。` + conversationTypes + `"related_tasks" は、同じ会話から既に作られている me の未完了のタスクです（id は "t1" などの記号です）。"subtasks" を持つものは同じ用件のタスクをまとめたもので、"closed": true のものはまとめたタスクがすべて完了したものです。
 
 判断（decision）は次の 3 つのいずれかです。
 - task: me 宛ての明確な依頼・質問・判断の要求、me が参加する予定の確定。例: 質問への回答、レビューや確認の依頼、作業の依頼、期限付きの依頼。
 - candidate: me がやるべきか確信が持てないもの。例: cc として挙げられた投稿に含まれる依頼、共有された情報に含まれる対応事項、宛先が曖昧な依頼。
 - none: やることがないもの。例: お礼や報告だけ（FYI）、他の人からの回答や連絡を共有されただけで対応事項がない、「了解」「ありがとう」だけの投稿、他の人宛てが明確、cc として名前を挙げただけで対応事項がない、本人が後の投稿で既に対応済み。
 
-宛先の見分け方: 本文のメンションは @名前(メンバー ID) の形です。me の id へのメンションが依頼の宛先として書かれているかを確かめてください。依頼が他の人へのメンションに向けられていて、me が「cc」の後や末尾に並んでいるだけなら、me 宛ての依頼ではありません。その依頼に me が cc で含まれているだけなら candidate、cc として名前を挙げただけで何も求められていなければ none にしてください。
+宛先の見分け方: 本文のメンションは @名前(メンバー ID) の形です。me の id へのメンションが依頼の宛先として書かれているかを確かめてください。依頼が他の人へのメンションに向けられていて、me が「cc」の後や末尾に並んでいるだけなら、me 宛ての依頼ではありません。その依頼に me が cc で含まれているだけなら candidate、cc として名前を挙げただけで何も求められていなければ none にしてください。` + addressing + `
 task か candidate か迷ったら candidate、candidate か none か迷ったら candidate にしてください。
 
 同じ用件のまとまり: decision が task か candidate のとき、新しいタスクが "related_tasks" のどれかと同じ用件のまとまりに属するかを判断し、属するならその id を same_as に入れてください。同じ用件のまとまりとは、同じ出来事・案件・依頼の流れに属することです（例: 同じ障害の調査と報告と再発防止の打ち合わせ）。同じ相手・同じ会話というだけでは同じとしません。迷ったら same_as は空文字にしてください（まとめません）。
@@ -51,9 +55,11 @@ task か candidate か迷ったら candidate、candidate か none か迷った�
 - event_end: 予定の終了日時。event_start と同じ形。終了時刻が書かれていなければ空文字。
 - topic: decision が task か candidate のときの、このタスクが属する用件のまとまりの短い名前（20〜40 文字程度。例「Mikata 決済障害（10/28）の対応」）。none のときは空文字。
 - same_as: 新しいタスクが "related_tasks" のどれかと同じ用件のまとまりなら、その id（例 "t1"）。どれとも違う場合、"related_tasks" が空の場合、decision が none の場合は空文字。`
+}
 
-// ReplySystemPrompt is the fixed instruction of a reply judgment.
-const ReplySystemPrompt = `あなたは Slack の利用者（JSON の "me"）の代わりに、me の返信によって "task" の用件が済んだかを判断します。
+// replyPrompt is the fixed instruction of a reply judgment of service.
+func replyPrompt(service string) string {
+	return `あなたは ` + service + ` の利用者（JSON の "me"）の代わりに、me の返信によって "task" の用件が済んだかを判断します。
 
 入力は JSON です。"task" は me のタスク、"posts" はそのタスクの元になった投稿と、その後の同じ会話の投稿を時刻順に並べたものです。
 
@@ -68,6 +74,14 @@ const ReplySystemPrompt = `あなたは Slack の利用者（JSON の "me"）の
 出力は次の項目を返します。
 - resolved: me の返信で task の用件が済んでいれば true、そうでなければ false。
 - reason: 判断の理由を一文で。`
+}
+
+// SlackSystemPrompt is the fixed instruction of a Slack judgment. The posts
+// come as JSON in the user message; only the JSON structure is trusted.
+var SlackSystemPrompt = judgmentPrompt("Slack", `"conversation_type" は "channel"（チャンネルでのメンション）、"dm"（me との 1 対 1 の DM）、"group_dm"（me を含むグループ DM）のいずれかです。`, "")
+
+// ReplySystemPrompt is the fixed instruction of a reply judgment.
+var ReplySystemPrompt = replyPrompt("Slack")
 
 // SlackPerson is a Slack user: the member ID and the display name.
 type SlackPerson struct {
@@ -192,6 +206,12 @@ func slackPosts(posts []SlackPost, withTarget bool, loc *time.Location) []slackP
 // sentence and one JSON document made with encoding/json, so that no text in
 // a post can end its string or forge another post.
 func SlackUserMessage(in SlackInput) (string, error) {
+	return judgmentUserMessage(in, "次の JSON は Slack の会話です。あなたは JSON の me の代わりに判断します。\n")
+}
+
+// judgmentUserMessage builds the user message of a judgment of in: head
+// and the JSON document.
+func judgmentUserMessage(in SlackInput, head string) (string, error) {
 	hasTarget := false
 	for _, p := range in.Posts {
 		hasTarget = hasTarget || p.Target
@@ -205,12 +225,18 @@ func SlackUserMessage(in SlackInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "次の JSON は Slack の会話です。あなたは JSON の me の代わりに判断します。\n" + string(data), nil
+	return head + string(data), nil
 }
 
 // ReplyUserMessage builds the user message of a reply judgment, like
 // SlackUserMessage.
 func ReplyUserMessage(in ReplyInput) (string, error) {
+	return replyUserMessage(in, "次の JSON は Slack のタスクと、その後の会話です。あなたは JSON の me の代わりに判断します。\n")
+}
+
+// replyUserMessage builds the user message of a reply judgment of in: head
+// and the JSON document.
+func replyUserMessage(in ReplyInput, head string) (string, error) {
 	if len(in.Posts) == 0 {
 		return "", errors.New("ai: no posts")
 	}
@@ -220,7 +246,7 @@ func ReplyUserMessage(in ReplyInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "次の JSON は Slack のタスクと、その後の会話です。あなたは JSON の me の代わりに判断します。\n" + string(data), nil
+	return head + string(data), nil
 }
 
 // JudgeSlack asks the AI whether the user has something to do about the
@@ -230,7 +256,13 @@ func (c *Client) JudgeSlack(ctx context.Context, key, model string, in SlackInpu
 	if err != nil {
 		return MentionResult{}, err
 	}
-	text, err := c.structured(ctx, key, model, SlackSystemPrompt, user, outputSchema)
+	return c.judgeConversation(ctx, key, model, SlackSystemPrompt, user, in)
+}
+
+// judgeConversation sends a judgment with the system prompt and the user
+// message built from in, and parses the result.
+func (c *Client) judgeConversation(ctx context.Context, key, model, system, user string, in SlackInput) (MentionResult, error) {
+	text, err := c.structured(ctx, key, model, system, user, outputSchema)
 	if err != nil {
 		return MentionResult{}, err
 	}
@@ -243,7 +275,13 @@ func (c *Client) JudgeReply(ctx context.Context, key, model string, in ReplyInpu
 	if err != nil {
 		return ReplyResult{}, err
 	}
-	text, err := c.structured(ctx, key, model, ReplySystemPrompt, user, replySchema)
+	return c.judgeReply(ctx, key, model, ReplySystemPrompt, user)
+}
+
+// judgeReply sends a reply judgment with the system prompt and the user
+// message, and parses the result.
+func (c *Client) judgeReply(ctx context.Context, key, model, system, user string) (ReplyResult, error) {
+	text, err := c.structured(ctx, key, model, system, user, replySchema)
 	if err != nil {
 		return ReplyResult{}, err
 	}

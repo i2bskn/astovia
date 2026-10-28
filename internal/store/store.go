@@ -161,6 +161,7 @@ type queries interface {
 	countAutoActionItemsSince(ctx context.Context, userID string, since int64) (int64, error)
 	touchActionItemTracked(ctx context.Context, userID, id string, version, now int64) (int64, error)
 	untrackSourceActionItems(ctx context.Context, userID, source string, now int64) error
+	stopTrackingSourceActionItems(ctx context.Context, userID, source string, now int64) error
 	listCandidateSweepUserIDs(ctx context.Context, now int64) ([]string, error)
 	expireCandidates(ctx context.Context, userID string, updatedBefore, now int64) ([]sql.NullString, error)
 	expireEvents(ctx context.Context, userID string, now int64) ([]sql.NullString, error)
@@ -215,6 +216,16 @@ type queries interface {
 	deleteSlackConnection(ctx context.Context, userID string) error
 	listDueSlackConnections(ctx context.Context, now int64, limit int) ([]SlackConnection, error)
 	listSlackJudgedKeys(ctx context.Context, userID, prefix string, createdSince int64, limit int) ([]string, error)
+	chatworkConnection(ctx context.Context, userID string) (ChatworkConnection, error)
+	lockChatworkConnection(ctx context.Context, userID string) (ChatworkConnection, error)
+	createChatworkConnection(ctx context.Context, c ChatworkConnection) error
+	replaceChatworkConnection(ctx context.Context, c ChatworkConnection) error
+	updateChatworkSyncState(ctx context.Context, c ChatworkConnection) (int64, error)
+	updateChatworkSettings(ctx context.Context, c ChatworkConnection) (int64, error)
+	deleteChatworkConnection(ctx context.Context, userID string) error
+	listDueChatworkConnections(ctx context.Context, now int64, limit int) ([]ChatworkConnection, error)
+	listChatworkJudgedKeys(ctx context.Context, userID, prefix string, createdSince int64, limit int) ([]string, error)
+	listChatworkTaskItems(ctx context.Context, userID, prefix string, limit int) ([]ActionItem, error)
 	aiSettings(ctx context.Context, userID string) (AISettings, error)
 	lockAISettings(ctx context.Context, userID string) (AISettings, error)
 	createAISettings(ctx context.Context, a AISettings) (int64, error)
@@ -305,7 +316,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -399,19 +410,22 @@ func revokeAccount(ctx context.Context, q queries, userID, passwordHash string, 
 		return e
 	}
 	// Integrations and notifications follow, in the lock order of their
-	// tables (github_connections, slack_connections, ai_settings,
-	// web_push_subscriptions, notifications). A push subscription
-	// registered during a takeover would keep receiving item titles, so
-	// it goes with a password reset as well. The GitHub and Slack
-	// connections are removed only when the user is disabled. The AI
-	// settings go with a password reset too: a key registered during a
-	// takeover would keep sending conversation text to the attacker's
+	// tables (github_connections, slack_connections, chatwork_connections,
+	// ai_settings, web_push_subscriptions, notifications). A push
+	// subscription registered during a takeover would keep receiving item
+	// titles, so it goes with a password reset as well. The GitHub, Slack
+	// and Chatwork connections are removed only when the user is disabled.
+	// The AI settings go with a password reset too: a key registered during
+	// a takeover would keep sending conversation text to the attacker's
 	// organization.
 	if disable {
 		if e = q.deleteGitHubConnection(ctx, userID); e != nil {
 			return e
 		}
 		if e = q.deleteSlackConnection(ctx, userID); e != nil {
+			return e
+		}
+		if e = q.deleteChatworkConnection(ctx, userID); e != nil {
 			return e
 		}
 	}
