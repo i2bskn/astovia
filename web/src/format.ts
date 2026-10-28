@@ -103,12 +103,25 @@ export function serviceLabel(service: string): string {
   return Object.hasOwn(serviceNames, key) ? serviceNames[key] ?? service : service;
 }
 
-// refLabel is the short label of a reference ("Slack · acme"); the ids stay
-// in refDetail for the tooltip.
+// githubPattern matches the owner/repo#number a GitHub reference keeps as
+// its conversation.
+const githubPattern = /^[^/\s]+\/([^/#\s]+)#(\d+)$/;
+
+// refPlace names where in the service a reference points: the conversation
+// name when there is one, repo#number for GitHub, else the account.
+function refPlace(ref: ActionItemRef): string | undefined {
+  if (ref.conversation_name) return ref.conversation_name;
+  const github = ref.service.toLowerCase() === 'github' && ref.conversation_id ? githubPattern.exec(ref.conversation_id) : null;
+  if (github) return `${github[1]}#${github[2]}`;
+  return ref.account;
+}
+
+// refLabel is the short label of a reference ("Slack · #general",
+// "GitHub · repo#12"); the ids stay in refDetail for the tooltip.
 export function refLabel(ref: ActionItemRef): string {
-  return [serviceLabel(ref.service), ref.account].filter(Boolean).join(' · ');
+  return [serviceLabel(ref.service), refPlace(ref)].filter(Boolean).join(' · ');
 }
 
 export function refDetail(ref: ActionItemRef): string {
-  return [ref.service, ref.account, ref.conversation_id, ref.message_id].filter(Boolean).join(' / ');
+  return [ref.service, ref.account, ref.conversation_name, ref.conversation_id, ref.message_id].filter(Boolean).join(' / ');
 }

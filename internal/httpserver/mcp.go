@@ -335,13 +335,14 @@ func refsProp() map[string]any {
 	return map[string]any{
 		"type":        "array",
 		"maxItems":    10,
-		"description": "References to the source conversation (up to 10). Each needs service (e.g. gmail, slack) and may have account, conversation_id, message_id and url (http or https).",
+		"description": "References to the source conversation (up to 10). Each needs service (e.g. gmail, slack) and may have account, conversation_id, conversation_name (a readable name such as #general, shown instead of the account), message_id and url (http or https).",
 		"items": objectSchema([]string{"service"}, map[string]any{
-			"service":         map[string]any{"type": "string"},
-			"account":         map[string]any{"type": "string"},
-			"conversation_id": map[string]any{"type": "string"},
-			"message_id":      map[string]any{"type": "string"},
-			"url":             map[string]any{"type": "string"},
+			"service":           map[string]any{"type": "string"},
+			"account":           map[string]any{"type": "string"},
+			"conversation_id":   map[string]any{"type": "string"},
+			"conversation_name": map[string]any{"type": "string"},
+			"message_id":        map[string]any{"type": "string"},
+			"url":               map[string]any{"type": "string"},
 		}),
 	}
 }

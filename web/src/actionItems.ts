@@ -12,6 +12,8 @@ export interface ActionItemRef {
   service: string;
   account?: string;
   conversation_id?: string;
+  // conversation_name is a readable name for display, such as #general.
+  conversation_name?: string;
   message_id?: string;
   url?: string;
 }
@@ -75,7 +77,7 @@ function optionalString(value: unknown): boolean {
 
 function isRef(value: unknown): value is ActionItemRef {
   return isRecord(value) && typeof value.service === 'string' &&
-    optionalString(value.account) && optionalString(value.conversation_id) &&
+    optionalString(value.account) && optionalString(value.conversation_id) && optionalString(value.conversation_name) &&
     optionalString(value.message_id) && optionalString(value.url);
 }
 

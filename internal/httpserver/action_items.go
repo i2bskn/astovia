@@ -33,8 +33,11 @@ type actionItemRef struct {
 	Service        string `json:"service"`
 	Account        string `json:"account,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
-	MessageID      string `json:"message_id,omitempty"`
-	URL            string `json:"url,omitempty"`
+	// ConversationName is a readable name of the conversation for display,
+	// such as #general.
+	ConversationName string `json:"conversation_name,omitempty"`
+	MessageID        string `json:"message_id,omitempty"`
+	URL              string `json:"url,omitempty"`
 }
 
 // actionItemResponse is the public representation of an action item.
@@ -142,11 +145,12 @@ type actionItemPatch struct {
 // actionItemRefInput uses pointers so that a missing key can be told apart
 // from an empty string.
 type actionItemRefInput struct {
-	Service        *string `json:"service"`
-	Account        *string `json:"account"`
-	ConversationID *string `json:"conversation_id"`
-	MessageID      *string `json:"message_id"`
-	URL            *string `json:"url"`
+	Service          *string `json:"service"`
+	Account          *string `json:"account"`
+	ConversationID   *string `json:"conversation_id"`
+	ConversationName *string `json:"conversation_name"`
+	MessageID        *string `json:"message_id"`
+	URL              *string `json:"url"`
 }
 
 func isNull(raw json.RawMessage) bool { return bytes.Equal(raw, []byte("null")) }
@@ -235,7 +239,7 @@ func (in actionItemFields) parse() (func(*store.ActionItem), int, string) {
 
 // parseRefs validates refs and returns its normalized JSON.
 func parseRefs(raw json.RawMessage) (string, string) {
-	const invalid = "refs must be an array of at most 10 objects with a valid service and optional account, conversation_id, message_id and http(s) url."
+	const invalid = "refs must be an array of at most 10 objects with a valid service and optional account, conversation_id, conversation_name, message_id and http(s) url."
 	var in []actionItemRefInput
 	if isNull(raw) || !decodeValue(raw, &in) || len(in) > 10 {
 		return "", invalid
@@ -249,7 +253,7 @@ func parseRefs(raw json.RawMessage) (string, string) {
 		for _, f := range []struct {
 			in  *string
 			out *string
-		}{{r.Account, &ref.Account}, {r.ConversationID, &ref.ConversationID}, {r.MessageID, &ref.MessageID}} {
+		}{{r.Account, &ref.Account}, {r.ConversationID, &ref.ConversationID}, {r.ConversationName, &ref.ConversationName}, {r.MessageID, &ref.MessageID}} {
 			if f.in == nil {
 				continue
 			}

@@ -368,7 +368,7 @@ func testMCPTools(t *testing.T, driver string) {
 		{"action_items_create", nil, "invalid_request: content is required."},
 		{"action_items_create", map[string]any{"content": "x", "user_id": "bob-id"}, "invalid_request: Invalid arguments."},
 		{"action_items_create", map[string]any{"content": "x", "status": "closed"}, "invalid_request: status must be open, candidate, done or dismissed."},
-		{"action_items_create", map[string]any{"content": "x", "refs": nil}, "invalid_request: refs must be an array of at most 10 objects with a valid service and optional account, conversation_id, message_id and http(s) url."},
+		{"action_items_create", map[string]any{"content": "x", "refs": nil}, "invalid_request: refs must be an array of at most 10 objects with a valid service and optional account, conversation_id, conversation_name, message_id and http(s) url."},
 		{"action_items_create", []any{"x"}, "invalid_request: Invalid arguments."},
 		{"action_items_list", map[string]any{"limit": "50"}, "invalid_request: limit must be an integer from 1 to 100."},
 		{"action_items_list", map[string]any{"limit": 50.5}, "invalid_request: limit must be an integer from 1 to 100."},

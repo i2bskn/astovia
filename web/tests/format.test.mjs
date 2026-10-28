@@ -36,6 +36,12 @@ test('references get short labels and keep ids for the tooltip', () => {
   assert.equal(refLabel(ref), 'Slack · acme');
   assert.equal(refDetail(ref), 'slack / acme / C1 / M1');
   assert.equal(refLabel({ service: 'note' }), 'note');
+  // A conversation name or a GitHub repository says more than the account.
+  const named = { ...ref, conversation_name: '#general' };
+  assert.equal(refLabel(named), 'Slack · #general');
+  assert.equal(refDetail(named), 'slack / acme / #general / C1 / M1');
+  assert.equal(refLabel({ service: 'github', account: 'alice', conversation_id: 'acme/api#12' }), 'GitHub · api#12');
+  assert.equal(refLabel({ service: 'github', account: 'alice', conversation_id: 'not a repo' }), 'GitHub · alice');
   assert.equal(serviceLabel('GitHub'), 'GitHub');
   assert.equal(serviceLabel('toString'), 'toString');
 });

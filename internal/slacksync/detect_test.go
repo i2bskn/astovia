@@ -40,7 +40,7 @@ func TestMentionDetection(t *testing.T) {
 			t.Fatalf("open item: %+v", open)
 		}
 		var refs []map[string]string
-		if err := json.Unmarshal([]byte(open.Refs), &refs); err != nil || len(refs) != 1 || refs[0]["service"] != "slack" || refs[0]["account"] != "Acme" || refs[0]["conversation_id"] != "C1" || refs[0]["message_id"] != m1 || refs[0]["url"] != link("C1", m1, "") {
+		if err := json.Unmarshal([]byte(open.Refs), &refs); err != nil || len(refs) != 1 || refs[0]["service"] != "slack" || refs[0]["account"] != "Acme" || refs[0]["conversation_id"] != "C1" || refs[0]["conversation_name"] != "#name-C1" || refs[0]["message_id"] != m1 || refs[0]["url"] != link("C1", m1, "") {
 			t.Fatalf("refs: %s", open.Refs)
 		}
 		done := st.mustItem(mentionKey("C1", "-", m3))
@@ -261,7 +261,10 @@ func TestRunLimit(t *testing.T) {
 		}
 		st.ai.set(aiAction("一つ目"), aiAction("二つ目"))
 		st.sync()
-		st.mustItem(dmKey("D1", "-", ts[0], ts[9]))
+		// The conversation is named after the other member.
+		if name := refName(t, st.mustItem(dmKey("D1", "-", ts[0], ts[9]))); name != "DM（bob）" {
+			t.Fatalf("DM name: %q", name)
+		}
 		st.mustItem(dmKey("D1", "-", ts[10], ts[11]))
 		targets := 0
 		for _, p := range posts(st.ai.input(t, 1)) {
@@ -322,7 +325,9 @@ func TestDetectionToggles(t *testing.T) {
 			}
 		}
 		// The group DM's messages not judged as a group DM yet form one run.
-		st.mustItem(dmKey("G1", "-", g, g2))
+		if name := refName(t, st.mustItem(dmKey("G1", "-", g, g2))); name != "グループDM" {
+			t.Fatalf("group DM name: %q", name)
+		}
 		if _, ok := st.item(mentionKey("G1", "-", g2)); ok {
 			t.Fatal("group DM mention judged as a mention")
 		}
@@ -623,4 +628,14 @@ func TestDetectionAIErrors(t *testing.T) {
 			t.Fatalf("AI settings: %+v", a)
 		}
 	})
+}
+
+// refName returns the conversation name of an item's only ref.
+func refName(t *testing.T, item store.ActionItem) string {
+	t.Helper()
+	var refs []map[string]string
+	if err := json.Unmarshal([]byte(item.Refs), &refs); err != nil || len(refs) != 1 {
+		t.Fatalf("refs: %s", item.Refs)
+	}
+	return refs[0]["conversation_name"]
 }

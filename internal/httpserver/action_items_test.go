@@ -105,7 +105,7 @@ func testActionItemsAPI(t *testing.T, driver string) {
 	now := time.Date(2026, 10, 23, 1, 2, 3, 0, time.UTC)
 	api := newActionItemAPI(t, driver, &now)
 
-	w := api.do("POST", "/api/v1/action-items", api.alice, "application/json", `{"content":" 日程を返答する ","note":"memo","due_at":"2026-10-24T09:30:00.9+09:00","refs":[{"service":"slack","account":"T123","conversation_id":"C123","message_id":"1700000000.000100","url":"https://example.com/x"},{"service":"line"}]}`)
+	w := api.do("POST", "/api/v1/action-items", api.alice, "application/json", `{"content":" 日程を返答する ","note":"memo","due_at":"2026-10-24T09:30:00.9+09:00","refs":[{"service":"slack","account":"T123","conversation_id":"C123","conversation_name":"#general","message_id":"1700000000.000100","url":"https://example.com/x"},{"service":"line"}]}`)
 	if w.Code != 201 {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
@@ -120,7 +120,7 @@ func testActionItemsAPI(t *testing.T, driver string) {
 	if err := json.Unmarshal(body["refs"], &refs); err != nil || len(refs) != 2 {
 		t.Fatalf("refs: %s", body["refs"])
 	}
-	if _, keys = jsonKeys(t, mustJSON(t, refs[0])); !reflect.DeepEqual(keys, []string{"account", "conversation_id", "message_id", "service", "url"}) {
+	if _, keys = jsonKeys(t, mustJSON(t, refs[0])); !reflect.DeepEqual(keys, []string{"account", "conversation_id", "conversation_name", "message_id", "service", "url"}) {
 		t.Fatalf("ref keys: %v", keys)
 	}
 	if _, keys = jsonKeys(t, mustJSON(t, refs[1])); !reflect.DeepEqual(keys, []string{"service"}) {
@@ -280,6 +280,9 @@ func TestActionItemValidation(t *testing.T) {
 		{`{"content":"x","refs":[{"service":"slack","account":"` + strings.Repeat("あ", 256) + `"}]}`, true},
 		{`{"content":"x","refs":[{"service":"slack","message_id":"` + strings.Repeat("a", 257) + `"}]}`, false},
 		{`{"content":"x","refs":[{"service":"slack","conversation_id":"a\u0000"}]}`, false},
+		{`{"content":"x","refs":[{"service":"slack","conversation_name":"` + strings.Repeat("あ", 256) + `"}]}`, true},
+		{`{"content":"x","refs":[{"service":"slack","conversation_name":"` + strings.Repeat("あ", 257) + `"}]}`, false},
+		{`{"content":"x","refs":[{"service":"slack","conversation_name":""}]}`, false},
 		{`{"content":"x","refs":[{"service":"slack","url":"https://example.com/a"}]}`, true},
 		{`{"content":"x","refs":[{"service":"slack","url":"HTTP://example.com/a"}]}`, true},
 		{`{"content":"x","refs":[{"service":"slack","url":"javascript:alert(1)"}]}`, false},

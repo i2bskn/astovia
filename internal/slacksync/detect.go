@@ -47,10 +47,12 @@ const (
 	judgedLimit   = 500
 	openTaskLimit = 3
 	// runLimit is the largest number of messages judged together.
-	runLimit       = 10
-	contentLimit   = 500
-	excerptLimit   = 80
-	noActionNotice = "Slack の発言（対応不要）"
+	runLimit     = 10
+	contentLimit = 500
+	excerptLimit = 80
+	// conversationNameLimit bounds the conversation name kept in refs.
+	conversationNameLimit = 100
+	noActionNotice        = "Slack の発言（対応不要）"
 )
 
 // outcome is the item to create for a judgment.
@@ -88,11 +90,12 @@ type unit struct {
 }
 
 type ref struct {
-	Service        string `json:"service"`
-	Account        string `json:"account,omitempty"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	MessageID      string `json:"message_id,omitempty"`
-	URL            string `json:"url,omitempty"`
+	Service          string `json:"service"`
+	Account          string `json:"account,omitempty"`
+	ConversationID   string `json:"conversation_id,omitempty"`
+	ConversationName string `json:"conversation_name,omitempty"`
+	MessageID        string `json:"message_id,omitempty"`
+	URL              string `json:"url,omitempty"`
 }
 
 // detect finds and judges the messages of the window and moves the window
@@ -673,7 +676,11 @@ func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	refs, err := json.Marshal([]ref{{Service: store.SourceSlack, Account: r.conn.TeamName, ConversationID: u.key.Channel, MessageID: u.key.Last, URL: link}})
+	place, err := r.conversationName(u)
+	if err != nil {
+		return false, err
+	}
+	refs, err := json.Marshal([]ref{{Service: store.SourceSlack, Account: r.conn.TeamName, ConversationID: u.key.Channel, ConversationName: place, MessageID: u.key.Last, URL: link}})
 	if err != nil {
 		return false, err
 	}
@@ -730,6 +737,29 @@ func setEvent(item *store.ActionItem, e *ai.Event, ref sql.NullString, now int64
 	if start <= now {
 		item.Status, item.AutoReason, item.AutoRef, item.AutoAt = "dismissed", nullString(store.ReasonEventPassed), ref, nullInt(now)
 	}
+}
+
+// conversationName names the conversation of a unit for display: #channel,
+// DM（name） with the other member's display name, or グループDM. It is empty
+// when Slack did not give a channel name.
+func (r *run) conversationName(u *unit) (string, error) {
+	switch u.convType {
+	case ai.SlackDM:
+		name, err := r.userName(u.last.User)
+		if err != nil {
+			return "", err
+		}
+		if name == "" || name == u.last.User {
+			return "DM", nil
+		}
+		return truncate("DM（"+name+"）", conversationNameLimit), nil
+	case ai.SlackGroupDM:
+		return "グループDM", nil
+	}
+	if name := cleanText(u.channelName); name != "" {
+		return truncate("#"+name, conversationNameLimit), nil
+	}
+	return "", nil
 }
 
 func detectedNotification(title string, item store.ActionItem, now int64) store.Notification {
