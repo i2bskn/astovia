@@ -367,9 +367,11 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 .inline-code { font-family: var(--mono); font-size: .9em; background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; overflow-wrap: anywhere; color: var(--ink); }
 
 .action-list { list-style: none; margin: 0 0 12px; padding: 0; border: 1px solid var(--line); border-radius: 12px; overflow: clip; }
-.action-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border-top: 1px solid var(--line); }
+/* The body keeps at least 240px; when the buttons do not fit beside it, they
+   wrap to a line of their own instead of squeezing it. */
+.action-item { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 12px 14px; border-top: 1px solid var(--line); }
 .action-item:first-child { border-top: 0; }
-.action-body { flex: 1; min-width: 0; }
+.action-body { flex: 1 1 240px; min-width: 0; }
 .action-content { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .action-note { color: var(--ink-2); font-size: 13px; overflow-wrap: anywhere; }
 .action-meta { display: flex; flex-wrap: wrap; gap: 2px 16px; margin: 2px 0 0; color: var(--ink-2); font-size: 12px; }
@@ -468,6 +470,8 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
   .composer-row .button { padding: 10px 14px; }
   .composer-note, .composer-foot { padding-left: 10px; }
   .action-item { flex-direction: column; align-items: stretch; gap: 8px; }
+  /* In a column the 240px basis would become a height. */
+  .action-body { flex-basis: auto; }
   .action-buttons { justify-content: flex-start; }
   .settings-facts div { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .form-actions .button { flex: 1 1 100%; }
