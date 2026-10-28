@@ -52,6 +52,10 @@ CREATE TABLE "action_items" (
   "auto_at" integer NULL,
   "detected_at" integer NULL,
   "tracked_at" integer NULL,
+  "kind" text NOT NULL DEFAULT 'task',
+  "event_title" text NULL,
+  "event_start_at" integer NULL,
+  "event_end_at" integer NULL,
   PRIMARY KEY ("id"),
   CONSTRAINT "action_items_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
 );
@@ -228,6 +232,7 @@ CREATE TABLE "notification_settings" (
   "digest_hour" integer NOT NULL,
   "stale_days" integer NOT NULL,
   "updated_at" integer NOT NULL,
+  "candidate_expire_days" integer NOT NULL DEFAULT 3,
   PRIMARY KEY ("user_id"),
   CONSTRAINT "notification_settings_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
 );

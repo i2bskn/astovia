@@ -294,6 +294,14 @@ func testMCPTools(t *testing.T, driver string) {
 		if tool.Description == "" || tool.Annotations == nil || tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
 			t.Fatalf("%s: description or annotations: %+v", tool.Name, tool.Annotations)
 		}
+		// Every status argument accepts candidate.
+		if status, ok := schema["properties"].(map[string]any)["status"].(map[string]any); ok {
+			if enum, _ := json.Marshal(status["enum"]); !strings.Contains(string(enum), `"candidate"`) {
+				t.Fatalf("%s status enum: %s", tool.Name, enum)
+			}
+		} else if tool.Name != "action_items_get" {
+			t.Fatalf("%s: no status property", tool.Name)
+		}
 		readOnly := tool.Name == "action_items_list" || tool.Name == "action_items_get"
 		if tool.Annotations.ReadOnlyHint != readOnly || !readOnly && (tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint) {
 			t.Fatalf("%s annotations: %+v", tool.Name, tool.Annotations)
@@ -307,8 +315,11 @@ func testMCPTools(t *testing.T, driver string) {
 	// create -> get -> list -> update.
 	var item actionItemResponse
 	c.ok("action_items_create", map[string]any{"content": "日程を返答する", "note": "memo", "due_at": "2026-10-24T13:00:00+09:00", "refs": []any{map[string]any{"service": "slack", "url": "https://example.com/x"}}}, &item)
-	if item.Content != "日程を返答する" || item.Status != "open" || item.Note == nil || *item.Note != "memo" || item.DueAt == nil || *item.DueAt != "2026-10-24T04:00:00Z" || len(item.Refs) != 1 || item.Version != 1 {
+	if item.Content != "日程を返答する" || item.Status != "open" || item.Note == nil || *item.Note != "memo" || item.DueAt == nil || *item.DueAt != "2026-10-24T04:00:00Z" || len(item.Refs) != 1 || item.Version != 1 || item.Kind != "task" || item.Event != nil {
 		t.Fatalf("created: %+v", item)
+	}
+	if stored, err := api.store.ActionItem(context.Background(), "alice-id", item.ID); err != nil || stored.Kind != store.KindTask {
+		t.Fatalf("stored kind: %+v %v", stored, err)
 	}
 	var got actionItemResponse
 	c.ok("action_items_get", map[string]any{"id": item.ID}, &got)
@@ -356,15 +367,15 @@ func testMCPTools(t *testing.T, driver string) {
 		{"action_items_create", map[string]any{}, "invalid_request: content is required."},
 		{"action_items_create", nil, "invalid_request: content is required."},
 		{"action_items_create", map[string]any{"content": "x", "user_id": "bob-id"}, "invalid_request: Invalid arguments."},
-		{"action_items_create", map[string]any{"content": "x", "status": "closed"}, "invalid_request: status must be open, done or dismissed."},
+		{"action_items_create", map[string]any{"content": "x", "status": "closed"}, "invalid_request: status must be open, candidate, done or dismissed."},
 		{"action_items_create", map[string]any{"content": "x", "refs": nil}, "invalid_request: refs must be an array of at most 10 objects with a valid service and optional account, conversation_id, message_id and http(s) url."},
 		{"action_items_create", []any{"x"}, "invalid_request: Invalid arguments."},
 		{"action_items_list", map[string]any{"limit": "50"}, "invalid_request: limit must be an integer from 1 to 100."},
 		{"action_items_list", map[string]any{"limit": 50.5}, "invalid_request: limit must be an integer from 1 to 100."},
 		{"action_items_list", map[string]any{"limit": 0}, "invalid_request: limit must be an integer from 1 to 100."},
 		{"action_items_list", map[string]any{"limit": 101}, "invalid_request: limit must be an integer from 1 to 100."},
-		{"action_items_list", map[string]any{"status": "closed"}, "invalid_request: status must be open, done or dismissed."},
-		{"action_items_list", map[string]any{"status": ""}, "invalid_request: status must be open, done or dismissed."},
+		{"action_items_list", map[string]any{"status": "closed"}, "invalid_request: status must be open, candidate, done or dismissed."},
+		{"action_items_list", map[string]any{"status": ""}, "invalid_request: status must be open, candidate, done or dismissed."},
 		{"action_items_list", map[string]any{"cursor": "***"}, "invalid_request: cursor is invalid."},
 		{"action_items_list", map[string]any{"cursor": ""}, "invalid_request: cursor is invalid."},
 		{"action_items_list", map[string]any{"sort": "asc"}, "invalid_request: Invalid arguments."},

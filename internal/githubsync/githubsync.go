@@ -143,6 +143,8 @@ type run struct {
 	aiFallbackOnly bool
 	aiStale        bool
 	aiStopped      bool
+	// loc is the user's time zone for the AI, read once when needed.
+	loc *time.Location
 }
 
 // Sync synchronizes one connection and stores its new state. When the

@@ -166,6 +166,23 @@ table "action_items" {
     type = bigint
     null = true
   }
+  column "kind" {
+    type    = text
+    null    = false
+    default = "task"
+  }
+  column "event_title" {
+    type = text
+    null = true
+  }
+  column "event_start_at" {
+    type = bigint
+    null = true
+  }
+  column "event_end_at" {
+    type = bigint
+    null = true
+  }
   primary_key {
     columns = [column.id]
   }
@@ -716,6 +733,11 @@ table "notification_settings" {
   column "updated_at" {
     type = bigint
     null = false
+  }
+  column "candidate_expire_days" {
+    type    = bigint
+    null    = false
+    default = 3
   }
   primary_key {
     columns = [column.user_id]

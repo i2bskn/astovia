@@ -9,24 +9,28 @@ import (
 )
 
 type ActionItem struct {
-	ID         string
-	UserID     string
-	Content    string
-	Status     string
-	Note       sql.NullString
-	DueAt      sql.NullInt64
-	Refs       string
-	Version    int64
-	CreatedAt  int64
-	UpdatedAt  int64
-	Source     sql.NullString
-	SourceKey  sql.NullString
-	Tracking   int64
-	AutoReason sql.NullString
-	AutoRef    sql.NullString
-	AutoAt     sql.NullInt64
-	DetectedAt sql.NullInt64
-	TrackedAt  sql.NullInt64
+	ID           string
+	UserID       string
+	Content      string
+	Status       string
+	Note         sql.NullString
+	DueAt        sql.NullInt64
+	Refs         string
+	Version      int64
+	CreatedAt    int64
+	UpdatedAt    int64
+	Source       sql.NullString
+	SourceKey    sql.NullString
+	Tracking     int64
+	AutoReason   sql.NullString
+	AutoRef      sql.NullString
+	AutoAt       sql.NullInt64
+	DetectedAt   sql.NullInt64
+	TrackedAt    sql.NullInt64
+	Kind         string
+	EventTitle   sql.NullString
+	EventStartAt sql.NullInt64
+	EventEndAt   sql.NullInt64
 }
 
 type AiSetting struct {
@@ -97,11 +101,12 @@ type Notification struct {
 }
 
 type NotificationSetting struct {
-	UserID     string
-	Timezone   string
-	DigestHour int64
-	StaleDays  int64
-	UpdatedAt  int64
+	UserID              string
+	Timezone            string
+	DigestHour          int64
+	StaleDays           int64
+	UpdatedAt           int64
+	CandidateExpireDays int64
 }
 
 type OauthClient struct {

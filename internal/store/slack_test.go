@@ -199,8 +199,11 @@ func testSlackKeyQueries(t *testing.T, driver string) {
 	done := slackItem("done", "slack:T1:d:C1:-:4.000001:4.000001", 400)
 	done.Status, done.Tracking = "done", 0
 	untracked := slackItem("untracked", "slack:T1:d:C1:-:5.000001:5.000001", 500)
+	// Untracked open items (events) are listed; candidates are not.
 	untracked.Tracking = 0
-	items = append(items, done, untracked)
+	candidate := slackItem("candidate", "slack:T1:d:C1:-:7.000001:7.000001", 550)
+	candidate.Status = "candidate"
+	items = append(items, done, untracked, candidate)
 	err := s.SlackSync(ctx, "alice-id", c.Generation, func(tx *store.SlackTx) error {
 		for _, item := range items {
 			if _, e := tx.CreateItem(item); e != nil {
@@ -221,7 +224,7 @@ func testSlackKeyQueries(t *testing.T, driver string) {
 		t.Fatal(err)
 	}
 	keys, err := s.SlackJudgedKeys(ctx, "alice-id", "slack:T1:d:C1:-:", 100, 500)
-	want := []string{"slack:T1:d:C1:-:5.000001:5.000001", "slack:T1:d:C1:-:4.000001:4.000001", "slack:T1:d:C1:-:3.000001:3.000001", "slack:T1:d:C1:-:2.000001:2.000003", "slack:T1:d:C1:-:1.000001:1.000002"}
+	want := []string{"slack:T1:d:C1:-:7.000001:7.000001", "slack:T1:d:C1:-:5.000001:5.000001", "slack:T1:d:C1:-:4.000001:4.000001", "slack:T1:d:C1:-:3.000001:3.000001", "slack:T1:d:C1:-:2.000001:2.000003", "slack:T1:d:C1:-:1.000001:1.000002"}
 	if err != nil || !reflect.DeepEqual(keys, want) {
 		t.Fatalf("judged keys: %v %v", keys, err)
 	}
@@ -237,12 +240,21 @@ func testSlackKeyQueries(t *testing.T, driver string) {
 	if keys, err = s.SlackJudgedKeys(ctx, "bob-id", "slack:T1:d:C1:-:", 0, 500); err != nil || len(keys) != 0 {
 		t.Fatalf("other user: %v %v", keys, err)
 	}
-	tasks, err := s.SlackOpenTasks(ctx, "alice-id", "slack:T1:d:C1:-:", 3)
-	if err != nil || !reflect.DeepEqual(tasks, []string{"Slack: c", "Slack: b", "Slack: a"}) {
+	tasks, err := s.SlackOpenTasks(ctx, "alice-id", "slack:T1:d:C1:-:", 4)
+	if err != nil || !reflect.DeepEqual(tasks, []string{"Slack: untracked", "Slack: c", "Slack: b", "Slack: a"}) {
 		t.Fatalf("open tasks: %v %v", tasks, err)
 	}
 	if tasks, err = s.SlackOpenTasks(ctx, "alice-id", "slack:T9:", 3); err != nil || tasks == nil || len(tasks) != 0 {
 		t.Fatalf("no open tasks: %#v %v", tasks, err)
+	}
+	// Tracked candidates are followed like open items.
+	tracked, err := s.TrackedActionItems(ctx, "alice-id", store.SourceSlack, 100)
+	found := false
+	for _, item := range tracked {
+		found = found || item.ID == "candidate"
+	}
+	if err != nil || !found {
+		t.Fatalf("tracked candidates: %+v %v", tracked, err)
 	}
 }
 

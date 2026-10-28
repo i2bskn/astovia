@@ -315,7 +315,7 @@ func TestInitialImport(t *testing.T) {
 			t.Fatalf("connection: %+v", c)
 		}
 		review := st.mustItem("github:review:octo/repo#1")
-		if review.Content != "レビュー: Fixbug" || review.Status != "open" || review.Tracking != 1 || review.Source.String != "github" || review.DetectedAt.Int64 != st.now.Unix() {
+		if review.Content != "レビュー: Fixbug" || review.Status != "open" || review.Tracking != 1 || review.Source.String != "github" || review.DetectedAt.Int64 != st.now.Unix() || review.Kind != store.KindTask {
 			t.Fatalf("review item: %+v", review)
 		}
 		var refs []map[string]string

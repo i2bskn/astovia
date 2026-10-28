@@ -211,6 +211,102 @@ func TestEngineDigest(t *testing.T) {
 	})
 }
 
+// Task candidates are counted in the digest, which is sent for them alone.
+func TestEngineDigestCandidates(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		f := newFixture(t, driver, "cand", "mixed")
+		e := &Engine{Store: f.s, Now: f.clock}
+		ctx := context.Background()
+		now := f.now.Unix()
+		for _, u := range []string{"cand", "mixed"} {
+			f.subscribe(u, u+"-sub", "https://push.example/"+u)
+			if err := f.s.SaveNotificationSettings(ctx, store.NotificationSettings{UserID: u + "-id", Timezone: "UTC", DigestHour: 0, StaleDays: 30, UpdatedAt: 1, CandidateExpireDays: 3}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f.item("cand", "c1", "candidate", now-100)
+		f.item("cand", "c2", "candidate", now-90)
+		f.item("mixed", "m1", "candidate", now-100)
+		f.item("mixed", "m2", "open", now-90)
+		auto := store.ActionItem{ID: "m3", UserID: "mixed-id", Content: "auto", Status: "done", Refs: "[]", Version: 1, CreatedAt: now - 80, UpdatedAt: now - 80,
+			AutoReason: sql.NullString{String: "github.pr_merged", Valid: true}, AutoAt: sql.NullInt64{Int64: now - 60, Valid: true}}
+		// An automatically dismissed item is not counted as handled.
+		dismissed := store.ActionItem{ID: "m4", UserID: "mixed-id", Content: "dismissed", Status: "dismissed", Refs: "[]", Version: 1, CreatedAt: now - 80, UpdatedAt: now - 80,
+			AutoReason: sql.NullString{String: store.ReasonCandidateExpired, Valid: true}, AutoAt: sql.NullInt64{Int64: now - 60, Valid: true}}
+		for _, item := range []store.ActionItem{auto, dismissed} {
+			if err := f.s.CreateActionItem(ctx, item); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e.RunOnce(ctx)
+		got := map[string]store.Notification{}
+		for _, n := range f.pending() {
+			got[n.UserID] = n
+		}
+		if d := got["cand-id"]; d.Title != "今日の未完了 0件" || d.Body != "タスク候補 2件／" || d.URL != "/" {
+			t.Fatalf("candidates only: %+v", d)
+		}
+		if d := got["mixed-id"]; d.Title != "今日の未完了 1件" || d.Body != "自動で処理 1件／タスク候補 1件／content m2" || d.URL != "/auto" {
+			t.Fatalf("mixed: %+v", d)
+		}
+	})
+}
+
+func TestSweeper(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		f := newFixture(t, driver, "alice", "bob", "carol")
+		ctx := context.Background()
+		day := int64(86400)
+		now := f.now.Unix()
+		// alice has no settings (3 days); bob keeps candidates; carol waits
+		// 7 days. Nobody has a push subscription.
+		if err := f.s.SaveNotificationSettings(ctx, store.NotificationSettings{UserID: "bob-id", Timezone: "UTC", DigestHour: 8, StaleDays: 3, UpdatedAt: 1, CandidateExpireDays: 0}); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.s.SaveNotificationSettings(ctx, store.NotificationSettings{UserID: "carol-id", Timezone: "UTC", DigestHour: 8, StaleDays: 3, UpdatedAt: 1, CandidateExpireDays: 7}); err != nil {
+			t.Fatal(err)
+		}
+		event := func(user, id, status string, start int64) {
+			item := store.ActionItem{ID: id, UserID: user + "-id", Content: id, Status: status, Refs: "[]", Version: 1, CreatedAt: now - 10*day, UpdatedAt: now - 10*day,
+				Kind: store.KindEvent, EventTitle: sql.NullString{String: id, Valid: true}, EventStartAt: sql.NullInt64{Int64: start, Valid: true}, DueAt: sql.NullInt64{Int64: start, Valid: true}}
+			if err := f.s.CreateActionItem(ctx, item); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f.item("alice", "a-old", "candidate", now-3*day)
+		f.item("alice", "a-new", "candidate", now-3*day+1)
+		f.item("alice", "a-open", "open", now-30*day)
+		event("alice", "a-event", "candidate", now)
+		event("alice", "a-future", "open", now+1)
+		f.item("bob", "b-old", "candidate", now-30*day)
+		event("bob", "b-event", "open", now-day)
+		f.item("carol", "c-mid", "candidate", now-6*day)
+		f.item("carol", "c-old", "candidate", now-7*day)
+		(&Sweeper{Store: f.s, Now: f.clock}).RunOnce(ctx)
+		want := map[string]string{
+			"alice-id/a-old": store.ReasonCandidateExpired, "alice-id/a-new": "", "alice-id/a-open": "", "alice-id/a-event": store.ReasonEventPassed, "alice-id/a-future": "",
+			"bob-id/b-old": "", "bob-id/b-event": store.ReasonEventPassed,
+			"carol-id/c-mid": "", "carol-id/c-old": store.ReasonCandidateExpired,
+		}
+		for key, reason := range want {
+			user, id, _ := strings.Cut(key, "/")
+			item, err := f.s.ActionItem(ctx, user, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reason == "" {
+				if item.Status == "dismissed" || item.AutoReason.Valid || item.Version != 1 {
+					t.Fatalf("%s changed: %+v", key, item)
+				}
+				continue
+			}
+			if item.Status != "dismissed" || item.AutoReason.String != reason || item.AutoAt.Int64 != now || item.Version != 2 {
+				t.Fatalf("%s: %+v", key, item)
+			}
+		}
+	})
+}
+
 func TestDigestSkippedHour(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		f := newFixture(t, driver, "ny")

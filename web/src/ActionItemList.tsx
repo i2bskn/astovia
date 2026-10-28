@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
+import { Link } from 'react-router';
 import { request } from './auth';
 import { createActionItemsClient, isConflict } from './actionItems';
 import type { ActionItem, ActionItemStatus } from './actionItems';
-import { autoReasonLabel, httpsURL } from './automation';
-import { dueLabel, fullDateTime, happenedAt } from './format';
-import { CheckIcon, ClockIcon, DismissIcon, PlusIcon, UndoIcon } from './icons';
+import { candidates } from './candidates';
+import { dueLabel } from './format';
+import { CheckIcon, ChevronRightIcon, PlusIcon, SparkleIcon } from './icons';
 import Phrased from './Phrased';
-import RefChip from './RefChip';
+import TaskRow, { toastMessage } from './TaskRow';
 import { useNow } from './useNow';
+import { countLabel } from './view';
 
 const client = createActionItemsClient(request);
 
@@ -21,42 +23,12 @@ const filters: { value: Filter; label: string; empty: string; hint: string }[] =
   { value: 'all', label: 'すべて', empty: 'タスクはありません。', hint: '上の欄から最初のタスクを追加できます。' },
 ];
 
-const statusMessages: Record<ActionItemStatus, string> = {
-  done: '完了にしました',
-  dismissed: '対象外にしました',
-  open: '未完了に戻しました',
-};
+// previewLimit is the number of task candidates the notice above the open
+// items shows when opened; the rest are on the candidates screen.
+const previewLimit = 3;
 
 function matches(filter: Filter, status: ActionItemStatus): boolean {
   return filter === 'all' || filter === status;
-}
-
-function ItemRow({ item, busy, now, index, onChange }: { item: ActionItem; busy: boolean; now: Date; index: number; onChange: (item: ActionItem, status: ActionItemStatus) => void }) {
-  const titleID = useId();
-  const due = item.status === 'open' && item.due_at ? dueLabel(item.due_at, now) : null;
-  const open = item.status === 'open';
-  const evidence = httpsURL(item.auto?.ref_url);
-  return <li className={`task task-${item.status}`} style={{ '--i': Math.min(index, 12) } as React.CSSProperties}>
-    <button className="task-check" type="button" disabled={busy} aria-describedby={titleID} aria-label={open ? '完了にする' : '未完了に戻す'} title={open ? '完了にする' : '未完了に戻す'} onClick={() => onChange(item, open ? 'done' : 'open')}>
-      <span className="task-check-ring">{item.status === 'dismissed' ? <DismissIcon size={14} /> : <CheckIcon size={13} />}</span>
-    </button>
-    <div className="task-body">
-      <p className="task-title" id={titleID}><Phrased text={item.content} /></p>
-      {item.note ? <p className="task-note"><Phrased text={item.note} /></p> : null}
-      <div className="task-meta">
-        {due ? <span className={`chip due due-${due.tone}`} title={`関連日時: ${fullDateTime(item.due_at ?? '')}`}><ClockIcon size={12} />期限 {due.text}{due.tone === 'past' ? '（超過）' : ''}</span> : null}
-        {item.source ? <span className="chip chip-auto">自動検出</span> : null}
-        {item.refs.map((ref, i) => <RefChip key={i} value={ref} />)}
-        {item.auto ? <span className="task-auto-note">{autoReasonLabel(item.auto.reason)}ので自動で完了{evidence ? <> · <a href={evidence} rel="noopener noreferrer" target="_blank">根拠<span className="sr-only">を新しいタブで開く</span></a></> : null}</span> : null}
-      </div>
-      <p className="task-time" title={fullDateTime(item.created_at)}>{happenedAt(item.created_at, now, item.source ? '検出' : '追加')}</p>
-    </div>
-    <div className="task-actions">
-      {open
-        ? <button className="button ghost small" type="button" disabled={busy} aria-describedby={titleID} onClick={() => onChange(item, 'dismissed')}><DismissIcon size={15} />対象外にする</button>
-        : <button className="button ghost small" type="button" disabled={busy} aria-describedby={titleID} onClick={() => onChange(item, 'open')}><UndoIcon size={15} />未完了に戻す</button>}
-    </div>
-  </li>;
 }
 
 function Skeleton() {
@@ -77,6 +49,10 @@ export default function ActionItemList() {
   const [filter, setFilter] = useState<Filter>('open');
   const [items, setItems] = useState<ActionItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const candidateState = useSyncExternalStore(candidates.subscribe, candidates.getSnapshot);
+  // The candidates notice starts closed, so that it does not push the
+  // tasks down.
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
@@ -96,6 +72,7 @@ export default function ActionItemList() {
   const headingID = useId();
   const formErrorID = useId();
   const noteID = useId();
+  const previewID = useId();
 
   // Only the response to the latest list request is applied.
   const load = useCallback(async (current: Filter, cursor?: string) => {
@@ -115,6 +92,12 @@ export default function ActionItemList() {
       if (expected === sequence.current) setLoading(false);
     }
   }, []);
+
+  // reload reads the shown list and the candidates again after a change.
+  const reload = useCallback(() => {
+    void load(shown.current);
+    void candidates.refresh();
+  }, [load]);
 
   useEffect(() => {
     shown.current = filter;
@@ -158,6 +141,7 @@ export default function ActionItemList() {
         // An undone item comes back to the list it left.
         return previous.some((i) => i.id === updated.id) ? previous.map((i) => i.id === updated.id ? updated : i) : [updated, ...previous];
       });
+      reload();
       window.clearTimeout(toastTimer.current);
       if (undo) {
         setToast(null);
@@ -178,10 +162,14 @@ export default function ActionItemList() {
   }
 
   const current = filters.find((f) => f.value === filter) ?? { empty: '', hint: '' };
+  // The candidates notice is shown with the open items only. The preview
+  // takes the newest few; the server lists them newest first.
+  const candidateCount = filter === 'open' ? candidateState.items.length : 0;
+  const preview = candidateState.items.slice(0, previewLimit);
   // Past dates first, oldest first, then the nearest upcoming ones.
   const soon = filter === 'open' ? items.filter((i) => urgent(i, now)).sort((a, b) => Date.parse(a.due_at ?? '') - Date.parse(b.due_at ?? '')) : [];
   const rest = filter === 'open' ? items.filter((i) => !urgent(i, now)) : items;
-  const row = (item: ActionItem, index: number) => <ItemRow key={item.id} item={item} index={index} now={now} busy={busyIDs.has(item.id)} onChange={(i, s) => { void changeStatus(i, s); }} />;
+  const row = (item: ActionItem, index: number) => <TaskRow key={item.id} item={item} index={index} now={now} busy={busyIDs.has(item.id)} onChange={(i, s) => { void changeStatus(i, s); }} />;
 
   return <section className="tasks" aria-labelledby={headingID}>
     <h2 id={headingID} className="sr-only">タスクの一覧</h2>
@@ -212,6 +200,18 @@ export default function ActionItemList() {
     </div> : null}
     {error ? <p className="notice error" role="alert">{error}</p> : null}
 
+    {candidateCount > 0 ? <div className="candidate-notice">
+      <button className="candidate-toggle" type="button" aria-expanded={previewOpen} aria-controls={previewID} onClick={() => setPreviewOpen((open) => !open)}>
+        <span className="candidate-mark" aria-hidden="true"><SparkleIcon size={16} /></span>
+        <span className="candidate-text">タスク候補が <strong>{countLabel(candidateCount, candidateState.more)}件</strong> あります</span>
+        <ChevronRightIcon size={16} />
+      </button>
+      {previewOpen ? <div id={previewID} className="candidate-preview">
+        <p className="group-hint">AI が自分宛てか判断しきれなかったものです。タスクにするか、不要かを選んでください。</p>
+        <ul className="task-list">{preview.map(row)}</ul>
+        <Link className="candidate-all" to="/candidates">すべて見る（{countLabel(candidateCount, candidateState.more)}件）</Link>
+      </div> : null}
+    </div> : null}
     {soon.length > 0 ? <div className="task-group">
       <h3 className="group-label urgent">期限切れ・まもなく期限<span className="count">{soon.length}</span></h3>
       <ul className="task-list">{soon.map(row)}</ul>
@@ -232,7 +232,7 @@ export default function ActionItemList() {
 
     <div className="toast-region" role="status" aria-live="polite">
       {toast ? <div className="toast">
-        <span className="toast-text"><span className="toast-subject">「{toast.item.content}」</span>を{statusMessages[toast.item.status]}</span>
+        <span className="toast-text"><span className="toast-subject">「{toast.item.content}」</span>を{toastMessage(toast.previous, toast.item.status)}</span>
         <button className="toast-action" type="button" disabled={busyIDs.has(toast.item.id)} onClick={() => { void changeStatus(toast.item, toast.previous, true); }}>元に戻す</button>
       </div> : null}
     </div>

@@ -187,7 +187,11 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, originMsg *slack.
 		msgs = append(msgs, *originMsg)
 	}
 	msgs = append(msgs, tail...)
-	in := ai.ReplyInput{Me: ai.SlackPerson{ID: r.conn.SlackUserID, Name: r.conn.SlackUserName}, Task: item.Content}
+	loc, err := r.location()
+	if err != nil {
+		return passAbort, err
+	}
+	in := ai.ReplyInput{Me: ai.SlackPerson{ID: r.conn.SlackUserID, Name: r.conn.SlackUserName}, Location: loc, Task: item.Content}
 	for _, m := range msgs {
 		p, err := r.post(m, false)
 		if err != nil {
@@ -229,7 +233,7 @@ func (r *run) touch(item store.ActionItem, at int64) error {
 }
 
 // change applies fn to the item after locking it, when it is still the
-// open, tracked Slack item of the version read.
+// open (or candidate), tracked Slack item of the version read.
 func (r *run) change(item store.ActionItem, fn func(next *store.ActionItem), resolved bool) error {
 	now := r.s.Now().Unix()
 	return r.s.Store.SlackSync(r.parent, r.conn.UserID, r.conn.Generation, func(tx *store.SlackTx) error {
@@ -237,7 +241,7 @@ func (r *run) change(item store.ActionItem, fn func(next *store.ActionItem), res
 		if e != nil || !found {
 			return e
 		}
-		if cur.Status != "open" || cur.Tracking != 1 || cur.Source.String != store.SourceSlack || cur.Version != item.Version {
+		if (cur.Status != "open" && cur.Status != "candidate") || cur.Tracking != 1 || cur.Source.String != store.SourceSlack || cur.Version != item.Version {
 			return nil
 		}
 		next := cur

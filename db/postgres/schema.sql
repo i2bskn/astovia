@@ -37,6 +37,10 @@ CREATE TABLE "action_items" (
   "auto_at" bigint NULL,
   "detected_at" bigint NULL,
   "tracked_at" bigint NULL,
+  "kind" text NOT NULL DEFAULT 'task',
+  "event_title" text NULL,
+  "event_start_at" bigint NULL,
+  "event_end_at" bigint NULL,
   PRIMARY KEY ("id"),
   CONSTRAINT "action_items_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
 );
@@ -113,6 +117,7 @@ CREATE TABLE "notification_settings" (
   "digest_hour" bigint NOT NULL,
   "stale_days" bigint NOT NULL,
   "updated_at" bigint NOT NULL,
+  "candidate_expire_days" bigint NOT NULL DEFAULT 3,
   PRIMARY KEY ("user_id"),
   CONSTRAINT "notification_settings_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
 );

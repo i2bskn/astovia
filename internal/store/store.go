@@ -67,6 +67,36 @@ type ActionItem struct {
 	// TrackedAt when its source object was last checked.
 	DetectedAt sql.NullInt64
 	TrackedAt  sql.NullInt64
+	// Kind is KindTask or KindEvent. An event item asks the user to add a
+	// meeting to the calendar; EventTitle, EventStartAt and EventEndAt
+	// describe the meeting (EventEndAt is null when no end was given).
+	Kind         string
+	EventTitle   sql.NullString
+	EventStartAt sql.NullInt64
+	EventEndAt   sql.NullInt64
+}
+
+// Kinds of action items. Items are created as KindTask unless the caller
+// sets KindEvent.
+const (
+	KindTask  = "task"
+	KindEvent = "event"
+)
+
+// Automatic reasons of the candidate sweep. An item created for an event
+// that has already started is dismissed with ReasonEventPassed as well.
+const (
+	ReasonCandidateExpired = "candidate.expired"
+	ReasonEventPassed      = "event.passed"
+)
+
+// withKind returns item with an empty Kind set to KindTask. The INSERT
+// statements list every column, so the column default does not apply.
+func withKind(item ActionItem) ActionItem {
+	if item.Kind == "" {
+		item.Kind = KindTask
+	}
+	return item
 }
 
 // APIToken is a long-lived bearer token. Only the SHA-256 hash of the secret
@@ -124,6 +154,9 @@ type queries interface {
 	countAutoActionItemsSince(ctx context.Context, userID string, since int64) (int64, error)
 	touchActionItemTracked(ctx context.Context, userID, id string, version, now int64) (int64, error)
 	untrackSourceActionItems(ctx context.Context, userID, source string, now int64) error
+	listCandidateSweepUserIDs(ctx context.Context, now int64) ([]string, error)
+	expireCandidates(ctx context.Context, userID string, updatedBefore, now int64) (int64, error)
+	expireEvents(ctx context.Context, userID string, now int64) (int64, error)
 	createAPIToken(ctx context.Context, token APIToken, hash string) error
 	countAPITokens(ctx context.Context, userID string) (int64, error)
 	listAPITokens(ctx context.Context, userID string) ([]APIToken, error)
@@ -241,7 +274,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -459,7 +492,7 @@ func (s *Store) Authenticated(ctx context.Context, uid, sid string, now int64) (
 }
 
 func (s *Store) CreateActionItem(ctx context.Context, item ActionItem) error {
-	return s.q.createActionItem(ctx, item)
+	return s.q.createActionItem(ctx, withKind(item))
 }
 
 // ActionItem returns the user's item, or ErrItemNotFound when the item does

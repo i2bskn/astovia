@@ -46,13 +46,13 @@ func userText(t *testing.T, raw []byte) (string, string, map[string]any) {
 }
 
 func TestJudgeSlack(t *testing.T) {
-	f, c := newFake(t, message("end_turn", `{"needs_action":true,"task":"返事する","summary":"bob さんが依頼"}`))
+	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"返事する","summary":"bob さんが依頼"`+noEvent+`}`))
 	res, err := c.JudgeSlack(context.Background(), testKey, "claude-haiku-5-5", slackInput())
-	if err != nil || !res.NeedsAction || res.Task != "返事する" {
+	if err != nil || res.Decision != DecisionTask || res.Task != "返事する" {
 		t.Fatalf("result: %+v %v", res, err)
 	}
 	text, system, schema := userText(t, f.last().body)
-	if system != SlackSystemPrompt || len(schema["required"].([]any)) != 3 {
+	if system != SlackSystemPrompt || len(schema["required"].([]any)) != 6 {
 		t.Fatalf("system or schema: %s", f.last().body)
 	}
 	// The posts are one JSON document; a body cannot forge the structure.
@@ -135,5 +135,36 @@ func TestJudgeReply(t *testing.T) {
 	f.set(status(401, "authentication_error", "bad key"))
 	if _, err = c.JudgeReply(context.Background(), testKey, "claude-haiku-5-5", in); !errors.Is(err, ErrKeyInvalid) {
 		t.Fatalf("401: %v", err)
+	}
+}
+
+func TestSlackPostTimesInLocation(t *testing.T) {
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2026-10-24 23:30 UTC is Sunday 08:30 in Tokyo; the AI resolves
+	// "明日" from the local date.
+	at := time.Date(2026, 10, 24, 23, 30, 0, 0, time.UTC)
+	posts := []SlackPost{{ID: "1.000001", Author: "bob", AuthorID: "U2", At: at, Target: true, Body: "明日お願いします"}}
+	for name, build := range map[string]func(*time.Location) (string, error){
+		"judge": func(loc *time.Location) (string, error) {
+			return SlackUserMessage(SlackInput{Me: SlackPerson{ID: "U1"}, Location: loc, ConversationType: SlackDM, Posts: posts})
+		},
+		"reply": func(loc *time.Location) (string, error) {
+			return ReplyUserMessage(ReplyInput{Me: SlackPerson{ID: "U1"}, Location: loc, Task: "x", Posts: posts})
+		},
+	} {
+		text, err := build(tokyo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(text, `"timezone":"Asia/Tokyo"`) || !strings.Contains(text, `"at":"2026-10-25T08:30:00+09:00","weekday":"Sunday"`) {
+			t.Fatalf("%s: %s", name, text)
+		}
+		// Without a location the times are in UTC.
+		if text, err = build(nil); err != nil || !strings.Contains(text, `"timezone":"UTC"`) || !strings.Contains(text, `"at":"2026-10-24T23:30:00Z","weekday":"Saturday"`) {
+			t.Fatalf("%s UTC: %s %v", name, text, err)
+		}
 	}
 }

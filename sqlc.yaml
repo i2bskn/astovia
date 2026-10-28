@@ -72,6 +72,18 @@ sql:
             go_type:
               import: database/sql
               type: NullInt64
+          - column: action_items.event_title
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: action_items.event_start_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: action_items.event_end_at
+            go_type:
+              import: database/sql
+              type: NullInt64
           - column: github_connections.last_error
             go_type:
               import: database/sql

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { dueLabel, happenedAt, refDetail, refLabel, relativeTime, serviceLabel, shortDate } from '../.test-build/format.js';
+import { dueLabel, eventRange, happenedAt, refDetail, refLabel, relativeTime, serviceLabel, shortDate } from '../.test-build/format.js';
 
 // Dates are built in local time so that the tests do not depend on TZ.
 const now = new Date(2026, 9, 24, 10, 0); // 2026-10-24 (Sat) 10:00
@@ -44,4 +44,11 @@ test('happenedAt joins the relative time and the event', () => {
   assert.equal(happenedAt(at(2026, 9, 24, 7, 0), now, '検出'), '3時間前に検出');
   assert.equal(happenedAt(at(2026, 9, 24, 9, 59, 50), now, '追加'), 'たった今追加');
   assert.equal(happenedAt(at(2026, 9, 10, 10, 0), now, '処理'), '10/10(土)に処理');
+});
+
+test('event ranges show the end time, with its date only on another day', () => {
+  assert.equal(eventRange(at(2026, 9, 29, 12, 30), at(2026, 9, 29, 13, 30), now), '10/29(木) 12:30〜13:30');
+  assert.equal(eventRange(at(2026, 9, 29, 23, 0), at(2026, 9, 30, 1, 0), now), '10/29(木) 23:00〜10/30(金) 1:00');
+  assert.equal(eventRange(at(2026, 9, 29, 9, 5), null, now), '10/29(木) 9:05');
+  assert.equal(eventRange('x', null, now), 'x');
 });

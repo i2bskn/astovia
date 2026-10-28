@@ -322,11 +322,21 @@ func aiText(v map[string]any) func(http.ResponseWriter) {
 }
 
 func aiAction(task string) func(http.ResponseWriter) {
-	return aiText(map[string]any{"needs_action": true, "task": task, "summary": "s"})
+	return aiJudged(ai.DecisionTask, task, "s", "", "", "")
+}
+
+func aiCandidate(task string) func(http.ResponseWriter) {
+	return aiJudged(ai.DecisionCandidate, task, "s", "", "", "")
 }
 
 func aiNoAction(summary string) func(http.ResponseWriter) {
-	return aiText(map[string]any{"needs_action": false, "task": "", "summary": summary})
+	return aiJudged(ai.DecisionNone, "", summary, "", "", "")
+}
+
+// aiJudged answers a judgment with a decision and an event (empty strings
+// for none).
+func aiJudged(decision, task, summary, eventTitle, eventStart, eventEnd string) func(http.ResponseWriter) {
+	return aiText(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd})
 }
 
 func aiResolved(v bool) func(http.ResponseWriter) {

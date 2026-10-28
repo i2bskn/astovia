@@ -13,7 +13,7 @@ import (
 )
 
 // mcpInstructions is sent to MCP clients on initialize.
-const mcpInstructions = "Astovia keeps the user's action items: small things to do that come from conversations (replies, schedules, promises). Use action_items_list to see open items, action_items_create to save a new one with a reference to the source conversation, and action_items_update to change status (open, done, dismissed) or details. Do not invent facts that are not in the source conversation."
+const mcpInstructions = "Astovia keeps the user's action items: small things to do that come from conversations (replies, schedules, promises). Use action_items_list to see open items, action_items_create to save a new one with a reference to the source conversation, and action_items_update to change status (open, candidate, done, dismissed) or details. candidate is an unconfirmed candidate found by the AI. Do not invent facts that are not in the source conversation."
 
 // mcpBodyLimit bounds a single /mcp request body.
 const mcpBodyLimit = 262144
@@ -159,7 +159,7 @@ func (s *Server) newMCPServer(userID string) *mcp.Server {
 		Name:        "action_items_list",
 		Description: "List the user's action items, newest first. Use next_cursor to get the next page.",
 		InputSchema: objectSchema(nil, map[string]any{
-			"status": map[string]any{"type": []string{"string", "null"}, "enum": []any{"open", "done", "dismissed", nil}, "description": "open, done or dismissed."},
+			"status": map[string]any{"type": []string{"string", "null"}, "enum": []any{"open", "candidate", "done", "dismissed", nil}, "description": "open, candidate (an unconfirmed candidate found by the AI), done or dismissed."},
 			"limit":  map[string]any{"type": []string{"integer", "null"}, "minimum": 1, "maximum": 100, "description": "Maximum number of items (1-100, default 50)."},
 			"cursor": map[string]any{"type": []string{"string", "null"}, "description": "next_cursor from a previous call."},
 		}),
@@ -226,7 +226,7 @@ func (s *Server) newMCPServer(userID string) *mcp.Server {
 	})
 	server.AddTool(&mcp.Tool{
 		Name:        "action_items_update",
-		Description: "Update one of the user's action items: change its status (open, done, dismissed) or details. Only the given fields change.",
+		Description: "Update one of the user's action items: change its status (open, candidate, done, dismissed; candidate is an unconfirmed candidate found by the AI) or details. Only the given fields change.",
 		InputSchema: objectSchema([]string{"id"}, map[string]any{
 			"id":      stringProp("Action item ID."),
 			"content": stringProp("Short description of what needs to be done (1-500 characters)."),
@@ -324,7 +324,7 @@ func nullableStringProp(description string) map[string]any {
 }
 
 func statusProp() map[string]any {
-	return map[string]any{"type": "string", "enum": []string{"open", "done", "dismissed"}, "description": "open, done or dismissed."}
+	return map[string]any{"type": "string", "enum": []string{"open", "candidate", "done", "dismissed"}, "description": "open, candidate (an unconfirmed candidate found by the AI), done or dismissed."}
 }
 
 func dueAtProp() map[string]any {

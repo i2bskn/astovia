@@ -126,7 +126,7 @@ func TestEnvironmentIsIgnored(t *testing.T) {
 			if r.method != "GET" || r.path != "/v1/models/claude-haiku-5-5" {
 				t.Fatalf("request: %s %s", r.method, r.path)
 			}
-			f.set(message("end_turn", `{"needs_action":false,"task":"","summary":"x"}`))
+			f.set(message("end_turn", `{"decision":"none","task":"","summary":"x","event_title":"","event_start":"","event_end":""}`))
 			if _, err := c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); err != nil {
 				t.Fatal(err)
 			}
@@ -194,9 +194,9 @@ func TestErrorClasses(t *testing.T) {
 }
 
 func TestJudgeMention(t *testing.T) {
-	f, c := newFake(t, message("end_turn", `{"needs_action":true,"task":"  設計方針について回答する​ ","summary":"bob さんが質問"}`))
+	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"  設計方針について回答する​ ","summary":"bob さんが質問","event_title":"","event_start":"","event_end":""}`))
 	res, err := c.JudgeMention(context.Background(), testKey, "claude-sonnet-5-5", testInput())
-	if err != nil || !res.NeedsAction || res.Task != "設計方針について回答する" || res.Summary != "bob さんが質問" {
+	if err != nil || res.Decision != DecisionTask || res.Event != nil || res.Task != "設計方針について回答する" || res.Summary != "bob さんが質問" {
 		t.Fatalf("result: %+v %v", res, err)
 	}
 	r := f.last()
@@ -235,28 +235,98 @@ func TestJudgeMention(t *testing.T) {
 		t.Fatalf("messages: %s", r.body)
 	}
 	schema := body.OutputConfig.Format.Schema
-	if body.OutputConfig.Effort != "low" || body.OutputConfig.Format.Type != "json_schema" || schema["additionalProperties"] != false || len(schema["required"].([]any)) != 3 {
+	if body.OutputConfig.Effort != "low" || body.OutputConfig.Format.Type != "json_schema" || schema["additionalProperties"] != false || len(schema["required"].([]any)) != 6 {
 		t.Fatalf("output_config: %s", r.body)
 	}
 
 	long := strings.Repeat("あ", 300)
-	f.set(message("end_turn", `{"needs_action":false,"task":"ignored","summary":"`+long+`"}`))
-	if res, err = c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); err != nil || res.NeedsAction || res.Task != "" || res.Summary != strings.Repeat("あ", 200) {
+	f.set(message("end_turn", `{"decision":"none","task":"ignored","summary":"`+long+`","event_title":"MTG","event_start":"2026-10-29T12:30","event_end":""}`))
+	if res, err = c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); err != nil || res.Decision != DecisionNone || res.Event != nil || res.Task != "" || res.Summary != strings.Repeat("あ", 200) {
 		t.Fatalf("no action: %+v %v", res, err)
 	}
 
 	for name, reply := range map[string]func(http.ResponseWriter, *http.Request){
-		"refusal":       message("refusal", `{"needs_action":true,"task":"x","summary":"y"}`),
-		"max_tokens":    message("max_tokens", `{"needs_action":true,"task":"x","summary":"y"}`),
-		"invalid JSON":  message("end_turn", `{"needs_action":true,`),
-		"missing field": message("end_turn", `{"needs_action":true,"task":"x"}`),
-		"extra field":   message("end_turn", `{"needs_action":true,"task":"x","summary":"y","due":"z"}`),
-		"empty task":    message("end_turn", `{"needs_action":true,"task":" \n","summary":"y"}`),
+		"refusal":          message("refusal", `{"decision":"task","task":"x","summary":"y"`+noEvent+`}`),
+		"max_tokens":       message("max_tokens", `{"decision":"task","task":"x","summary":"y"`+noEvent+`}`),
+		"invalid JSON":     message("end_turn", `{"decision":"task",`),
+		"missing field":    message("end_turn", `{"decision":"task","task":"x","summary":"y"}`),
+		"extra field":      message("end_turn", `{"decision":"task","task":"x","summary":"y"`+noEvent+`,"due":"z"}`),
+		"old field":        message("end_turn", `{"needs_action":true,"task":"x","summary":"y"`+noEvent+`}`),
+		"unknown decision": message("end_turn", `{"decision":"maybe","task":"x","summary":"y"`+noEvent+`}`),
+		"empty task":       message("end_turn", `{"decision":"task","task":" \n","summary":"y"`+noEvent+`}`),
+		"empty candidate":  message("end_turn", `{"decision":"candidate","task":"","summary":"y"`+noEvent+`}`),
 	} {
 		f.set(reply)
 		if _, err = c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); !errors.Is(err, ErrUnusable) {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+}
+
+// noEvent is the event fields of an answer without an event.
+const noEvent = `,"event_title":"","event_start":"","event_end":""`
+
+func TestOutputSchema(t *testing.T) {
+	data, err := json.Marshal(outputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Required             []string                  `json:"required"`
+		AdditionalProperties bool                      `json:"additionalProperties"`
+		Properties           map[string]map[string]any `json:"properties"`
+	}
+	if err = json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(schema.Required, ",") != "decision,task,summary,event_title,event_start,event_end" || schema.AdditionalProperties || len(schema.Properties) != 6 {
+		t.Fatalf("schema: %s", data)
+	}
+	if enum, _ := json.Marshal(schema.Properties["decision"]["enum"]); string(enum) != `["task","candidate","none"]` {
+		t.Fatalf("decision enum: %s", enum)
+	}
+}
+
+func TestParseResult(t *testing.T) {
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := func(decision, task, title, start, end string) string {
+		v, _ := json.Marshal(map[string]string{"decision": decision, "task": task, "summary": "s", "event_title": title, "event_start": start, "event_end": end})
+		return string(v)
+	}
+	start := time.Date(2026, 10, 29, 12, 30, 0, 0, tokyo)
+	for name, tc := range map[string]struct {
+		text     string
+		decision string
+		task     string
+		event    *Event
+	}{
+		"task":             {answer("task", "回答する", "", "", ""), DecisionTask, "回答する", nil},
+		"candidate":        {answer("candidate", "確認する", "", "", ""), DecisionCandidate, "確認する", nil},
+		"none":             {answer("none", "ignored", "", "", ""), DecisionNone, "", nil},
+		"event":            {answer("task", "10/29(木) 12:30 MTG を登録する", " MTG ", "2026-10-29T12:30", "2026-10-29T13:30"), DecisionTask, "10/29(木) 12:30 MTG を登録する", &Event{Title: "MTG", Start: start, End: start.Add(time.Hour)}},
+		"candidate event":  {answer("candidate", "登録する", "MTG", "2026-10-29T12:30", ""), DecisionCandidate, "登録する", &Event{Title: "MTG", Start: start}},
+		"invalid start":    {answer("task", "登録する", "MTG", "2026-10-29 12:30", ""), DecisionTask, "登録する", nil},
+		"date only":        {answer("task", "登録する", "MTG", "2026-10-29", ""), DecisionTask, "登録する", nil},
+		"invalid end":      {answer("task", "登録する", "MTG", "2026-10-29T12:30", "13:30"), DecisionTask, "登録する", &Event{Title: "MTG", Start: start}},
+		"end before start": {answer("task", "登録する", "MTG", "2026-10-29T12:30", "2026-10-29T12:30"), DecisionTask, "登録する", &Event{Title: "MTG", Start: start}},
+		"empty title":      {answer("task", "登録する", " ", "2026-10-29T12:30", ""), DecisionTask, "登録する", nil},
+		"none with event":  {answer("none", "", "MTG", "2026-10-29T12:30", ""), DecisionNone, "", nil},
+	} {
+		r, err := parseResult(tc.text, tokyo)
+		if err != nil || r.Decision != tc.decision || r.Task != tc.task || r.Summary != "s" {
+			t.Fatalf("%s: %+v %v", name, r, err)
+		}
+		if (r.Event == nil) != (tc.event == nil) || r.Event != nil && (r.Event.Title != tc.event.Title || !r.Event.Start.Equal(tc.event.Start) || !r.Event.End.Equal(tc.event.End)) {
+			t.Fatalf("%s event: %+v", name, r.Event)
+		}
+	}
+	// The start is read in the given time zone.
+	r, err := parseResult(answer("task", "登録する", "MTG", "2026-10-29T12:30", ""), time.UTC)
+	if err != nil || r.Event == nil || r.Event.Start.Unix() != start.Add(9*time.Hour).Unix() {
+		t.Fatalf("UTC: %+v %v", r, err)
 	}
 }
 
@@ -355,7 +425,7 @@ func TestUserMessage(t *testing.T) {
 	if strings.Join(ids, ",") != "body,cc,cd,ce,cf,cg,ch,ci,cj,ck,cl,r9,rc0,rc1,rc2" || targets != 1 || !got.Posts[11].Target {
 		t.Fatalf("ids: %v", ids)
 	}
-	if got.Posts[0].Body != strings.Repeat("d", DescriptionLimit)+omitted || got.Posts[0].At != "2026-10-23T16:02:03Z" || got.Posts[0].Type != "description" {
+	if got.TimeZone != "UTC" || got.Posts[0].Body != strings.Repeat("d", DescriptionLimit)+omitted || got.Posts[0].At != "2026-10-23T16:02:03Z" || got.Posts[0].Weekday != "Friday" || got.Posts[0].Type != "description" {
 		t.Fatalf("description: %+v", got.Posts[0].At)
 	}
 	if got.Posts[1].Body != strings.Repeat("b", PostLimit)+omitted || got.Posts[10].Body != strings.Repeat("b", PostLimit)+omitted {
@@ -372,6 +442,21 @@ func TestUserMessage(t *testing.T) {
 	}
 	if _, got = decodeMessage(t, msg); len(got.Posts) != 1+PostsAfter || !got.Posts[0].Target || got.Posts[0].Body != strings.Repeat("d", TargetLimit)+omitted {
 		t.Fatalf("description target: %+v", got.Posts)
+	}
+	// The times are given in the user's time zone with the weekday.
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Location = tokyo
+	if msg, err = UserMessage(in); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, `{"timezone":"Asia/Tokyo","me":"octocat"`) {
+		t.Fatalf("timezone first: %s", msg)
+	}
+	if _, got = decodeMessage(t, msg); got.TimeZone != "Asia/Tokyo" || got.Posts[0].At != "2026-10-24T01:02:03+09:00" || got.Posts[0].Weekday != "Saturday" {
+		t.Fatalf("local time: %+v", got.Posts[0])
 	}
 	in.Target = len(in.Posts)
 	if _, err = UserMessage(in); err == nil {

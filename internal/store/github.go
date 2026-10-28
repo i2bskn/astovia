@@ -183,8 +183,8 @@ func (s *Store) DueGitHubConnections(ctx context.Context, now int64, limit int) 
 	return s.q.listDueGitHubConnections(ctx, now, limit)
 }
 
-// TrackedActionItems returns up to limit open items of source that are
-// tracked, least recently checked first. It reads without locking; writes go
+// TrackedActionItems returns up to limit open or candidate items of source
+// that are tracked, least recently checked first. It reads without locking; writes go
 // through GitHubSync.
 func (s *Store) TrackedActionItems(ctx context.Context, userID, source string, limit int) ([]ActionItem, error) {
 	return s.q.listTrackedActionItems(ctx, userID, source, limit)
@@ -286,7 +286,7 @@ func (t *sourceTx) LockItem(id string) (ActionItem, bool, error) {
 // source key, and reports whether it was inserted.
 func (t *sourceTx) CreateItem(item ActionItem) (bool, error) {
 	item.UserID = t.userID
-	n, e := t.q.insertSourcedActionItem(t.ctx, item)
+	n, e := t.q.insertSourcedActionItem(t.ctx, withKind(item))
 	return n == 1, e
 }
 

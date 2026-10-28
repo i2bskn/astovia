@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { autoReasonLabel, githubErrorMessage, githubStatusMessage, httpsURL, slackErrorMessage, slackStatusMessage } from '../.test-build/automation.js';
+import { autoOutcome, autoReasonLabel, githubErrorMessage, githubStatusMessage, httpsURL, slackErrorMessage, slackStatusMessage } from '../.test-build/automation.js';
 import { createIntegrationsClient } from '../.test-build/integrations.js';
 import { SLACK_APP_MANIFEST } from '../.test-build/slackManifest.js';
 import { base64URLToBytes, bytesToBase64URL, deviceLabel, isIOS, pushSupport, sameKey } from '../.test-build/notifications.js';
-import { views, viewURL } from '../.test-build/view.js';
+import { countLabel, views, viewURL } from '../.test-build/view.js';
 
 test('automatic completion reasons have Japanese labels', () => {
   assert.equal(autoReasonLabel('github.review_submitted'), 'レビューを提出した');
@@ -17,8 +17,16 @@ test('automatic completion reasons have Japanese labels', () => {
   assert.equal(autoReasonLabel('github.mention_no_action'), '対応は不要と判断した');
   assert.equal(autoReasonLabel('slack.no_action'), '対応不要と判定');
   assert.equal(autoReasonLabel('slack.reply_resolved'), '返信で対応済み');
+  assert.equal(autoReasonLabel('candidate.expired'), '候補のまま期間が過ぎた');
+  assert.equal(autoReasonLabel('event.passed'), '予定の時刻を過ぎた');
   assert.equal(autoReasonLabel('chatwork.unknown'), 'chatwork.unknown');
   assert.equal(autoReasonLabel('toString'), 'toString');
+});
+
+test('automatic processing ends in completion or dismissal', () => {
+  assert.equal(autoOutcome('done'), '完了');
+  assert.equal(autoOutcome('dismissed'), '対象外');
+  assert.equal(`${autoReasonLabel('event.passed')}ので自動で${autoOutcome('dismissed')}`, '予定の時刻を過ぎたので自動で対象外');
 });
 
 test('only https URLs become evidence links', () => {
@@ -65,10 +73,16 @@ test('the Slack app manifest on screen is the one in deploy', async () => {
 });
 
 test('each screen has a path at the root', () => {
-  assert.deepEqual(views.map((v) => v.path), ['/', '/auto', '/settings']);
+  assert.deepEqual(views.map((v) => v.path), ['/', '/candidates', '/auto', '/settings']);
   assert.equal(viewURL('tasks'), '/');
+  assert.equal(viewURL('candidates'), '/candidates');
   assert.equal(viewURL('auto'), '/auto');
   assert.equal(viewURL('settings'), '/settings');
+});
+
+test('a count read one page at a time says when there are more', () => {
+  assert.equal(countLabel(3, false), '3');
+  assert.equal(countLabel(50, true), '50+');
 });
 
 const supported = { hasServiceWorker: true, hasPushManager: true, hasNotification: true, isIOS: false, standalone: false, permission: 'default' };
@@ -186,11 +200,15 @@ test('push and settings clients', async () => {
   f = fake({ public_key: 'BKey' });
   assert.equal(await f.client.getPushPublicKey(), 'BKey');
   await assert.rejects(fake({}).client.getPushPublicKey(), /Unexpected public key response/);
-  const settings = { timezone: 'Asia/Tokyo', digest_hour: 8, stale_days: 3 };
+  const settings = { timezone: 'Asia/Tokyo', digest_hour: 8, stale_days: 3, candidate_expire_days: 0 };
   f = fake(settings);
   assert.deepEqual(await f.client.saveNotificationSettings(settings), settings);
   assert.equal(f.calls[0].init.method, 'PUT');
   assert.deepEqual(JSON.parse(f.calls[0].init.body), settings);
   await assert.rejects(fake({ ...settings, digest_hour: 8.5 }).client.getNotificationSettings(), /Unexpected notification settings response/);
+  const { candidate_expire_days: _omitted, ...withoutExpire } = settings;
+  for (const bad of [withoutExpire, { ...settings, candidate_expire_days: '3' }, { ...settings, candidate_expire_days: 1.5 }]) {
+    await assert.rejects(fake(bad).client.getNotificationSettings(), /Unexpected notification settings response/);
+  }
   await assert.rejects(fake({ subscriptions: [{ id: '' }] }).client.listPushDevices(), /Unexpected push subscription list response/);
 });

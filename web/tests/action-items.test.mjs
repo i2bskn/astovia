@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createActionItemsClient, isConflict } from '../.test-build/actionItems.js';
+import { calendarURL, createActionItemsClient, isConflict } from '../.test-build/actionItems.js';
 
 const item = {
   id: 'item-1',
@@ -12,6 +12,17 @@ const item = {
   version: 1,
   created_at: '2026-10-23T01:02:03Z',
   updated_at: '2026-10-23T01:02:03Z',
+  kind: 'task',
+  event: null,
+};
+
+const event = {
+  ...item,
+  content: '10/29(木) 12:30 打ち合わせを登録する',
+  status: 'candidate',
+  kind: 'event',
+  event: { title: '被害件数の対応 MTG（高谷さん・Kiyoさん）', start_at: '2026-10-29T03:30:00Z', end_at: '2026-10-29T04:30:00Z' },
+  refs: [{ service: 'slack', url: 'https://acme.slack.com/archives/C1/p1700000000000100' }],
 };
 
 function fake(response) {
@@ -64,9 +75,34 @@ test('updateActionItem patches JSON', async () => {
   assert.deepEqual(JSON.parse(calls[0].init.body), { status: 'done', version: 1 });
 });
 
+test('candidates and events are accepted', async () => {
+  const { client } = fake({ items: [event, { ...event, event: { ...event.event, end_at: null } }], next_cursor: null });
+  assert.equal((await client.listActionItems({ status: 'candidate' })).items.length, 2);
+});
+
+test('calendarURL opens a Google Calendar event in UTC', () => {
+  const url = new URL(calendarURL(event));
+  assert.equal(url.origin + url.pathname, 'https://calendar.google.com/calendar/render');
+  assert.equal(url.searchParams.get('action'), 'TEMPLATE');
+  assert.equal(url.searchParams.get('text'), '被害件数の対応 MTG（高谷さん・Kiyoさん）');
+  assert.equal(url.searchParams.get('dates'), '20261029T033000Z/20261029T043000Z');
+  assert.equal(url.searchParams.get('details'), 'https://acme.slack.com/archives/C1/p1700000000000100');
+  assert.match(calendarURL(event), /text=%E8%A2%AB.*&dates=20261029T033000Z%2F20261029T043000Z&details=https%3A%2F%2Facme/);
+  // Without an end the event lasts an hour; only https sources are linked.
+  const open = new URL(calendarURL({ ...event, event: { ...event.event, end_at: null }, refs: [{ service: 'x', url: 'http://example.com/' }] }));
+  assert.equal(open.searchParams.get('dates'), '20261029T033000Z/20261029T043000Z');
+  assert.equal(open.searchParams.has('details'), false);
+  assert.equal(new URL(calendarURL({ ...event, refs: [] })).searchParams.has('details'), false);
+  assert.equal(calendarURL(item), null);
+  assert.equal(calendarURL({ ...event, event: { ...event.event, start_at: 'x' } }), null);
+});
+
 test('malformed responses are rejected', async () => {
   const { refs: _omitted, ...withoutRefs } = item;
-  for (const body of [null, [], { ...item, status: 'closed' }, { ...item, version: '1' }, { ...item, note: 1 }, withoutRefs, { ...item, refs: [{ url: 'https://example.com' }] }]) {
+  const { kind: _kind, ...withoutKind } = item;
+  const { event: _event, ...withoutEvent } = item;
+  for (const body of [null, [], { ...item, status: 'closed' }, { ...item, version: '1' }, { ...item, note: 1 }, withoutRefs, { ...item, refs: [{ url: 'https://example.com' }] },
+    withoutKind, withoutEvent, { ...item, kind: 'meeting' }, { ...item, event: event.event }, { ...event, event: null }, { ...event, event: { title: 'x', start_at: 1, end_at: null } }, { ...event, event: { title: 'x', start_at: 'y' } }]) {
     await assert.rejects(fake(body).client.createActionItem({ content: 'x' }), /Unexpected action item response/);
     await assert.rejects(fake(body).client.updateActionItem('item-1', { status: 'done' }), /Unexpected action item response/);
   }

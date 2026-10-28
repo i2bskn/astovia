@@ -143,7 +143,7 @@ func testHTTP(t *testing.T, driver string) {
 			t.Fatalf("fallback escaped: %s %d", p, w.Code)
 		}
 	}
-	for _, p := range []string{"/", "/auto", "/settings/foo", "/consent"} {
+	for _, p := range []string{"/", "/candidates", "/auto", "/settings/foo", "/consent"} {
 		w = request("GET", p, "", "", "", "", "")
 		if w.Code != 200 || !strings.Contains(w.Body.String(), "<html>") {
 			t.Fatal(p, w.Code)
@@ -464,7 +464,7 @@ func TestStaticAssets(t *testing.T) {
 	if w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "image/svg+xml") || !strings.Contains(w.Header().Get("Cache-Control"), "immutable") {
 		t.Fatalf("favicon.svg: %d %v", w.Code, w.Header())
 	}
-	for _, path := range []string{"/", "/auto", "/auto/", "/settings", "/settings/", "/settings/notifications", "/settings/ai-clients/", "/settings/foo", "/consent", "/consent/"} {
+	for _, path := range []string{"/", "/candidates", "/candidates/", "/auto", "/auto/", "/settings", "/settings/", "/settings/notifications", "/settings/ai-clients/", "/settings/foo", "/consent", "/consent/"} {
 		for _, method := range []string{"GET", "HEAD"} {
 			w = serve(t, h, httptest.NewRequest(method, path, nil))
 			if w.Code != 200 || w.Header().Get("Cache-Control") != "no-store" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {

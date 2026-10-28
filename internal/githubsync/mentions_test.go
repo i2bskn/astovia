@@ -69,8 +69,18 @@ func (f *fakeAI) body(n int) string {
 }
 
 func aiOK(needsAction bool, task, summary string) func(http.ResponseWriter) {
+	decision := ai.DecisionNone
+	if needsAction {
+		decision = ai.DecisionTask
+	}
+	return aiJudged(decision, task, summary, "", "", "")
+}
+
+// aiJudged answers a judgment with a decision and an event (empty strings
+// for none).
+func aiJudged(decision, task, summary, eventTitle, eventStart, eventEnd string) func(http.ResponseWriter) {
 	return func(w http.ResponseWriter) {
-		out, _ := json.Marshal(map[string]any{"needs_action": needsAction, "task": task, "summary": summary})
+		out, _ := json.Marshal(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd})
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
 			"content": []map[string]any{{"type": "text", "text": string(out)}}, "stop_reason": "end_turn", "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}})
@@ -230,6 +240,62 @@ func TestMentionDetection(t *testing.T) {
 		st.sync()
 		if st.gh.requested("/repos/o/r/issues/1") != reads+1 || fa.count() != 2 || st.count() != 2 {
 			t.Fatalf("updated thread: %d reads, %d AI calls, %d items", st.gh.requested("/repos/o/r/issues/1")-reads, fa.count(), st.count())
+		}
+	})
+}
+
+// Candidates are not notified; events become event items, already
+// dismissed when they have started. The AI reads the times in the user's
+// time zone.
+func TestMentionCandidatesAndEvents(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		st, fa := newMentionTest(t, driver)
+		if err := st.s.SaveNotificationSettings(context.Background(), store.NotificationSettings{UserID: "alice-id", Timezone: "Asia/Tokyo", DigestHour: store.DefaultDigestHour, StaleDays: store.DefaultStaleDays, UpdatedAt: st.now.Unix(), CandidateExpireDays: store.DefaultCandidateExpireDays}); err != nil {
+			t.Fatal(err)
+		}
+		tokyo, err := time.LoadLocation("Asia/Tokyo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		recent := st.now.Add(-30 * time.Minute)
+		st.issueWithComments(
+			comment(21, "bob", "@carol please fix this, cc @octocat", recent),
+			comment(22, "bob", "@octocat meeting tomorrow 12:30-13:30", recent.Add(time.Minute)),
+			comment(23, "bob", "@octocat meeting just now?", recent.Add(2*time.Minute)),
+		)
+		start := st.now.Add(24 * time.Hour).Truncate(time.Minute)
+		passed := st.now.Add(-time.Hour).Truncate(time.Minute)
+		local := func(v time.Time) string { return v.In(tokyo).Format("2006-01-02T15:04") }
+		fa.set(func(f *fakeAI) {
+			f.replies = []func(http.ResponseWriter){
+				aiJudged(ai.DecisionCandidate, "修正を確認する", "s", "", "", ""),
+				aiJudged(ai.DecisionTask, "打ち合わせを登録する", "s", "打ち合わせ", local(start), local(start.Add(time.Hour))),
+				aiJudged(ai.DecisionCandidate, "打ち合わせを登録する", "s", "打ち合わせ", local(passed), ""),
+			}
+		})
+		st.advance(time.Minute)
+		st.sync()
+		if fa.count() != 3 {
+			t.Fatalf("AI calls: %d", fa.count())
+		}
+		candidate := st.mustItem(mentionKey(1, "c21"))
+		if candidate.Status != "candidate" || candidate.Content != "修正を確認する" || candidate.Tracking != 0 || candidate.Kind != store.KindTask || candidate.EventTitle.Valid {
+			t.Fatalf("candidate: %+v", candidate)
+		}
+		event := st.mustItem(mentionKey(1, "c22"))
+		if event.Status != "open" || event.Kind != store.KindEvent || event.EventTitle.String != "打ち合わせ" || event.EventStartAt.Int64 != start.Unix() || event.EventEndAt.Int64 != start.Add(time.Hour).Unix() || event.DueAt.Int64 != start.Unix() || event.Tracking != 0 {
+			t.Fatalf("event: %+v", event)
+		}
+		gone := st.mustItem(mentionKey(1, "c23"))
+		if gone.Status != "dismissed" || gone.Kind != store.KindEvent || gone.EventEndAt.Valid || gone.AutoReason.String != store.ReasonEventPassed || gone.AutoRef.String != "https://github.com/o/r/issues/1#issuecomment-23" || gone.AutoAt.Int64 != st.now.Unix() {
+			t.Fatalf("passed event: %+v", gone)
+		}
+		// Only the open task is notified.
+		if p := st.pending(); len(p) != 1 || p[0].ActionItemID.String != event.ID {
+			t.Fatalf("notifications: %+v", p)
+		}
+		if body := fa.body(1); !strings.Contains(body, `\"timezone\":\"Asia/Tokyo\"`) || !strings.Contains(body, `+09:00\",\"weekday\":`) {
+			t.Fatalf("time zone: %s", body)
 		}
 	})
 }

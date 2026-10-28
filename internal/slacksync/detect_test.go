@@ -25,6 +25,10 @@ func TestMentionDetection(t *testing.T) {
 		st.sl.post("C1", msg{TS: m3, User: "U3", Text: "thanks <@U1>"})
 		st.sl.post("C1", msg{TS: bot, User: "U2", BotID: "B1", Text: "<@U1> deploy done"})
 		st.sl.post("C1", msg{TS: join, User: "U3", Subtype: "channel_join", Text: "<@U1> joined"})
+		// The AI reads the times in the time zone of the notification settings.
+		if err := st.s.SaveNotificationSettings(context.Background(), store.NotificationSettings{UserID: "alice-id", Timezone: "Asia/Tokyo", DigestHour: store.DefaultDigestHour, StaleDays: store.DefaultStaleDays, UpdatedAt: st.now.Unix()}); err != nil {
+			t.Fatal(err)
+		}
 		// Newest first: the bot and the join are dropped by their context.
 		st.ai.set(aiNoAction("carol さんがお礼"), aiAction("確認して回答する"))
 		c := st.sync()
@@ -60,6 +64,9 @@ func TestMentionDetection(t *testing.T) {
 			t.Fatalf("posts: %v", got)
 		}
 		body := in["posts"].([]any)[1].(map[string]any)
+		if in["timezone"] != "Asia/Tokyo" || !strings.HasSuffix(body["at"].(string), "+09:00") {
+			t.Fatalf("time zone: %v %v", in["timezone"], body["at"])
+		}
 		if body["body"] != "@alice(U1) can you check #dev?" || body["author"] != "bob" || body["author_id"] != "U2" || body["is_me"] != false {
 			t.Fatalf("target post: %+v", body)
 		}
@@ -76,6 +83,64 @@ func TestMentionDetection(t *testing.T) {
 		st.sync()
 		if st.ai.count() != 0 || st.sl.count("conversations.history") != 4 {
 			t.Fatalf("second sync: AI %d, history %d", st.ai.count(), st.sl.count("conversations.history"))
+		}
+	})
+}
+
+// Candidates are tracked but not notified, and a reply resolves them.
+// Events are not tracked; an event that has started is dismissed at once.
+func TestCandidatesAndEvents(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		st := newSyncTest(t, driver)
+		st.advance(time.Minute)
+		m1, m2, m3 := st.ts(5*time.Minute, 1), st.ts(4*time.Minute, 1), st.ts(3*time.Minute, 1)
+		st.sl.post("C1", msg{TS: m1, User: "U2", Text: "<@U3> please fix this, cc <@U1>"})
+		st.sl.post("C1", msg{TS: m2, User: "U2", Text: "<@U1> meeting tomorrow 12:30"})
+		st.sl.post("C1", msg{TS: m3, User: "U2", Text: "<@U1> meeting an hour ago"})
+		start := st.now.Add(24 * time.Hour).Truncate(time.Minute)
+		passed := st.now.Add(-time.Hour).Truncate(time.Minute)
+		local := func(v time.Time) string { return v.UTC().Format("2006-01-02T15:04") }
+		// Newest first.
+		st.ai.set(
+			aiJudged(ai.DecisionTask, "打ち合わせを登録する", "s", "打ち合わせ", local(passed), ""),
+			aiJudged(ai.DecisionTask, "打ち合わせを登録する", "s", "打ち合わせ", local(start), local(start.Add(30*time.Minute))),
+			aiCandidate("修正を確認する"),
+		)
+		st.sync()
+		if st.ai.count() != 3 {
+			t.Fatalf("AI calls: %d", st.ai.count())
+		}
+		candidate := st.mustItem(mentionKey("C1", "-", m1))
+		if candidate.Status != "candidate" || candidate.Content != "修正を確認する" || candidate.Tracking != 1 || candidate.Kind != store.KindTask {
+			t.Fatalf("candidate: %+v", candidate)
+		}
+		event := st.mustItem(mentionKey("C1", "-", m2))
+		if event.Status != "open" || event.Tracking != 0 || event.Kind != store.KindEvent || event.EventTitle.String != "打ち合わせ" || event.EventStartAt.Int64 != start.Unix() || event.EventEndAt.Int64 != start.Add(30*time.Minute).Unix() || event.DueAt.Int64 != start.Unix() {
+			t.Fatalf("event: %+v", event)
+		}
+		gone := st.mustItem(mentionKey("C1", "-", m3))
+		if gone.Status != "dismissed" || gone.Tracking != 0 || gone.Kind != store.KindEvent || gone.AutoReason.String != store.ReasonEventPassed || gone.AutoRef.String != link("C1", m3, "") || gone.AutoAt.Int64 != st.now.Unix() {
+			t.Fatalf("passed event: %+v", gone)
+		}
+		if p := st.pending(); len(p) != 1 || p[0].ActionItemID.String != event.ID {
+			t.Fatalf("notifications: %+v", p)
+		}
+
+		// The user's reply resolves the candidate; the event is not tracked.
+		st.sl.reset()
+		st.advance(5 * time.Minute)
+		r := st.reply("C1", m1, "直しました", time.Minute)
+		st.ai.set(aiResolved(true))
+		st.sync()
+		done := st.mustItem(mentionKey("C1", "-", m1))
+		if done.Status != "done" || done.AutoReason.String != ReasonReplyResolved || done.AutoRef.String != link("C1", r, "") {
+			t.Fatalf("resolved candidate: %+v", done)
+		}
+		if st.ai.count() != 1 {
+			t.Fatalf("reply judgments: %d", st.ai.count())
+		}
+		if got := st.mustItem(mentionKey("C1", "-", m2)); got.Status != "open" || got.Version != 1 {
+			t.Fatalf("event changed: %+v", got)
 		}
 	})
 }
@@ -335,7 +400,7 @@ func TestAICallLimitAndRetryLimit(t *testing.T) {
 			t.Fatalf("overdue: items %d, window %+v", len(st.items()), c.LastSyncedAt)
 		}
 		fb := st.mustItem(mentionKey("C1", "-", ts[0]))
-		if fb.Status != "open" || fb.Tracking != 1 || fb.Content != "Slack を確認: @alice(U1) task 0" {
+		if fb.Status != "open" || fb.Tracking != 1 || fb.Kind != store.KindTask || fb.Content != "Slack を確認: @alice(U1) task 0" {
 			t.Fatalf("fallback: %+v", fb)
 		}
 		// Messages older than two hours are not notified.

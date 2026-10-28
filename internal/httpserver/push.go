@@ -259,10 +259,13 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, map[string]bool{"queued": true})
 }
 
+// notificationSettingsResponse is the notification settings. A
+// CandidateExpireDays of 0 keeps task candidates until the user sorts them.
 type notificationSettingsResponse struct {
-	Timezone   string `json:"timezone"`
-	DigestHour int64  `json:"digest_hour"`
-	StaleDays  int64  `json:"stale_days"`
+	Timezone            string `json:"timezone"`
+	DigestHour          int64  `json:"digest_hour"`
+	StaleDays           int64  `json:"stale_days"`
+	CandidateExpireDays int64  `json:"candidate_expire_days"`
 }
 
 func (s *Server) handleGetNotificationSettings(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +279,7 @@ func (s *Server) handleGetNotificationSettings(w http.ResponseWriter, r *http.Re
 		integrationError(w, "settings get", u.ID, err)
 		return
 	}
-	writeJSON(w, 200, notificationSettingsResponse{Timezone: n.Timezone, DigestHour: n.DigestHour, StaleDays: n.StaleDays})
+	writeJSON(w, 200, notificationSettingsResponse{Timezone: n.Timezone, DigestHour: n.DigestHour, StaleDays: n.StaleDays, CandidateExpireDays: n.CandidateExpireDays})
 }
 
 // decodeInt decodes a JSON integer in [lo, hi]; null, fractions and strings
@@ -299,6 +302,8 @@ func (s *Server) handlePutNotificationSettings(w http.ResponseWriter, r *http.Re
 		Timezone   json.RawMessage `json:"timezone"`
 		DigestHour json.RawMessage `json:"digest_hour"`
 		StaleDays  json.RawMessage `json:"stale_days"`
+		// CandidateExpireDays is required like the others; 0 disables it.
+		CandidateExpireDays json.RawMessage `json:"candidate_expire_days"`
 	}
 	if !decode(w, r, &in, integrationBodyLimit) {
 		return
@@ -321,10 +326,15 @@ func (s *Server) handlePutNotificationSettings(w http.ResponseWriter, r *http.Re
 		fail(w, 400, "invalid_request", "stale_days must be an integer from 1 to 30.")
 		return
 	}
-	n := store.NotificationSettings{UserID: u.ID, Timezone: timezone, DigestHour: hour, StaleDays: days, UpdatedAt: s.auth.Now().Unix()}
+	expire, ok := decodeInt(in.CandidateExpireDays, 0, 30)
+	if !ok {
+		fail(w, 400, "invalid_request", "candidate_expire_days must be an integer from 0 to 30.")
+		return
+	}
+	n := store.NotificationSettings{UserID: u.ID, Timezone: timezone, DigestHour: hour, StaleDays: days, UpdatedAt: s.auth.Now().Unix(), CandidateExpireDays: expire}
 	if err := s.auth.Store.SaveNotificationSettings(r.Context(), n); err != nil {
 		integrationError(w, "settings put", u.ID, err)
 		return
 	}
-	writeJSON(w, 200, notificationSettingsResponse{Timezone: n.Timezone, DigestHour: n.DigestHour, StaleDays: n.StaleDays})
+	writeJSON(w, 200, notificationSettingsResponse{Timezone: n.Timezone, DigestHour: n.DigestHour, StaleDays: n.StaleDays, CandidateExpireDays: n.CandidateExpireDays})
 }

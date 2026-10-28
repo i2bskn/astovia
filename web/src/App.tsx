@@ -4,16 +4,19 @@ import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch } from 'r
 import { auth } from './auth';
 import ActionItemList from './ActionItemList';
 import AutoItemList from './AutoItemList';
+import CandidateList from './CandidateList';
+import { candidates } from './candidates';
 import ConsentPage from './ConsentPage';
-import { AutoIcon, SettingsIcon, SidebarIcon, TasksIcon } from './icons';
+import { AutoIcon, SettingsIcon, SidebarIcon, SparkleIcon, TasksIcon } from './icons';
 import Phrased from './Phrased';
 import Settings from './Settings';
 import { settingsPageAt, settingsPages } from './settingsPages';
-import { views } from './view';
+import { countLabel, views } from './view';
 import type { View } from './view';
 
 const viewIcons: Record<View, () => React.JSX.Element> = {
   tasks: () => <TasksIcon />,
+  candidates: () => <SparkleIcon />,
   auto: () => <AutoIcon />,
   settings: () => <SettingsIcon />,
 };
@@ -91,6 +94,14 @@ function initialCollapsed(): boolean {
   return window.matchMedia?.('(max-width: 1199px)').matches ?? false;
 }
 
+// NavBadge shows how many task candidates wait, on the candidates entry of
+// the menus, so that they are noticed from any screen.
+function NavBadge({ view }: { view: View }) {
+  const state = useSyncExternalStore(candidates.subscribe, candidates.getSnapshot);
+  if (view !== 'candidates' || state.items.length === 0) return null;
+  return <span className="nav-badge">{countLabel(state.items.length, state.more)}<span className="sr-only">件</span></span>;
+}
+
 // Sign-out lives in Settings > Account, one step away, so that it is not
 // pressed by accident next to the menu toggle.
 function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boolean; onToggle: () => void }) {
@@ -100,7 +111,7 @@ function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boo
     </Link>
     <nav className="sidebar-nav" aria-label="画面">
       {views.map((v) => <NavLink key={v.value} to={v.path} end={v.path === '/'} className="nav-item" title={collapsed ? v.label : undefined}>
-        {viewIcons[v.value]()}<span className="nav-label">{collapsed ? v.short : v.label}</span>
+        {viewIcons[v.value]()}<span className="nav-label">{collapsed ? v.short : v.label}</span><NavBadge view={v.value} />
       </NavLink>)}
     </nav>
     <div className="sidebar-foot">
@@ -119,7 +130,7 @@ function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boo
 function TabBar() {
   return <nav className="tabbar" aria-label="画面">
     {views.map((v) => <NavLink key={v.value} to={v.path} end={v.path === '/'} className="tab-item">
-      {viewIcons[v.value]()}<span>{v.short}</span>
+      {viewIcons[v.value]()}<span>{v.short}</span><NavBadge view={v.value} />
     </NavLink>)}
   </nav>;
 }
@@ -128,7 +139,7 @@ function PageHeader({ title, lead }: { title: string; lead: string }) {
   return <header className="page-header"><h1>{title}</h1><p className="page-lead"><Phrased text={lead} /></p></header>;
 }
 
-const titles: Record<string, string> = { '/': 'タスク', '/auto': '自動で処理したもの', '/settings': '設定' };
+const titles: Record<string, string> = { '/': 'タスク', '/candidates': 'タスク候補', '/auto': '自動で処理したもの', '/settings': '設定' };
 
 function titleAt(pathname: string): string | undefined {
   const page = settingsPages.find((p) => p.value === settingsPageAt(pathname));
@@ -148,6 +159,11 @@ function Workspace({ email, error }: { email: string; error: string | null }) {
     const title = titleAt(location.pathname);
     document.title = title ? `${title} – Astovia` : 'Astovia';
   }, [location.pathname, location.hash]);
+
+  // The candidates are read again on every screen change, for the menu
+  // badge, and forgotten on sign-out.
+  useEffect(() => { void candidates.refresh(); }, [location.pathname]);
+  useEffect(() => () => candidates.reset(), []);
 
   function toggle(): void {
     setCollapsed((current) => {
@@ -171,6 +187,10 @@ function Workspace({ email, error }: { email: string; error: string | null }) {
           <Route index element={<>
             <PageHeader title="タスク" lead="自分で追加したものと、連携先から見つけたものを、まとめて確認できます。" />
             <ActionItemList />
+          </>} />
+          <Route path="candidates" element={<>
+            <PageHeader title="タスク候補" lead="AI が自分宛てか判断しきれなかったものです。タスクにするか、不要かを選んでください。そのままにすると、「通知」の設定の日数が過ぎたときに自動で対象外にします。" />
+            <CandidateList />
           </>} />
           <Route path="auto" element={<>
             <PageHeader title="自動で処理したもの" lead="連携先の状態を見て、Astovia が自動で片付けたタスクです。間違っていたら未完了に戻してください。戻したものは、以後自動では処理しません。" />

@@ -320,7 +320,7 @@ func testPushSubscriptions(t *testing.T, driver string) {
 		t.Fatalf("create: %+v %v %v", saved, created, err)
 	}
 	settings, err := s.NotificationSettings(ctx, "alice-id")
-	if err != nil || settings.Timezone != "Asia/Tokyo" || settings.DigestHour != store.DefaultDigestHour || settings.StaleDays != store.DefaultStaleDays {
+	if err != nil || settings.Timezone != "Asia/Tokyo" || settings.DigestHour != store.DefaultDigestHour || settings.StaleDays != store.DefaultStaleDays || settings.CandidateExpireDays != store.DefaultCandidateExpireDays {
 		t.Fatalf("settings from timezone: %+v %v", settings, err)
 	}
 	// An existing settings row is not changed by a later subscription.
@@ -330,7 +330,7 @@ func testPushSubscriptions(t *testing.T, driver string) {
 	if settings, err = s.NotificationSettings(ctx, "alice-id"); err != nil || settings.Timezone != "Asia/Tokyo" {
 		t.Fatalf("settings changed: %+v %v", settings, err)
 	}
-	if settings, err = s.NotificationSettings(ctx, "bob-id"); err != nil || settings.Timezone != store.DefaultTimezone || settings.UserID != "bob-id" {
+	if settings, err = s.NotificationSettings(ctx, "bob-id"); err != nil || settings.Timezone != store.DefaultTimezone || settings.UserID != "bob-id" || settings.CandidateExpireDays != store.DefaultCandidateExpireDays {
 		t.Fatalf("default settings: %+v %v", settings, err)
 	}
 

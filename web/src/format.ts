@@ -30,6 +30,18 @@ export function dateTime(value: string, now: Date): string {
   return date ? `${shortDate(date, now)} ${clock(date)}` : value;
 }
 
+// eventRange is the time of a meeting: "10/29(木) 12:30〜13:30", with the
+// end date only when it differs from the start date and no end when there is
+// none.
+export function eventRange(start: string, end: string | null, now: Date): string {
+  const from = parse(start);
+  if (!from) return start;
+  const to = end ? parse(end) : null;
+  const head = `${shortDate(from, now)} ${clock(from)}`;
+  if (!to) return head;
+  return startOfDay(to) === startOfDay(from) ? `${head}〜${clock(to)}` : `${head}〜${shortDate(to, now)} ${clock(to)}`;
+}
+
 // fullDateTime is the locale date and time, for tooltips.
 export function fullDateTime(value: string): string {
   const date = parse(value);

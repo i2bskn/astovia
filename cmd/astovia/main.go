@@ -97,8 +97,9 @@ func run(args []string) error {
 
 // startWorkers starts the background loops of serve: GitHub synchronization
 // (with the AI judging mentions), Slack synchronization (with the AI judging
-// messages and replies), the notification engine, the dispatcher
-// and the cleanup of sent notifications. They share the authentication
+// messages and replies), the notification engine, the dispatcher, the
+// cleanup of sent notifications and the sweep of task candidates and passed
+// events. They share the authentication
 // service's clock. They stop when ctx is canceled; the returned group
 // finishes when they have returned.
 func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.Service) *sync.WaitGroup {
@@ -108,6 +109,7 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: aiClient, Box: box, Now: now}
 	slackSyncer := &slacksync.Syncer{Store: s, Slack: slack.New(now), AI: aiClient, Box: box, Now: now}
 	engine := &notify.Engine{Store: s, Now: now}
+	sweeper := &notify.Sweeper{Store: s, Now: now}
 	vapid := &notify.VAPID{Store: s, Box: box, Now: now}
 	dispatcher := &notify.Dispatcher{Store: s, Channel: notify.NewWebPush(s, vapid, c.PublicURL, now), Now: now}
 	var wg sync.WaitGroup
@@ -121,6 +123,7 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 		{"notification engine", time.Minute, engine.RunOnce},
 		{"notification dispatcher", 5 * time.Second, dispatcher.RunOnce},
 		{"notification cleanup", time.Hour, dispatcher.Cleanup},
+		{"candidate sweep", 5 * time.Minute, sweeper.RunOnce},
 	} {
 		wg.Add(1)
 		go func() {

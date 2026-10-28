@@ -131,7 +131,11 @@ func (e *Engine) digest(ctx context.Context, userID string, settings store.Notif
 	if err != nil {
 		return store.Notification{}, false, err
 	}
-	if open == 0 && auto == 0 {
+	candidates, err := e.Store.CountActionItems(ctx, userID, "candidate")
+	if err != nil {
+		return store.Notification{}, false, err
+	}
+	if open == 0 && auto == 0 && candidates == 0 {
 		return store.Notification{}, false, nil
 	}
 	items, err := e.Store.ListActionItems(ctx, userID, "open", nil, 3)
@@ -143,6 +147,9 @@ func (e *Engine) digest(ctx context.Context, userID string, settings store.Notif
 		contents = append(contents, item.Content)
 	}
 	body, url := strings.Join(contents, "・"), "/"
+	if candidates > 0 {
+		body = fmt.Sprintf("タスク候補 %d件／", candidates) + body
+	}
 	if auto > 0 {
 		body, url = fmt.Sprintf("自動で処理 %d件／", auto)+body, "/auto"
 	}

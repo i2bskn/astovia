@@ -138,6 +138,8 @@ type run struct {
 	tracking     bool
 	// names caches display names by member ID.
 	names map[string]string
+	// loc is the user's time zone for the AI, read once when needed.
+	loc *time.Location
 
 	// ai is the user's AI settings as last read. detectCalls and trackCalls
 	// count the AI calls. aiFallbackOnly is set after the AI failed in a way
@@ -362,6 +364,24 @@ func (r *run) permalink(channel string, m slack.Message) (string, error) {
 		return "", nil
 	}
 	return slackURL(v).String, nil
+}
+
+// location returns the time zone of the user's notification settings, in
+// which the AI reads post times and writes dates. It falls back to UTC.
+func (r *run) location() (*time.Location, error) {
+	if r.loc != nil {
+		return r.loc, nil
+	}
+	settings, err := r.s.Store.NotificationSettings(r.parent, r.conn.UserID)
+	if err != nil {
+		return nil, err
+	}
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	r.loc = loc
+	return loc, nil
 }
 
 // deadlineNear reports whether too little time is left for an AI call.

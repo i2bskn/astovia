@@ -89,7 +89,7 @@ func (q postgresQueries) listActionItems(ctx context.Context, userID, status str
 	return items, nil
 }
 func (q postgresQueries) updateActionItem(ctx context.Context, item ActionItem, currentVersion int64) (int64, error) {
-	return q.q.UpdateActionItem(ctx, db.UpdateActionItemParams{Content: item.Content, Status: item.Status, Note: item.Note, DueAt: item.DueAt, Refs: item.Refs, Source: item.Source, SourceKey: item.SourceKey, Tracking: item.Tracking, AutoReason: item.AutoReason, AutoRef: item.AutoRef, AutoAt: item.AutoAt, DetectedAt: item.DetectedAt, TrackedAt: item.TrackedAt, NewVersion: item.Version, UpdatedAt: item.UpdatedAt, ID: item.ID, UserID: item.UserID, CurrentVersion: currentVersion})
+	return q.q.UpdateActionItem(ctx, db.UpdateActionItemParams{Content: item.Content, Status: item.Status, Note: item.Note, DueAt: item.DueAt, Refs: item.Refs, Source: item.Source, SourceKey: item.SourceKey, Tracking: item.Tracking, AutoReason: item.AutoReason, AutoRef: item.AutoRef, AutoAt: item.AutoAt, DetectedAt: item.DetectedAt, TrackedAt: item.TrackedAt, Kind: item.Kind, EventTitle: item.EventTitle, EventStartAt: item.EventStartAt, EventEndAt: item.EventEndAt, NewVersion: item.Version, UpdatedAt: item.UpdatedAt, ID: item.ID, UserID: item.UserID, CurrentVersion: currentVersion})
 }
 func (q postgresQueries) createAPIToken(ctx context.Context, token APIToken, hash string) error {
 	return q.q.CreateAPIToken(ctx, db.CreateAPITokenParams{ID: token.ID, UserID: token.UserID, Name: token.Name, TokenHash: hash, CreatedAt: token.CreatedAt})
@@ -254,6 +254,19 @@ func (q postgresQueries) touchActionItemTracked(ctx context.Context, userID, id 
 }
 func (q postgresQueries) untrackSourceActionItems(ctx context.Context, userID, source string, now int64) error {
 	return q.q.UntrackSourceActionItems(ctx, db.UntrackSourceActionItemsParams{UpdatedAt: now, UserID: userID, Source: sql.NullString{String: source, Valid: true}})
+}
+func (q postgresQueries) listCandidateSweepUserIDs(ctx context.Context, now int64) ([]string, error) {
+	ids, err := q.q.ListCandidateSweepUserIDs(ctx, sql.NullInt64{Int64: now, Valid: true})
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, err
+}
+func (q postgresQueries) expireCandidates(ctx context.Context, userID string, updatedBefore, now int64) (int64, error) {
+	return q.q.ExpireCandidates(ctx, db.ExpireCandidatesParams{Now: now, UserID: userID, UpdatedBefore: updatedBefore})
+}
+func (q postgresQueries) expireEvents(ctx context.Context, userID string, now int64) (int64, error) {
+	return q.q.ExpireEvents(ctx, db.ExpireEventsParams{Now: now, UserID: userID})
 }
 func (q postgresQueries) githubConnection(ctx context.Context, userID string) (GitHubConnection, error) {
 	row, err := q.q.GetGitHubConnection(ctx, userID)

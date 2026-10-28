@@ -11,7 +11,15 @@ const reasonLabels: Readonly<Record<string, string>> = {
   'github.mention_no_action': '対応は不要と判断した',
   'slack.no_action': '対応不要と判定',
   'slack.reply_resolved': '返信で対応済み',
+  'candidate.expired': '候補のまま期間が過ぎた',
+  'event.passed': '予定の時刻を過ぎた',
 };
+
+// autoOutcome is how an automatically processed item ended: 完了 for done
+// items and 対象外 for dismissed ones.
+export function autoOutcome(status: string): string {
+  return status === 'dismissed' ? '対象外' : '完了';
+}
 
 // autoReasonLabel returns the Japanese label of an automatic completion
 // reason, or the code itself when it is unknown.

@@ -2,7 +2,11 @@
 // module holds no authentication state and can be tested with a fake.
 export type RequestFunction = <T>(path: `/api/v1/${string}`, init?: RequestInit) => Promise<T>;
 
-export type ActionItemStatus = 'open' | 'done' | 'dismissed';
+// candidate is an item the AI found but was not sure the user has to do.
+export type ActionItemStatus = 'open' | 'candidate' | 'done' | 'dismissed';
+
+// task is a plain item; event asks the user to add a meeting to the calendar.
+export type ActionItemKind = 'task' | 'event';
 
 export interface ActionItemRef {
   service: string;
@@ -19,6 +23,14 @@ export interface ActionItemAuto {
   at: string;
 }
 
+// ActionItemEvent is the meeting of an event item. end_at is null when no
+// end was given.
+export interface ActionItemEvent {
+  title: string;
+  start_at: string;
+  end_at: string | null;
+}
+
 export interface ActionItem {
   id: string;
   content: string;
@@ -32,6 +44,9 @@ export interface ActionItem {
   // source is the integration that created the item ("github"), or null.
   source?: string | null;
   auto?: ActionItemAuto | null;
+  kind: ActionItemKind;
+  // event is set exactly when kind is event.
+  event: ActionItemEvent | null;
 }
 
 export interface ActionItemPage {
@@ -48,7 +63,7 @@ export interface ActionItemPatch {
   version?: number;
 }
 
-const statuses: readonly string[] = ['open', 'done', 'dismissed'];
+const statuses: readonly string[] = ['open', 'candidate', 'done', 'dismissed'];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -71,6 +86,16 @@ function isAuto(value: unknown): boolean {
     typeof value.at === 'string');
 }
 
+function isEvent(value: unknown): value is ActionItemEvent {
+  return isRecord(value) && typeof value.title === 'string' && typeof value.start_at === 'string' &&
+    (value.end_at === null || typeof value.end_at === 'string');
+}
+
+function isKindAndEvent(value: Record<string, unknown>): boolean {
+  if (value.kind === 'task') return value.event === null;
+  return value.kind === 'event' && isEvent(value.event);
+}
+
 function isActionItem(value: unknown): value is ActionItem {
   return isRecord(value) &&
     typeof value.id === 'string' && value.id !== '' &&
@@ -83,7 +108,8 @@ function isActionItem(value: unknown): value is ActionItem {
     typeof value.created_at === 'string' &&
     typeof value.updated_at === 'string' &&
     (value.source === undefined || value.source === null || typeof value.source === 'string') &&
-    isAuto(value.auto);
+    isAuto(value.auto) &&
+    isKindAndEvent(value);
 }
 
 function readItem(data: unknown): ActionItem {
@@ -97,6 +123,39 @@ function readPage(data: unknown): ActionItemPage {
     !(data.next_cursor === null || (typeof data.next_cursor === 'string' && data.next_cursor !== ''))
   ) throw new Error('Unexpected action item list response');
   return { items: data.items, next_cursor: data.next_cursor };
+}
+
+// httpsLink returns value when it is a valid https URL. It is a copy of
+// automation.ts's httpsURL: these modules import nothing at runtime, so that
+// the tests can load them without a bundler.
+function httpsLink(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+// calendarDate is a time in Google Calendar's UTC form, 20261029T033000Z.
+function calendarDate(date: Date): string {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '');
+}
+
+// calendarURL returns a Google Calendar link that opens a new event filled
+// with the item's meeting, or null when the item is not an event. Without an
+// end the event lasts an hour. The source post is linked when it is https.
+export function calendarURL(item: ActionItem): string | null {
+  if (item.kind !== 'event' || !item.event) return null;
+  const start = new Date(item.event.start_at);
+  if (Number.isNaN(start.getTime())) return null;
+  let end = item.event.end_at ? new Date(item.event.end_at) : null;
+  if (!end || Number.isNaN(end.getTime())) end = new Date(start.getTime() + 60 * 60 * 1000);
+  const params = new URLSearchParams({ action: 'TEMPLATE', text: item.event.title, dates: `${calendarDate(start)}/${calendarDate(end)}` });
+  const source = httpsLink(item.refs[0]?.url);
+  if (source) params.set('details', source);
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
 }
 
 // isConflict reports whether a request failed with 409. auth.ts's APIError is

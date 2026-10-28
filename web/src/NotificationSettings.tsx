@@ -41,6 +41,14 @@ const supportMessages: Record<Exclude<PushSupport, 'supported'>, string> = {
   unsupported: 'このブラウザは通知に対応していません。',
 };
 
+// candidateExpireChoices are the days offered for dismissing task
+// candidates; 0 keeps them.
+const candidateExpireChoices: readonly number[] = [1, 3, 7, 14, 0];
+
+function candidateExpireLabel(days: number): string {
+  return days === 0 ? 'しない' : `${days}日`;
+}
+
 const timezones: readonly string[] = (() => {
   try {
     return Intl.supportedValuesOf('timeZone');
@@ -135,12 +143,15 @@ export default function NotificationSettings() {
   const [timezone, setTimezone] = useState(browserTimezone());
   const [digestHour, setDigestHour] = useState(8);
   const [staleDays, setStaleDays] = useState(3);
+  const [candidateExpireDays, setCandidateExpireDays] = useState(3);
   const [saving, setSaving] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<{ error: boolean; text: string } | null>(null);
   const headingID = useId();
   const tzID = useId();
   const hourID = useId();
   const daysID = useId();
+  const expireID = useId();
+  const expireHintID = useId();
   const hours = useMemo(() => Array.from({ length: 24 }, (_, i) => i), []);
 
   const load = useCallback(async () => {
@@ -154,6 +165,7 @@ export default function NotificationSettings() {
       setTimezone(list.length === 0 && settings.timezone === 'UTC' ? browserTimezone() : settings.timezone);
       setDigestHour(settings.digest_hour);
       setStaleDays(settings.stale_days);
+      setCandidateExpireDays(settings.candidate_expire_days);
     } catch {
       setError('通知の設定を読み込めませんでした。接続を確認して、もう一度お試しください。');
     } finally {
@@ -222,12 +234,13 @@ export default function NotificationSettings() {
     setSaving(true);
     setSettingsMessage(null);
     try {
-      const saved = await client.saveNotificationSettings({ timezone: timezone.trim(), digest_hour: digestHour, stale_days: staleDays });
+      const saved = await client.saveNotificationSettings({ timezone: timezone.trim(), digest_hour: digestHour, stale_days: staleDays, candidate_expire_days: candidateExpireDays });
       setTimezone(saved.timezone);
+      setCandidateExpireDays(saved.candidate_expire_days);
       setSettingsMessage({ error: false, text: '保存しました。' });
     } catch (failure) {
       setSettingsMessage({ error: true, text: failure instanceof APIError && failure.status === 400
-        ? 'タイムゾーンは Asia/Tokyo のような名前で入力してください。'
+        ? '設定を保存できませんでした。入力内容を確認してください。'
         : '保存できませんでした。接続を確認して、もう一度お試しください。' });
     } finally {
       setSaving(false);
@@ -273,6 +286,14 @@ export default function NotificationSettings() {
           : <input id={tzID} autoCapitalize="none" spellCheck={false} maxLength={64} required value={timezone} onChange={(e) => setTimezone(e.target.value)} disabled={saving} />}
       </div>
       </div>
+      <div className="field">
+        <label htmlFor={expireID}>タスク候補を自動で対象外にするまで</label>
+        <select id={expireID} value={candidateExpireDays} onChange={(e) => setCandidateExpireDays(Number(e.target.value))} disabled={saving} aria-describedby={expireHintID}>
+          {candidateExpireChoices.includes(candidateExpireDays) ? null : <option value={candidateExpireDays}>{candidateExpireLabel(candidateExpireDays)}</option>}
+          {candidateExpireChoices.map((d) => <option key={d} value={d}>{candidateExpireLabel(d)}</option>)}
+        </select>
+      </div>
+      <p className="field-hint" id={expireHintID}><Phrased text="そのままの候補は、この日数が過ぎると対象外に移します。" /></p>
       {settingsMessage ? <p className={settingsMessage.error ? 'notice error' : 'notice success'} role={settingsMessage.error ? 'alert' : 'status'}>{settingsMessage.text}</p> : null}
       <div className="form-actions"><button className="button primary" type="submit" disabled={saving}>{saving ? '保存中…' : '通知のタイミングを保存'}</button></div>
     </form>

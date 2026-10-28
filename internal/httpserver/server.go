@@ -489,7 +489,7 @@ func screenPath(p string) bool {
 	}
 	p = strings.TrimSuffix(p, "/")
 	switch p {
-	case "/auto", "/settings", "/consent":
+	case "/candidates", "/auto", "/settings", "/consent":
 		return true
 	}
 	page, ok := strings.CutPrefix(p, "/settings/")

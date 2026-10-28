@@ -267,9 +267,10 @@ func mentionPosts(issue github.Issue, comments []github.Comment, reviews []githu
 type mentionOutcome int
 
 const (
-	mentionAction   mentionOutcome = iota // the AI found something to do
-	mentionNoAction                       // the AI found nothing to do
-	mentionFallback                       // no judgment: ask the user to check
+	mentionAction    mentionOutcome = iota // the AI found something to do
+	mentionCandidate                       // the AI is not sure the user has something to do
+	mentionNoAction                        // the AI found nothing to do
+	mentionFallback                        // no judgment: ask the user to check
 )
 
 // mention handles the mention in posts[i] and reports whether it was
@@ -322,7 +323,11 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 		r.aiStopped = true
 		return false, nil
 	}
-	in := ai.MentionInput{Me: r.conn.Login, Repository: gref.Owner + "/" + gref.Repo, Number: gref.Number, Kind: "issue", State: issue.State, Title: issue.Title, Target: i}
+	loc, err := r.location()
+	if err != nil {
+		return false, err
+	}
+	in := ai.MentionInput{Me: r.conn.Login, Location: loc, Repository: gref.Owner + "/" + gref.Repo, Number: gref.Number, Kind: "issue", State: issue.State, Title: issue.Title, Target: i}
 	if issue.IsPull {
 		in.Kind = "pull_request"
 	}
@@ -345,8 +350,11 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 		if cur.LastError.Valid {
 			r.setAIStatus(store.AIActive, "")
 		}
-		if res.NeedsAction {
+		switch res.Decision {
+		case ai.DecisionTask:
 			return create(mentionAction, res)
+		case ai.DecisionCandidate:
+			return create(mentionCandidate, res)
 		}
 		return create(mentionNoAction, res)
 	case errors.Is(err, ai.ErrKeyInvalid):
@@ -404,8 +412,26 @@ func (r *run) setAIStatus(status, lastError string) {
 	r.ai.Status, r.ai.LastError = status, v
 }
 
+// location returns the time zone of the user's notification settings, in
+// which the AI reads post times and writes dates. It falls back to UTC.
+func (r *run) location() (*time.Location, error) {
+	if r.loc != nil {
+		return r.loc, nil
+	}
+	settings, err := r.s.Store.NotificationSettings(r.parent, r.conn.UserID)
+	if err != nil {
+		return nil, err
+	}
+	loc, err := time.LoadLocation(settings.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	r.loc = loc
+	return loc, nil
+}
+
 // createMention creates the item of a mention unless it exists. Mention
-// items are not tracked.
+// items are not tracked. A candidate is not notified.
 func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p mentionPost, o mentionOutcome, res ai.MentionResult) error {
 	name := fmt.Sprintf("%s/%s#%d", gref.Owner, gref.Repo, gref.Number)
 	title := cleanTitle(issue.Title)
@@ -428,8 +454,12 @@ func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p m
 	item := store.ActionItem{ID: id, Status: "open", Refs: string(refs), Version: 1, CreatedAt: now, UpdatedAt: now,
 		Source: nullString(store.SourceGitHub), SourceKey: nullString(key), Tracking: 0, DetectedAt: nullInt(now)}
 	switch o {
-	case mentionAction:
+	case mentionAction, mentionCandidate:
 		item.Content = res.Task
+		if o == mentionCandidate {
+			item.Status = "candidate"
+		}
+		setEvent(&item, res.Event, githubURL(p.url), now)
 	case mentionNoAction:
 		item.Content = res.Summary
 		if item.Content == "" {
@@ -450,6 +480,23 @@ func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p m
 		}
 		return tx.Enqueue(mentionNotification(name, item, now))
 	})
+}
+
+// setEvent makes item an event item when the AI found an event. An event
+// that has already started is dismissed at once; ref is the evidence of
+// that dismissal.
+func setEvent(item *store.ActionItem, e *ai.Event, ref sql.NullString, now int64) {
+	if e == nil {
+		return
+	}
+	start := e.Start.Unix()
+	item.Kind, item.EventTitle, item.EventStartAt, item.DueAt = store.KindEvent, nullString(e.Title), nullInt(start), nullInt(start)
+	if !e.End.IsZero() {
+		item.EventEndAt = nullInt(e.End.Unix())
+	}
+	if start <= now {
+		item.Status, item.Tracking, item.AutoReason, item.AutoRef, item.AutoAt = "dismissed", 0, nullString(store.ReasonEventPassed), ref, nullInt(now)
+	}
 }
 
 func mentionNotification(name string, item store.ActionItem, now int64) store.Notification {

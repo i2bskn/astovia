@@ -27,9 +27,11 @@ func testActionItems(t *testing.T, driver string) {
 		}
 	}
 
-	// Round trip with and without the nullable columns.
+	// Round trip with and without the nullable columns. An empty kind is
+	// stored as "task".
 	plain := store.ActionItem{ID: "plain", UserID: "alice-id", Content: "reply", Status: "open", Refs: "[]", Version: 1, CreatedAt: 100, UpdatedAt: 100}
-	full := store.ActionItem{ID: "full", UserID: "alice-id", Content: "call", Status: "done", Note: sql.NullString{String: "note", Valid: true}, DueAt: sql.NullInt64{Int64: 1700000000, Valid: true}, Refs: `[{"service":"slack"}]`, Version: 1, CreatedAt: 101, UpdatedAt: 101}
+	full := store.ActionItem{ID: "full", UserID: "alice-id", Content: "call", Status: "done", Note: sql.NullString{String: "note", Valid: true}, DueAt: sql.NullInt64{Int64: 1700000000, Valid: true}, Refs: `[{"service":"slack"}]`, Version: 1, CreatedAt: 101, UpdatedAt: 101,
+		Kind: store.KindEvent, EventTitle: sql.NullString{String: "MTG", Valid: true}, EventStartAt: sql.NullInt64{Int64: 1700000000, Valid: true}, EventEndAt: sql.NullInt64{Int64: 1700003600, Valid: true}}
 	for _, item := range []store.ActionItem{plain, full} {
 		if err := s.CreateActionItem(ctx, item); err != nil {
 			t.Fatal(err)
@@ -38,10 +40,14 @@ func testActionItems(t *testing.T, driver string) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if item.Kind == "" {
+			item.Kind = store.KindTask
+		}
 		if !reflect.DeepEqual(got, item) {
 			t.Fatalf("round trip:\ngot  %+v\nwant %+v", got, item)
 		}
 	}
+	plain.Kind = store.KindTask
 	list, err := s.ListActionItems(ctx, "alice-id", "", nil, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +78,7 @@ func testActionItems(t *testing.T, driver string) {
 	// UpdateActionItem increments the version and keeps the identity columns.
 	updated, err := s.UpdateActionItem(ctx, "alice-id", "plain", func(item *store.ActionItem) error {
 		item.Content, item.Status, item.UpdatedAt = "replied", "done", 200
+		item.Kind, item.EventTitle, item.EventStartAt = store.KindEvent, sql.NullString{String: "MTG", Valid: true}, sql.NullInt64{Int64: 300, Valid: true}
 		item.ID, item.UserID, item.CreatedAt, item.Version = "other", "bob-id", 1, 99
 		return nil
 	})
@@ -80,6 +87,7 @@ func testActionItems(t *testing.T, driver string) {
 	}
 	want := plain
 	want.Content, want.Status, want.UpdatedAt, want.Version = "replied", "done", 200, 2
+	want.Kind, want.EventTitle, want.EventStartAt = store.KindEvent, sql.NullString{String: "MTG", Valid: true}, sql.NullInt64{Int64: 300, Valid: true}
 	if !reflect.DeepEqual(updated, want) {
 		t.Fatalf("update:\ngot  %+v\nwant %+v", updated, want)
 	}
@@ -159,5 +167,90 @@ func testActionItemPaging(t *testing.T, driver string) {
 		if !reflect.DeepEqual(seen, want) {
 			t.Fatalf("status %q: listed %v, want %v", status, seen, want)
 		}
+	}
+}
+
+func TestCandidateSweep(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) { testCandidateSweep(t, driver) })
+	}
+}
+
+func testCandidateSweep(t *testing.T, driver string) {
+	ctx := context.Background()
+	s, _ := testutil.Database(t, driver)
+	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: "x"}, {ID: "carol-id", Email: "carol@example.com", PasswordHash: "x"}} {
+		if err := s.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	item := func(id, user, status string, updated int64) store.ActionItem {
+		return store.ActionItem{ID: id, UserID: user, Content: id, Status: status, Refs: "[]", Version: 1, CreatedAt: updated, UpdatedAt: updated, Tracking: 1}
+	}
+	event := func(id, user, status string, start int64) store.ActionItem {
+		e := item(id, user, status, 100)
+		e.Kind, e.EventTitle, e.EventStartAt, e.Tracking = store.KindEvent, sql.NullString{String: id, Valid: true}, sql.NullInt64{Int64: start, Valid: true}, 0
+		return e
+	}
+	items := []store.ActionItem{
+		item("old", "alice-id", "candidate", 100),
+		item("edge", "alice-id", "candidate", 200),
+		item("new", "alice-id", "candidate", 201),
+		item("open", "alice-id", "open", 100),
+		item("done", "alice-id", "done", 100),
+		event("passed", "alice-id", "open", 1000),
+		event("passed-candidate", "alice-id", "candidate", 999),
+		event("future", "alice-id", "open", 1001),
+		event("passed-done", "alice-id", "done", 500),
+		item("bobs", "bob-id", "candidate", 100),
+		item("carols", "carol-id", "open", 100),
+	}
+	for _, it := range items {
+		if err := s.CreateActionItem(ctx, it); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids, err := s.CandidateSweepUserIDs(ctx, 1000)
+	if err != nil || !reflect.DeepEqual(ids, []string{"alice-id", "bob-id"}) {
+		t.Fatalf("sweep users: %v %v", ids, err)
+	}
+	// Events go first: a passed candidate event is dismissed as passed.
+	if n, err := s.ExpireEvents(ctx, "alice-id", 1000); err != nil || n != 2 {
+		t.Fatalf("expire events: %d %v", n, err)
+	}
+	if n, err := s.ExpireCandidates(ctx, "alice-id", 200, 1000); err != nil || n != 2 {
+		t.Fatalf("expire candidates: %d %v", n, err)
+	}
+	want := map[string]string{"old": "candidate.expired", "edge": "candidate.expired", "passed": "event.passed", "passed-candidate": "event.passed"}
+	for _, it := range items {
+		got, err := s.ActionItem(ctx, it.UserID, it.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reason, ok := want[it.ID]; ok {
+			if got.Status != "dismissed" || got.Tracking != 0 || got.AutoReason.String != reason || got.AutoRef.Valid || got.AutoAt.Int64 != 1000 || got.UpdatedAt != 1000 || got.Version != 2 {
+				t.Fatalf("%s: %+v", it.ID, got)
+			}
+			continue
+		}
+		if got.Status != it.Status || got.Version != 1 || got.AutoReason.Valid {
+			t.Fatalf("%s changed: %+v", it.ID, got)
+		}
+	}
+	// Automatically dismissed items are not counted as handled.
+	if n, err := s.CountAutoActionItemsSince(ctx, "alice-id", 0); err != nil || n != 0 {
+		t.Fatalf("auto count: %d %v", n, err)
+	}
+	auto := item("auto", "alice-id", "done", 100)
+	auto.AutoReason, auto.AutoAt = sql.NullString{String: "slack.reply_resolved", Valid: true}, sql.NullInt64{Int64: 900, Valid: true}
+	if err = s.CreateActionItem(ctx, auto); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CountAutoActionItemsSince(ctx, "alice-id", 0); err != nil || n != 1 {
+		t.Fatalf("auto count with done: %d %v", n, err)
+	}
+	// "new" is still a candidate.
+	if ids, err = s.CandidateSweepUserIDs(ctx, 1000); err != nil || !reflect.DeepEqual(ids, []string{"alice-id", "bob-id"}) {
+		t.Fatalf("sweep users after: %v %v", ids, err)
 	}
 }

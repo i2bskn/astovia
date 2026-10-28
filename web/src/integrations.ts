@@ -57,6 +57,9 @@ export interface NotificationSettings {
   timezone: string;
   digest_hour: number;
   stale_days: number;
+  // candidate_expire_days is how many days a task candidate is kept before
+  // it is dismissed; 0 keeps it.
+  candidate_expire_days: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -106,9 +109,10 @@ function readSettings(data: unknown): NotificationSettings {
   if (
     !isRecord(data) || typeof data.timezone !== 'string' ||
     typeof data.digest_hour !== 'number' || !Number.isInteger(data.digest_hour) ||
-    typeof data.stale_days !== 'number' || !Number.isInteger(data.stale_days)
+    typeof data.stale_days !== 'number' || !Number.isInteger(data.stale_days) ||
+    typeof data.candidate_expire_days !== 'number' || !Number.isInteger(data.candidate_expire_days)
   ) throw new Error('Unexpected notification settings response');
-  return { timezone: data.timezone, digest_hour: data.digest_hour, stale_days: data.stale_days };
+  return { timezone: data.timezone, digest_hour: data.digest_hour, stale_days: data.stale_days, candidate_expire_days: data.candidate_expire_days };
 }
 
 function json(method: 'POST' | 'PUT' | 'PATCH', body: object): RequestInit {

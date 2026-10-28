@@ -542,7 +542,7 @@ func testPushAPI(t *testing.T, driver string) {
 	if want := string([]rune("iPhone Safari" + strings.Repeat("あ", 70))[:64]); sub.Label != want || sub.LastUsedAt != nil {
 		t.Fatalf("label: %q", sub.Label)
 	}
-	if w = api.do("GET", "/api/v1/notification-settings", api.alice, ""); strings.TrimSpace(w.Body.String()) != `{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3}` {
+	if w = api.do("GET", "/api/v1/notification-settings", api.alice, ""); strings.TrimSpace(w.Body.String()) != `{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3,"candidate_expire_days":3}` {
 		t.Fatalf("settings from subscription: %s", w.Body.String())
 	}
 	stored, err := api.store.PushSubscriptions(context.Background(), "alice-id")
@@ -627,7 +627,7 @@ func testPushTestAPI(t *testing.T, driver string) {
 func TestNotificationSettingsAPI(t *testing.T) {
 	api := newIntegrationAPI(t, "sqlite")
 	const path = "/api/v1/notification-settings"
-	if w := api.do("GET", path, api.alice, ""); w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"timezone":"UTC","digest_hour":8,"stale_days":3}` {
+	if w := api.do("GET", path, api.alice, ""); w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"timezone":"UTC","digest_hour":8,"stale_days":3,"candidate_expire_days":3}` {
 		t.Fatalf("defaults: %d %s", w.Code, w.Body.String())
 	}
 	for _, body := range []string{
@@ -644,11 +644,18 @@ func TestNotificationSettingsAPI(t *testing.T) {
 		`{"timezone":"Asia/Tokyo","digest_hour":null,"stale_days":3}`,
 		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":0}`,
 		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":31}`,
-		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3,"x":1}`,
+		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3,"candidate_expire_days":3,"x":1}`,
+		// candidate_expire_days is required and from 0 to 30.
+		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3}`,
+		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3,"candidate_expire_days":null}`,
+		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3,"candidate_expire_days":-1}`,
+		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3,"candidate_expire_days":31}`,
+		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3,"candidate_expire_days":1.5}`,
+		`{"timezone":"Asia/Tokyo","digest_hour":8,"stale_days":3,"candidate_expire_days":"3"}`,
 	} {
 		expectStatus(t, api.do("PUT", path, api.alice, body), 400, "invalid_request")
 	}
-	want := `{"timezone":"America/New_York","digest_hour":0,"stale_days":30}`
+	want := `{"timezone":"America/New_York","digest_hour":0,"stale_days":30,"candidate_expire_days":0}`
 	if w := api.do("PUT", path, api.alice, want); w.Code != 200 || strings.TrimSpace(w.Body.String()) != want {
 		t.Fatalf("PUT: %d %s", w.Code, w.Body.String())
 	}
@@ -657,6 +664,10 @@ func TestNotificationSettingsAPI(t *testing.T) {
 	}
 	if w := api.do("GET", path, api.bob, ""); !strings.Contains(w.Body.String(), `"UTC"`) {
 		t.Fatalf("bob: %s", w.Body.String())
+	}
+	want = `{"timezone":"America/New_York","digest_hour":0,"stale_days":30,"candidate_expire_days":30}`
+	if w := api.do("PUT", path, api.alice, want); w.Code != 200 || strings.TrimSpace(w.Body.String()) != want {
+		t.Fatalf("PUT 30: %d %s", w.Code, w.Body.String())
 	}
 }
 

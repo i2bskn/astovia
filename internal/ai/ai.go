@@ -160,23 +160,50 @@ func (c *Client) CheckModel(ctx context.Context, key, model string) error {
 	return nil
 }
 
-// MentionResult is the AI's judgment of a mention. Task is empty when
-// NeedsAction is false.
+// Decisions of a judgment.
+const (
+	// DecisionTask is something the user clearly has to do.
+	DecisionTask = "task"
+	// DecisionCandidate is something the user may have to do: the AI is
+	// not sure that it is addressed to the user.
+	DecisionCandidate = "candidate"
+	// DecisionNone is nothing to do.
+	DecisionNone = "none"
+)
+
+// eventLayout is the format of event_start and event_end: a local time in
+// the time zone of the input.
+const eventLayout = "2006-01-02T15:04"
+
+// MentionResult is the AI's judgment of a mention. Decision is one of the
+// Decision constants; Task is empty when it is DecisionNone. Event is set
+// when the posts fixed a meeting that the user attends.
 type MentionResult struct {
-	NeedsAction bool
-	Task        string
-	Summary     string
+	Decision string
+	Task     string
+	Summary  string
+	Event    *Event
+}
+
+// Event is a meeting found by a judgment. End is zero when no end was given.
+type Event struct {
+	Title string
+	Start time.Time
+	End   time.Time
 }
 
 // outputSchema is the structured output of a judgment.
 var outputSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"needs_action": map[string]any{"type": "boolean"},
-		"task":         map[string]any{"type": "string"},
-		"summary":      map[string]any{"type": "string"},
+		"decision":    map[string]any{"type": "string", "enum": []string{DecisionTask, DecisionCandidate, DecisionNone}},
+		"task":        map[string]any{"type": "string"},
+		"summary":     map[string]any{"type": "string"},
+		"event_title": map[string]any{"type": "string"},
+		"event_start": map[string]any{"type": "string", "description": "YYYY-MM-DDTHH:MM in the local time of the input timezone, or an empty string"},
+		"event_end":   map[string]any{"type": "string", "description": "YYYY-MM-DDTHH:MM in the local time of the input timezone, or an empty string"},
 	},
-	"required":             []string{"needs_action", "task", "summary"},
+	"required":             []string{"decision", "task", "summary", "event_title", "event_start", "event_end"},
 	"additionalProperties": false,
 }
 
@@ -190,7 +217,7 @@ func (c *Client) JudgeMention(ctx context.Context, key, model string, in Mention
 	if err != nil {
 		return MentionResult{}, err
 	}
-	return parseResult(text)
+	return parseResult(text, location(in.Location))
 }
 
 // structured sends one judgment with a fixed system prompt and a JSON
@@ -227,25 +254,58 @@ func (c *Client) structured(ctx context.Context, key, model, system, user string
 	return text.String(), nil
 }
 
-// parseResult decodes and checks the structured output.
-func parseResult(text string) (MentionResult, error) {
+// parseResult decodes and checks the structured output. Event times are
+// read in loc. An event that cannot be used is dropped and the task kept.
+func parseResult(text string, loc *time.Location) (MentionResult, error) {
 	var out struct {
-		NeedsAction *bool   `json:"needs_action"`
-		Task        *string `json:"task"`
-		Summary     *string `json:"summary"`
+		Decision   *string `json:"decision"`
+		Task       *string `json:"task"`
+		Summary    *string `json:"summary"`
+		EventTitle *string `json:"event_title"`
+		EventStart *string `json:"event_start"`
+		EventEnd   *string `json:"event_end"`
 	}
 	d := json.NewDecoder(strings.NewReader(text))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&out); err != nil || out.NeedsAction == nil || out.Task == nil || out.Summary == nil {
+	if err := d.Decode(&out); err != nil || out.Decision == nil || out.Task == nil || out.Summary == nil || out.EventTitle == nil || out.EventStart == nil || out.EventEnd == nil {
 		return MentionResult{}, fmt.Errorf("%w (invalid output)", ErrUnusable)
 	}
-	r := MentionResult{NeedsAction: *out.NeedsAction, Task: truncate(clean(*out.Task), resultLimit), Summary: truncate(clean(*out.Summary), resultLimit)}
-	if !r.NeedsAction {
+	r := MentionResult{Decision: *out.Decision, Task: truncate(clean(*out.Task), resultLimit), Summary: truncate(clean(*out.Summary), resultLimit)}
+	switch r.Decision {
+	case DecisionNone:
 		r.Task = ""
-	} else if r.Task == "" {
-		return MentionResult{}, fmt.Errorf("%w (empty task)", ErrUnusable)
+		return r, nil
+	case DecisionTask, DecisionCandidate:
+		if r.Task == "" {
+			return MentionResult{}, fmt.Errorf("%w (empty task)", ErrUnusable)
+		}
+	default:
+		return MentionResult{}, fmt.Errorf("%w (invalid decision)", ErrUnusable)
 	}
+	r.Event = parseEvent(*out.EventTitle, *out.EventStart, *out.EventEnd, loc)
 	return r, nil
+}
+
+// parseEvent returns the event of a judgment, or nil when there is none or
+// its title or start cannot be used. An end that cannot be read or is not
+// after the start is left zero.
+func parseEvent(title, start, end string, loc *time.Location) *Event {
+	title = truncate(clean(title), resultLimit)
+	start, end = strings.TrimSpace(start), strings.TrimSpace(end)
+	if title == "" || start == "" {
+		return nil
+	}
+	at, err := time.ParseInLocation(eventLayout, start, loc)
+	if err != nil {
+		return nil
+	}
+	e := &Event{Title: title, Start: at}
+	if end != "" {
+		if to, err := time.ParseInLocation(eventLayout, end, loc); err == nil && to.After(at) {
+			e.End = to
+		}
+	}
+	return e
 }
 
 // clean removes control and format characters and surrounding spaces, like

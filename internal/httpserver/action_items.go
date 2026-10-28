@@ -53,6 +53,18 @@ type actionItemResponse struct {
 	// tracking flag are internal and not returned.
 	Source *string             `json:"source"`
 	Auto   *actionItemAutoInfo `json:"auto"`
+	// Kind is "task" or "event". Event describes the meeting of an event
+	// item, and is null for other kinds.
+	Kind  string           `json:"kind"`
+	Event *actionItemEvent `json:"event"`
+}
+
+// actionItemEvent is the meeting of an event item. EndAt is null when no end
+// was given.
+type actionItemEvent struct {
+	Title   string  `json:"title"`
+	StartAt string  `json:"start_at"`
+	EndAt   *string `json:"end_at"`
 }
 
 // actionItemAutoInfo is why and when an item was completed automatically.
@@ -98,6 +110,16 @@ func toActionItemResponse(item store.ActionItem) (actionItemResponse, error) {
 			auto.RefURL = &item.AutoRef.String
 		}
 		out.Auto = auto
+	}
+	out.Kind = store.KindTask
+	if item.Kind == store.KindEvent && item.EventTitle.Valid && item.EventStartAt.Valid {
+		out.Kind = store.KindEvent
+		event := &actionItemEvent{Title: item.EventTitle.String, StartAt: formatTime(item.EventStartAt.Int64)}
+		if item.EventEndAt.Valid {
+			v := formatTime(item.EventEndAt.Int64)
+			event.EndAt = &v
+		}
+		out.Event = event
 	}
 	return out, nil
 }
@@ -147,7 +169,13 @@ func decodeString(raw json.RawMessage) (string, bool) {
 	return v, true
 }
 
-func validStatus(v string) bool { return v == "open" || v == "done" || v == "dismissed" }
+func validStatus(v string) bool {
+	return v == "open" || v == "candidate" || v == "done" || v == "dismissed"
+}
+
+// activeStatus reports whether the status is one still to be handled: open,
+// or a candidate the user has not sorted yet.
+func activeStatus(v string) bool { return v == "open" || v == "candidate" }
 
 // parse validates the fields present in the body. It returns a function that
 // copies them to an item and the number of fields present, or a message for a
@@ -164,7 +192,7 @@ func (in actionItemFields) parse() (func(*store.ActionItem), int, string) {
 	if in.Status != nil {
 		v, ok := decodeString(in.Status)
 		if !ok || !validStatus(v) {
-			return nil, 0, "status must be open, done or dismissed."
+			return nil, 0, statusMessage
 		}
 		sets = append(sets, func(item *store.ActionItem) { item.Status = v })
 	}
@@ -327,7 +355,7 @@ func decodeAutoCursor(v string) (*store.AutoActionItemCursor, bool) {
 }
 
 const (
-	statusMessage = "status must be open, done or dismissed."
+	statusMessage = "status must be open, candidate, done or dismissed."
 	limitMessage  = "limit must be an integer from 1 to 100."
 	cursorMessage = "cursor is invalid."
 )
@@ -419,7 +447,7 @@ func (s *Server) createActionItem(ctx context.Context, userID string, body actio
 		return actionItemResponse{}, storeError("create", userID, err)
 	}
 	now := s.auth.Now().Unix()
-	item := store.ActionItem{ID: id, UserID: userID, Status: "open", Refs: "[]", Version: 1, CreatedAt: now, UpdatedAt: now}
+	item := store.ActionItem{ID: id, UserID: userID, Status: "open", Refs: "[]", Version: 1, CreatedAt: now, UpdatedAt: now, Kind: store.KindTask}
 	apply(&item)
 	if err = s.auth.Store.CreateActionItem(ctx, item); err != nil {
 		return actionItemResponse{}, storeError("create", userID, err)
@@ -466,10 +494,19 @@ func (s *Server) updateActionItem(ctx context.Context, userID, id string, body a
 		status := item.Status
 		apply(item)
 		// A status chosen by the user ends the integration's say over the
-		// item: it is no longer completed or reopened automatically.
+		// item: it is no longer completed or reopened automatically. Sorting
+		// a candidate (candidate to open, or back) keeps the tracking, so
+		// that a reply still completes it.
 		if item.Status != status {
-			item.Tracking = 0
+			if !activeStatus(status) || !activeStatus(item.Status) {
+				item.Tracking = 0
+			}
 			item.AutoReason, item.AutoRef, item.AutoAt = sql.NullString{}, sql.NullString{}, sql.NullInt64{}
+			// An event reopened after its start becomes a plain task, so
+			// that the sweep does not dismiss it again.
+			if item.Kind == store.KindEvent && !activeStatus(status) && activeStatus(item.Status) && item.EventStartAt.Valid && item.EventStartAt.Int64 <= now {
+				item.Kind = store.KindTask
+			}
 		}
 		item.UpdatedAt = now
 		return nil

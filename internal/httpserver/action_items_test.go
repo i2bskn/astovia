@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"github.com/i2bskn/astovia/internal/auth"
@@ -109,10 +110,10 @@ func testActionItemsAPI(t *testing.T, driver string) {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 	body, keys := jsonKeys(t, w.Body.Bytes())
-	if !reflect.DeepEqual(keys, []string{"auto", "content", "created_at", "due_at", "id", "note", "refs", "source", "status", "updated_at", "version"}) {
+	if !reflect.DeepEqual(keys, []string{"auto", "content", "created_at", "due_at", "event", "id", "kind", "note", "refs", "source", "status", "updated_at", "version"}) {
 		t.Fatalf("item keys: %v", keys)
 	}
-	if string(body["source"]) != "null" || string(body["auto"]) != "null" {
+	if string(body["source"]) != "null" || string(body["auto"]) != "null" || string(body["kind"]) != `"task"` || string(body["event"]) != "null" {
 		t.Fatalf("source and auto of a created item: %s %s", body["source"], body["auto"])
 	}
 	var refs []map[string]json.RawMessage
@@ -252,6 +253,7 @@ func TestActionItemValidation(t *testing.T) {
 		{`{"content":1}`, false},
 		{`{"content":"a\u0000b"}`, false},
 		{`{"content":"x","status":"done"}`, true},
+		{`{"content":"x","status":"candidate"}`, true},
 		{`{"content":"x","status":"closed"}`, false},
 		{`{"content":"x","status":null}`, false},
 		{`{"content":"x","note":"` + strings.Repeat("あ", 4000) + `"}`, true},
@@ -287,6 +289,8 @@ func TestActionItemValidation(t *testing.T) {
 		{`{"content":"x","refs":[{"service":"slack","url":"https://example.com/` + strings.Repeat("a", 2029) + `"}]}`, false},
 		{`{"content":"x","version":1}`, false},
 		{`{"content":"x","unknown":1}`, false},
+		{`{"content":"x","kind":"event"}`, false},
+		{`{"content":"x","event":null}`, false},
 	} {
 		w := api.do("POST", "/api/v1/action-items", api.alice, "application/json", tc.body)
 		if tc.ok && w.Code != 201 || !tc.ok && (w.Code != 400 || errorCode(t, w) != "invalid_request") {
@@ -393,5 +397,109 @@ func testActionItemList(t *testing.T, driver string) {
 	}
 	if _, w = list("?cursor=" + b64([]byte("1:abc"))); w.Code != 200 {
 		t.Fatalf("valid cursor: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCandidateAndEventItems(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) { testCandidateAndEventItems(t, driver) })
+	}
+}
+
+func testCandidateAndEventItems(t *testing.T, driver string) {
+	api := newIntegrationAPI(t, driver)
+	ctx := context.Background()
+	now := api.now.Unix()
+	null := func(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+	slackItem := func(id, status string) store.ActionItem {
+		return store.ActionItem{ID: id, UserID: "alice-id", Content: id, Status: status, Refs: "[]", Version: 1, CreatedAt: now - 10, UpdatedAt: now - 10,
+			Source: sql.NullString{String: store.SourceSlack, Valid: true}, SourceKey: sql.NullString{String: "slack:" + id, Valid: true}, Tracking: 1}
+	}
+	event := func(id, status string, start int64) store.ActionItem {
+		e := slackItem(id, status)
+		e.Tracking, e.Kind, e.EventTitle, e.EventStartAt, e.EventEndAt, e.DueAt = 0, store.KindEvent, sql.NullString{String: "MTG " + id, Valid: true}, null(start), null(start+3600), null(start)
+		return e
+	}
+	future, passed := event("future", "open", now+3600), event("passed", "dismissed", now-3600)
+	passed.AutoReason, passed.AutoAt = sql.NullString{String: store.ReasonEventPassed, Valid: true}, null(now-60)
+	for _, item := range []store.ActionItem{slackItem("cand", "candidate"), slackItem("stale", "candidate"), future, passed} {
+		if err := api.store.CreateActionItem(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	patch := func(id, body string) (actionItemResponse, *httptest.ResponseRecorder) {
+		t.Helper()
+		w := api.do("PATCH", "/api/v1/action-items/"+id, api.alice, body)
+		var out actionItemResponse
+		if w.Code == 200 {
+			if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out, w
+	}
+	stored := func(id string) store.ActionItem {
+		t.Helper()
+		item, err := api.store.ActionItem(ctx, "alice-id", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+
+	// Candidates are listed by status.
+	w := api.do("GET", "/api/v1/action-items?status=candidate", api.alice, "")
+	var page actionItemListResponse
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Items) != 2 || page.Items[0].Status != "candidate" || page.Items[0].Kind != "task" || page.Items[0].Event != nil {
+		t.Fatalf("candidates: %d %s", w.Code, w.Body.String())
+	}
+	// An event item returns its meeting.
+	w = api.do("GET", "/api/v1/action-items/future", api.alice, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"kind":"event","event":{"title":"MTG future","start_at":"2026-10-24T02:02:03Z","end_at":"2026-10-24T03:02:03Z"}`) {
+		t.Fatalf("event: %d %s", w.Code, w.Body.String())
+	}
+
+	// Sorting a candidate keeps the tracking; other changes stop it.
+	for _, step := range []struct {
+		status   string
+		tracking int64
+	}{{"open", 1}, {"candidate", 1}, {"dismissed", 0}, {"candidate", 0}} {
+		item, w := patch("cand", `{"status":"`+step.status+`"}`)
+		if w.Code != 200 || item.Status != step.status || stored("cand").Tracking != step.tracking {
+			t.Fatalf("%s: %d %s tracking=%d", step.status, w.Code, w.Body.String(), stored("cand").Tracking)
+		}
+	}
+
+	// A future event stays an event when reopened.
+	if item, w := patch("future", `{"status":"done","version":1}`); w.Code != 200 || item.Kind != "event" {
+		t.Fatalf("future done: %d %s", w.Code, w.Body.String())
+	}
+	if item, w := patch("future", `{"status":"open","version":2}`); w.Code != 200 || item.Kind != "event" || item.Event == nil || stored("future").Kind != store.KindEvent {
+		t.Fatalf("future reopened: %d %s", w.Code, w.Body.String())
+	}
+	// A passed event reopened becomes a task and is not swept again.
+	if item, w := patch("passed", `{"status":"open","version":1}`); w.Code != 200 || item.Kind != "task" || item.Event != nil || item.Auto != nil {
+		t.Fatalf("passed reopened: %d %s", w.Code, w.Body.String())
+	}
+	if got := stored("passed"); got.Kind != store.KindTask || !got.EventStartAt.Valid {
+		t.Fatalf("passed stored: %+v", got)
+	}
+	if n, err := api.store.ExpireEvents(ctx, "alice-id", now); err != nil || n != 0 || stored("passed").Status != "open" {
+		t.Fatalf("passed swept: %d %v", n, err)
+	}
+
+	// The sweep changes the version, so an older PATCH conflicts.
+	if n, err := api.store.ExpireCandidates(ctx, "alice-id", now-5, now); err != nil || n != 1 {
+		t.Fatalf("expire: %d %v", n, err)
+	}
+	if _, w := patch("stale", `{"status":"open","version":1}`); w.Code != 409 {
+		t.Fatalf("stale version: %d %s", w.Code, w.Body.String())
+	}
+
+	// Items created through the API are tasks.
+	w = api.do("POST", "/api/v1/action-items", api.alice, `{"content":"x","status":"candidate"}`)
+	var created actionItemResponse
+	if w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &created) != nil || created.Status != "candidate" || created.Kind != "task" || stored(created.ID).Kind != store.KindTask {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 }

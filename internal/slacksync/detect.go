@@ -1,6 +1,7 @@
 package slacksync
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -56,9 +57,10 @@ const (
 type outcome int
 
 const (
-	outcomeAction   outcome = iota // the AI found something to do
-	outcomeNoAction                // the AI found nothing to do
-	outcomeFallback                // no judgment: ask the user to check
+	outcomeAction    outcome = iota // the AI found something to do
+	outcomeCandidate                // the AI is not sure the user has something to do
+	outcomeNoAction                 // the AI found nothing to do
+	outcomeFallback                 // no judgment: ask the user to check
 )
 
 // conversation is a direct message channel, a group direct message channel
@@ -589,8 +591,11 @@ func (r *run) judge(u *unit) (bool, error) {
 	}
 	switch class {
 	case aiOK:
-		if res.NeedsAction {
+		switch res.Decision {
+		case ai.DecisionTask:
 			return r.create(u, outcomeAction, res)
+		case ai.DecisionCandidate:
+			return r.create(u, outcomeCandidate, res)
 		}
 		return r.create(u, outcomeNoAction, res)
 	case aiFailed, aiUnusable:
@@ -632,7 +637,11 @@ func (r *run) post(m slack.Message, target bool) (ai.SlackPost, error) {
 
 // slackInput builds the AI input of a unit.
 func (r *run) slackInput(u *unit) (ai.SlackInput, error) {
-	in := ai.SlackInput{Me: ai.SlackPerson{ID: r.conn.SlackUserID, Name: r.conn.SlackUserName}, Workspace: r.conn.TeamName, ConversationType: u.convType, ChannelName: u.channelName, OpenTasks: []string{}}
+	loc, err := r.location()
+	if err != nil {
+		return ai.SlackInput{}, err
+	}
+	in := ai.SlackInput{Me: ai.SlackPerson{ID: r.conn.SlackUserID, Name: r.conn.SlackUserName}, Location: loc, Workspace: r.conn.TeamName, ConversationType: u.convType, ChannelName: u.channelName, OpenTasks: []string{}}
 	for _, m := range u.posts {
 		p, err := r.post(m, u.targets[m.TS])
 		if err != nil {
@@ -651,7 +660,9 @@ func (r *run) slackInput(u *unit) (ai.SlackInput, error) {
 }
 
 // create creates the item of a unit unless it exists, and queues its
-// detection notification when the message is recent enough.
+// detection notification when the message is recent enough. Candidates are
+// tracked like tasks but not notified; event items are not tracked, since
+// a reply does not add the event to the calendar.
 func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 	link, err := r.permalink(u.key.Channel, u.last)
 	if err != nil {
@@ -670,8 +681,12 @@ func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 	item := store.ActionItem{ID: id, Status: "open", Refs: string(refs), Version: 1, CreatedAt: now, UpdatedAt: now,
 		Source: nullString(store.SourceSlack), SourceKey: nullString(key), Tracking: 1, DetectedAt: nullInt(now)}
 	switch o {
-	case outcomeAction:
+	case outcomeAction, outcomeCandidate:
 		item.Content = res.Task
+		if o == outcomeCandidate {
+			item.Status = "candidate"
+		}
+		setEvent(&item, res.Event, slackURL(link), now)
 	case outcomeNoAction:
 		item.Content = res.Summary
 		if item.Content == "" {
@@ -698,6 +713,23 @@ func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 		return tx.Enqueue(detectedNotification(u.title, item, now))
 	})
 	return err == nil, err
+}
+
+// setEvent makes item an untracked event item when the AI found an event.
+// An event that has already started is dismissed at once; ref is the
+// evidence of that dismissal.
+func setEvent(item *store.ActionItem, e *ai.Event, ref sql.NullString, now int64) {
+	if e == nil {
+		return
+	}
+	start := e.Start.Unix()
+	item.Kind, item.EventTitle, item.EventStartAt, item.DueAt, item.Tracking = store.KindEvent, nullString(e.Title), nullInt(start), nullInt(start), 0
+	if !e.End.IsZero() {
+		item.EventEndAt = nullInt(e.End.Unix())
+	}
+	if start <= now {
+		item.Status, item.AutoReason, item.AutoRef, item.AutoAt = "dismissed", nullString(store.ReasonEventPassed), ref, nullInt(now)
+	}
 }
 
 func detectedNotification(title string, item store.ActionItem, now int64) store.Notification {

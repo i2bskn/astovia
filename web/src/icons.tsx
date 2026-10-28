@@ -26,3 +26,4 @@ export const UserIcon = ({ size }: IconProps) => <Icon size={size}><circle cx="1
 export const SourceIcon = ({ size = 14 }: IconProps) => <Icon size={size}><circle cx="6" cy="6" r="2" /><circle cx="6" cy="18" r="2" /><circle cx="18" cy="8" r="2" /><path d="M6 8v8M18 10a6 6 0 0 1-6 6H8" /></Icon>;
 export const ChevronRightIcon = ({ size = 18 }: IconProps) => <Icon size={size}><path d="M9.5 6l6 6-6 6" /></Icon>;
 export const ChevronLeftIcon = ({ size = 18 }: IconProps) => <Icon size={size}><path d="M14.5 6l-6 6 6 6" /></Icon>;
+export const CalendarIcon = ({ size = 14 }: IconProps) => <Icon size={size}><rect x="4" y="5.5" width="16" height="14.5" rx="2.5" /><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4" /></Icon>;

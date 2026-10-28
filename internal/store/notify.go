@@ -28,6 +28,9 @@ const (
 	DefaultTimezone   = "UTC"
 	DefaultDigestHour = 8
 	DefaultStaleDays  = 3
+	// DefaultCandidateExpireDays is how many days a task candidate is left
+	// before it is dismissed automatically. Zero never dismisses them.
+	DefaultCandidateExpireDays = 3
 )
 
 // PushSubscription is a browser's Web Push subscription. P256dh and Auth are
@@ -46,6 +49,9 @@ type NotificationSettings struct {
 	DigestHour int64
 	StaleDays  int64
 	UpdatedAt  int64
+	// CandidateExpireDays is how many days after its last change a task
+	// candidate is dismissed automatically; 0 keeps candidates.
+	CandidateExpireDays int64
 }
 
 // Notification is a message waiting to be sent, or sent (SentAt set). Its
@@ -83,7 +89,7 @@ func (s *Store) SavePushSubscription(ctx context.Context, p PushSubscription, ti
 			return e
 		}
 		if timezone != "" {
-			if e := q.createNotificationSettingsIfMissing(ctx, NotificationSettings{UserID: p.UserID, Timezone: timezone, DigestHour: DefaultDigestHour, StaleDays: DefaultStaleDays, UpdatedAt: now}); e != nil {
+			if e := q.createNotificationSettingsIfMissing(ctx, NotificationSettings{UserID: p.UserID, Timezone: timezone, DigestHour: DefaultDigestHour, StaleDays: DefaultStaleDays, UpdatedAt: now, CandidateExpireDays: DefaultCandidateExpireDays}); e != nil {
 				return e
 			}
 		}
@@ -162,7 +168,7 @@ func (s *Store) PushUserIDs(ctx context.Context) ([]string, error) {
 func (s *Store) NotificationSettings(ctx context.Context, userID string) (NotificationSettings, error) {
 	n, err := s.q.notificationSettings(ctx, userID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return NotificationSettings{UserID: userID, Timezone: DefaultTimezone, DigestHour: DefaultDigestHour, StaleDays: DefaultStaleDays}, nil
+		return NotificationSettings{UserID: userID, Timezone: DefaultTimezone, DigestHour: DefaultDigestHour, StaleDays: DefaultStaleDays, CandidateExpireDays: DefaultCandidateExpireDays}, nil
 	}
 	return n, err
 }
@@ -265,8 +271,27 @@ func (s *Store) CountActionItems(ctx context.Context, userID, status string) (in
 	return s.q.countActionItemsByStatus(ctx, userID, status)
 }
 
+// CandidateSweepUserIDs returns the enabled users that have a task
+// candidate, or an open or candidate event whose start is at or before now.
+func (s *Store) CandidateSweepUserIDs(ctx context.Context, now int64) ([]string, error) {
+	return s.q.listCandidateSweepUserIDs(ctx, now)
+}
+
+// ExpireCandidates dismisses the user's task candidates last changed at or
+// before updatedBefore, and returns how many it dismissed.
+func (s *Store) ExpireCandidates(ctx context.Context, userID string, updatedBefore, now int64) (int64, error) {
+	return s.q.expireCandidates(ctx, userID, updatedBefore, now)
+}
+
+// ExpireEvents dismisses the user's open or candidate events that started at
+// or before now, and returns how many it dismissed.
+func (s *Store) ExpireEvents(ctx context.Context, userID string, now int64) (int64, error) {
+	return s.q.expireEvents(ctx, userID, now)
+}
+
 // CountAutoActionItemsSince returns the number of the user's items completed
-// automatically after the time.
+// automatically after the time. Items dismissed automatically are not
+// counted.
 func (s *Store) CountAutoActionItemsSince(ctx context.Context, userID string, since int64) (int64, error) {
 	return s.q.countAutoActionItemsSince(ctx, userID, since)
 }
