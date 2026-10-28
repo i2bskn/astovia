@@ -1,15 +1,27 @@
 -- name: GetUserByEmail :one
-SELECT id, email, password_hash, disabled, created_at FROM users WHERE email = sqlc.arg(email);
+SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE email = sqlc.arg(email);
 -- name: GetUserByID :one
-SELECT id, email, password_hash, disabled, created_at FROM users WHERE id = sqlc.arg(id);
+SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE id = sqlc.arg(id);
 -- name: LockUserByID :one
-SELECT id, email, password_hash, disabled, created_at FROM users WHERE id = sqlc.arg(id) FOR UPDATE;
+SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE id = sqlc.arg(id) FOR UPDATE;
 -- name: CreateUser :exec
-INSERT INTO users (id,email,password_hash,disabled,created_at) VALUES ($1,$2,$3,0,$4);
+INSERT INTO users (id,email,password_hash,disabled,created_at,role) VALUES ($1,$2,$3,0,$4,$5);
 -- name: ResetPassword :exec
 UPDATE users SET password_hash = $1 WHERE id = $2;
 -- name: DisableUser :exec
 UPDATE users SET disabled = 1 WHERE id = $1;
+-- name: EnableUser :exec
+UPDATE users SET disabled = 0 WHERE id = sqlc.arg(id);
+-- name: SetUserRole :exec
+UPDATE users SET role = sqlc.arg(role) WHERE id = sqlc.arg(id);
+-- name: ListUsers :many
+SELECT id, email, password_hash, disabled, created_at, role FROM users ORDER BY created_at, id LIMIT sqlc.arg(page_size);
+-- name: GetUsersByIDs :many
+SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE strpos(',' || sqlc.arg(ids)::text || ',', ',' || id || ',') > 0;
+-- name: LockUsersForOwnerChange :many
+SELECT id, email, password_hash, disabled, created_at, role FROM users
+WHERE id = sqlc.arg(operator_id) OR id = sqlc.arg(target_id) OR (role = 'owner' AND disabled = 0)
+ORDER BY id FOR UPDATE;
 -- name: CreateSession :exec
 INSERT INTO sessions (id,user_id,expires_at,created_at) VALUES ($1,$2,$3,$4);
 -- name: GetSession :one
@@ -338,3 +350,43 @@ ON CONFLICT (name) DO NOTHING;
 -- name: ReplaceInstanceSecret :execrows
 UPDATE instance_secrets SET value = sqlc.arg(new_value), updated_at = sqlc.arg(updated_at)
 WHERE name = sqlc.arg(name) AND value = sqlc.arg(old_value);
+-- name: CreateInvitation :exec
+INSERT INTO invitations (id,token_hash,email,role,invited_by,created_at,expires_at)
+VALUES (sqlc.arg(id),sqlc.arg(token_hash),sqlc.arg(email),sqlc.arg(role),sqlc.arg(invited_by),sqlc.arg(created_at),sqlc.arg(expires_at));
+-- name: GetInvitationByTokenHash :one
+SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations WHERE token_hash = sqlc.arg(token_hash);
+-- name: LockInvitationByTokenHash :one
+SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations WHERE token_hash = sqlc.arg(token_hash) FOR UPDATE;
+-- name: AcceptInvitation :execrows
+UPDATE invitations SET accepted_at = sqlc.arg(accepted_at), accepted_user_id = sqlc.arg(accepted_user_id)
+WHERE id = sqlc.arg(id) AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > sqlc.arg(now);
+-- name: RevokeInvitation :execrows
+UPDATE invitations SET revoked_at = sqlc.arg(revoked_at)
+WHERE id = sqlc.arg(id) AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > sqlc.arg(now);
+-- name: RevokeEmailInvitations :exec
+UPDATE invitations SET revoked_at = sqlc.arg(revoked_at)
+WHERE email = sqlc.arg(email) AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > sqlc.arg(now);
+-- name: RevokeIssuedInvitations :exec
+UPDATE invitations SET revoked_at = sqlc.arg(revoked_at)
+WHERE invited_by = sqlc.arg(invited_by) AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > sqlc.arg(now);
+-- name: ListActiveInvitations :many
+SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations
+WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > sqlc.arg(now)
+ORDER BY created_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: CreatePasswordReset :exec
+INSERT INTO password_resets (id,token_hash,user_id,created_by,created_at,expires_at)
+VALUES (sqlc.arg(id),sqlc.arg(token_hash),sqlc.arg(user_id),sqlc.arg(created_by),sqlc.arg(created_at),sqlc.arg(expires_at));
+-- name: GetPasswordResetByTokenHash :one
+SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, revoked_at FROM password_resets WHERE token_hash = sqlc.arg(token_hash);
+-- name: LockActivePasswordResets :many
+SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, revoked_at FROM password_resets
+WHERE (user_id = sqlc.arg(user_id) OR created_by = sqlc.arg(created_by)) AND used_at IS NULL AND revoked_at IS NULL AND expires_at > sqlc.arg(now)
+ORDER BY id FOR UPDATE;
+-- name: RevokePasswordReset :exec
+UPDATE password_resets SET revoked_at = sqlc.arg(revoked_at) WHERE id = sqlc.arg(id) AND used_at IS NULL AND revoked_at IS NULL;
+-- name: UsePasswordReset :execrows
+UPDATE password_resets SET used_at = sqlc.arg(used_at) WHERE id = sqlc.arg(id) AND used_at IS NULL AND revoked_at IS NULL;
+-- name: LatestUsedPasswordReset :one
+SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, revoked_at FROM password_resets
+WHERE user_id = sqlc.arg(user_id) AND used_at > sqlc.arg(since)
+ORDER BY used_at DESC, id DESC LIMIT 1;

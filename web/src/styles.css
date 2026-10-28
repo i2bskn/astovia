@@ -413,7 +413,10 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 /* ---------- Tablet ---------- */
 @media (max-width: 1023px) {
   .page { padding: 36px 28px 88px; }
-  /* Five tabs fit next to the open sidebar only without their icons. */
+  /* The tabs (six for owners) fit next to the open sidebar only without
+     their icons and with narrower padding. */
+  .settings-tabs { gap: 0; }
+  .settings-tab { padding: 8px 10px; }
   .settings-tab .icon { display: none; }
 }
 
@@ -423,6 +426,8 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
   .sidebar { display: none; }
   .topbar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; height: calc(56px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 16px 0; background: color-mix(in srgb, var(--bg) 88%, transparent); -webkit-backdrop-filter: saturate(1.4) blur(12px); backdrop-filter: saturate(1.4) blur(12px); border-bottom: 1px solid var(--line); }
   .topbar a { display: block; padding: 6px 0; }
+  .topbar .topbar-account { display: grid; place-items: center; width: 44px; height: 44px; margin: 0 -6px 0 auto; padding: 0; border-radius: 50%; }
+  .topbar .topbar-account[aria-current='page'] .avatar { box-shadow: 0 0 0 2px var(--accent); }
   .tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; grid-template-columns: repeat(4, 1fr); padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); background: color-mix(in srgb, var(--surface) 92%, transparent); -webkit-backdrop-filter: saturate(1.4) blur(12px); backdrop-filter: saturate(1.4) blur(12px); border-top: 1px solid var(--line); }
   .tab-item { position: relative; display: grid; justify-items: center; gap: 2px; min-height: 52px; padding: 6px 4px 4px; border-radius: 12px; color: var(--ink-2); font-size: 11px; font-weight: 600; text-decoration: none; }
   .tab-item .icon { width: 22px; height: 22px; }
@@ -454,6 +459,8 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
   .task-stack .task-actions { margin: 10px 0 0 -2px; }
   .field-grid { grid-template-columns: minmax(0, 1fr); }
   .settings-tabs { display: none; }
+  /* The account screen has no list page on phones, so its two tabs stay. */
+  .settings-tabs.account-tabs { display: flex; }
   .settings-header[data-page] { margin: -8px 0 8px; }
   .settings-header[data-page] h1, .settings-header[data-page] .page-lead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .settings-back { display: inline-flex; align-items: center; gap: 2px; min-height: 44px; margin-left: -6px; padding: 0 10px 0 2px; color: var(--accent-ink); font-size: 15px; font-weight: 600; text-decoration: none; }
@@ -482,3 +489,9 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------- Invitation and password reset links ---------- */
+.link-facts { margin-top: 20px; }
+.gate-card > .notice { margin: 20px 0 0; }
+.reset-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 20px; }
+.reset-notice p { flex: 1 1 18em; min-width: 0; }

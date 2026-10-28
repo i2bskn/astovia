@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-const user = { id: 'test-user', email: 'test-user@example.com' };
+const user = { id: 'test-user', email: 'test-user@example.com', role: 'owner', password_reset: null };
 const session = { access_token: 'test-access-token', expires_in: 600, user };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
 function deferred() {
@@ -257,4 +257,92 @@ test('request failures carry the error code of the JSON body', async () => {
   await auth.login('test-user@example.com', 'test-password');
   await assert.rejects(request('/api/v1/coded'), (error) => error instanceof APIError && error.status === 400 && error.code === 'github_token_invalid');
   await assert.rejects(request('/api/v1/plain'), (error) => error instanceof APIError && error.status === 503 && error.code === null);
+});
+
+test('the user must carry a valid role and password reset notice', async () => {
+  const { isUser } = await harness(async () => json({}, 404));
+  assert.equal(isUser(user), true);
+  assert.equal(isUser({ ...user, role: 'member' }), true);
+  assert.equal(isUser({ ...user, password_reset: { at: '2026-10-23T01:02:03Z', by_email: 'owner@example.com' } }), true);
+  const { role: _role, ...withoutRole } = user;
+  const { password_reset: _notice, ...withoutNotice } = user;
+  for (const bad of [
+    withoutRole,
+    { ...user, role: 'admin' },
+    { ...user, role: 'Owner' },
+    { ...user, role: null },
+    withoutNotice,
+    { ...user, password_reset: {} },
+    { ...user, password_reset: { at: '2026-10-23T01:02:03Z' } },
+    { ...user, password_reset: { at: 1, by_email: 'owner@example.com' } },
+    { ...user, password_reset: 'yes' },
+    { ...user, email: null },
+    null,
+    [],
+  ]) assert.equal(isUser(bad), false, JSON.stringify(bad));
+});
+
+test('a login response without a valid role does not authenticate', async () => {
+  for (const body of [{ ...session, user: { ...user, role: 'admin' } }, { ...session, user: { id: user.id, email: user.email, password_reset: null } }]) {
+    const calls = [];
+    const { auth } = await harness(async (path) => {
+      calls.push(path);
+      if (path === '/auth/login') return json(body);
+      return json(user);
+    });
+    await auth.login('test-user@example.com', 'test-password');
+    assert.notEqual(auth.getSnapshot().status, 'authenticated');
+    assert.deepEqual(calls, ['/auth/login']);
+  }
+});
+
+test('a profile without a valid role is rejected', async () => {
+  const { auth } = await harness(async (path) => {
+    if (path === '/auth/login') return json(session);
+    if (path === '/api/v1/me') return json({ ...user, role: 'superuser' });
+    return json({}, 404);
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  assert.deepEqual(auth.getSnapshot().user, user);
+  assert.ok(auth.getSnapshot().error?.startsWith('アカウント情報を確認できませんでした'), auth.getSnapshot().error);
+});
+
+test('completeLink signs in like login under the same lock and tells other tabs', async () => {
+  const sent = [];
+  const member = { ...user, role: 'member', password_reset: { at: '2026-10-23T01:02:03Z', by_email: 'owner@example.com' } };
+  const { auth, locks, messages } = await harness(async (path, init) => {
+    sent.push([path, init?.body ? JSON.parse(init.body) : null]);
+    if (path === '/auth/password-resets/complete') return json({ ...session, user: member });
+    if (path === '/api/v1/me') return json(member);
+    return json({}, 404);
+  });
+  await auth.completeLink('/auth/password-resets/complete', 'pwr_token', 'new-password-123');
+  assert.equal(auth.getSnapshot().status, 'authenticated');
+  assert.deepEqual(auth.getSnapshot().user, member);
+  assert.deepEqual(sent[0], ['/auth/password-resets/complete', { token: 'pwr_token', password: 'new-password-123' }]);
+  assert.deepEqual(locks, ['astovia-auth']);
+  assert.deepEqual(messages, ['session-changed']);
+});
+
+test('completeLink failures carry the error code and leave the tab signed out', async () => {
+  const { auth, APIError, messages } = await harness(async (path) => {
+    if (path === '/auth/invitations/accept') return json({ error: { code: 'email_taken', message: 'x' } }, 409);
+    return json({}, 404);
+  });
+  await assert.rejects(auth.completeLink('/auth/invitations/accept', 'inv_token', 'new-password-123'),
+    (error) => error instanceof APIError && error.status === 409 && error.code === 'email_taken');
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.equal(auth.getSnapshot().busy, null);
+  assert.deepEqual(messages, []);
+});
+
+test('inspectLink returns the body and throws coded errors without touching the state', async () => {
+  const { auth, inspectLink, APIError } = await harness(async (path, init) => {
+    const body = JSON.parse(init.body);
+    if (path === '/auth/invitations/inspect' && body.token === 'good') return json({ email: 'a@example.com', role: 'member', expires_at: 'x' });
+    return json({ error: { code: 'invitation_invalid', message: 'x' } }, 404);
+  });
+  assert.deepEqual(await inspectLink('/auth/invitations/inspect', 'good'), { email: 'a@example.com', role: 'member', expires_at: 'x' });
+  await assert.rejects(inspectLink('/auth/invitations/inspect', 'bad'), (error) => error instanceof APIError && error.status === 404 && error.code === 'invitation_invalid');
+  assert.equal(auth.getSnapshot().status, 'loading');
 });

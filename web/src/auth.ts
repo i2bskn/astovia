@@ -1,6 +1,30 @@
+export type Role = 'owner' | 'member';
+
+// PasswordResetNotice reports a password reset link the user completed in
+// the last 14 days: when, and the owner that issued the link.
+export interface PasswordResetNotice {
+  at: string;
+  by_email: string;
+}
+
 export interface User {
   id: string;
   email: string;
+  role: Role;
+  password_reset: PasswordResetNotice | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// isUser checks the user of /api/v1/me and of the login responses. A missing
+// or unknown role is rejected like a missing email.
+export function isUser(value: unknown): value is User {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.email !== 'string' ||
+    (value.role !== 'owner' && value.role !== 'member') || !('password_reset' in value)) return false;
+  const notice = value.password_reset;
+  return notice === null || (isRecord(notice) && typeof notice.at === 'string' && typeof notice.by_email === 'string');
 }
 
 interface AuthResponse {
@@ -72,7 +96,7 @@ async function post(path: string, body: object): Promise<Response> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new APIError(response.status);
+  if (!response.ok) throw new APIError(response.status, await errorCode(response));
   return response;
 }
 
@@ -82,9 +106,7 @@ async function readAuth(response: Response): Promise<AuthResponse> {
     typeof data !== 'object' || data === null ||
     !('access_token' in data) || typeof data.access_token !== 'string' || !data.access_token ||
     !('expires_in' in data) || typeof data.expires_in !== 'number' || data.expires_in <= 0 ||
-    !('user' in data) || typeof data.user !== 'object' || data.user === null ||
-    !('id' in data.user) || typeof data.user.id !== 'string' ||
-    !('email' in data.user) || typeof data.user.email !== 'string'
+    !('user' in data) || !isUser(data.user)
   ) throw new Error('Unexpected authentication response');
   return data as AuthResponse;
 }
@@ -171,6 +193,31 @@ export const auth = {
         ? 'メールアドレスまたはパスワードを確認してください。' : connectionMessage(error) });
     }
   },
+  // completeLink accepts an invitation or completes a password reset, which
+  // answer like login, and signs in with the result in the same way as
+  // login. Failures are thrown with their error code for the caller to
+  // describe; the state is then anonymous.
+  async completeLink(path: '/auth/invitations/accept' | '/auth/password-resets/complete', token: string, password: string): Promise<void> {
+    const expected = ++generation;
+    refreshPromise = null;
+    publish({ status: 'anonymous', user: null, busy: 'login', error: null });
+    try {
+      await withAuthLock(async () => {
+        isCurrent(expected);
+        const data = await readAuth(await post(path, { token, password }));
+        accept(data, expected);
+        channel?.postMessage('session-changed');
+      });
+    } catch (error) {
+      if (expected === generation) publish({ status: 'anonymous', user: null, busy: null, error: null });
+      throw error;
+    }
+    await verifyProfile(expected);
+  },
+  // reloadProfile reads /api/v1/me again, for example after the role changed.
+  async reloadProfile(): Promise<void> {
+    await verifyProfile(generation);
+  },
   async logout(): Promise<void> {
     const expected = ++generation;
     refreshPromise = null;
@@ -219,13 +266,19 @@ export async function request<T>(path: `/api/v1/${string}`, init?: RequestInit):
 
 async function verifyProfile(expected: number): Promise<void> {
   try {
-    const user = await request<User>('/api/v1/me');
+    const user = await request<unknown>('/api/v1/me');
     isCurrent(expected);
-    if (typeof user.id !== 'string' || typeof user.email !== 'string') throw new Error('Unexpected user response');
+    if (!isUser(user)) throw new Error('Unexpected user response');
     publish({ ...state, user });
   } catch (error) {
     if (expected !== generation || error instanceof SupersededError) return;
     if (error instanceof APIError && error.status === 401) return;
     publish({ ...state, error: 'アカウント情報を確認できませんでした。接続を確認してページを再読み込みしてください。' });
   }
+}
+
+// inspectLink reads what an invitation or password reset link is for, before
+// signing in. It does not touch the authentication state.
+export async function inspectLink(path: '/auth/invitations/inspect' | '/auth/password-resets/inspect', token: string): Promise<unknown> {
+  return await (await post(path, { token })).json() as unknown;
 }

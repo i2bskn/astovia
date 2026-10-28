@@ -85,6 +85,19 @@ type InstanceSecret struct {
 	UpdatedAt int64
 }
 
+type Invitation struct {
+	ID             string
+	TokenHash      string
+	Email          string
+	Role           string
+	InvitedBy      string
+	CreatedAt      int64
+	ExpiresAt      int64
+	AcceptedAt     sql.NullInt64
+	AcceptedUserID sql.NullString
+	RevokedAt      sql.NullInt64
+}
+
 type Notification struct {
 	ID           string
 	UserID       string
@@ -148,6 +161,17 @@ type OauthToken struct {
 	ExpiresAt int64
 }
 
+type PasswordReset struct {
+	ID        string
+	TokenHash string
+	UserID    string
+	CreatedBy string
+	CreatedAt int64
+	ExpiresAt int64
+	UsedAt    sql.NullInt64
+	RevokedAt sql.NullInt64
+}
+
 type RefreshToken struct {
 	Hash       string
 	SessionID  string
@@ -195,6 +219,7 @@ type User struct {
 	PasswordHash string
 	Disabled     int64
 	CreatedAt    int64
+	Role         string
 }
 
 type WebPushSubscription struct {

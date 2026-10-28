@@ -29,7 +29,7 @@ func newOAuthFixture(t *testing.T, driver string) *oauthFixture {
 	s, dsn := testutil.Database(t, driver)
 	users := map[string]store.User{}
 	for _, name := range []string{"alice", "bob"} {
-		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: "x"}
+		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: "x", Role: store.RoleOwner}
 		if err := s.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}

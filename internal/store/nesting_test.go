@@ -26,7 +26,7 @@ func child(id, parent string, created int64) store.ActionItem {
 func nestingFixture(t *testing.T, driver string) (*store.Store, string) {
 	t.Helper()
 	s, dsn := testutil.Database(t, driver)
-	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: "x"}} {
+	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: "x", Role: store.RoleOwner}} {
 		if err := s.CreateUser(context.Background(), u); err != nil {
 			t.Fatal(err)
 		}

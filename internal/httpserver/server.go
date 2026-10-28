@@ -35,6 +35,9 @@ type Server struct {
 	auth    *auth.Service
 	assets  fs.FS
 	limiter *loginLimiter
+	// accountLimiter limits the public invitation and password reset
+	// endpoints together, per peer like limiter.
+	accountLimiter *loginLimiter
 	// registerLimiter limits OAuth client registrations and cimdLimiter
 	// metadata document fetches, per peer like limiter.
 	registerLimiter *loginLimiter
@@ -54,10 +57,19 @@ type Server struct {
 	pushTestLimiter *loginLimiter
 }
 
-// userResponse is the public representation of a user.
+// userResponse is the public representation of the signed-in user.
+// PasswordReset reports a password reset link the user completed recently,
+// so that a reset the user did not ask for is noticed; it is null otherwise.
 type userResponse struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
+	ID            string                 `json:"id"`
+	Email         string                 `json:"email"`
+	Role          string                 `json:"role"`
+	PasswordReset *passwordResetResponse `json:"password_reset"`
+}
+
+type passwordResetResponse struct {
+	At      string `json:"at"`
+	ByEmail string `json:"by_email"`
 }
 
 // authResponse is returned by login and refresh.
@@ -67,8 +79,21 @@ type authResponse struct {
 	User        userResponse `json:"user"`
 }
 
-func toUserResponse(u store.User) userResponse {
-	return userResponse{ID: u.ID, Email: u.Email}
+// toUserResponse builds the user of /api/v1/me and the login responses. The
+// password reset notice is read with a separate query; a failure is logged
+// and reported as null so that a login or refresh, whose refresh token has
+// already been rotated, still returns its new cookie.
+func (s *Server) toUserResponse(ctx context.Context, u store.User) userResponse {
+	out := userResponse{ID: u.ID, Email: u.Email, Role: u.Role}
+	notice, err := s.auth.Store.LatestResetNotice(ctx, u.ID, s.auth.Now().Unix())
+	if err != nil {
+		log.Printf("auth: password reset notice user=%s: %v", u.ID, err)
+		return out
+	}
+	if notice != nil {
+		out.PasswordReset = &passwordResetResponse{At: formatTime(notice.At), ByEmail: notice.ByEmail}
+	}
+	return out
 }
 
 // New returns the application handler.
@@ -88,7 +113,7 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
 		st = a.Store
 	}
 	box := secretbox.New(c.Secret)
-	return &Server{cfg: c, auth: a, assets: assets, limiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
+	return &Server{cfg: c, auth: a, assets: assets, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
@@ -108,10 +133,26 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/auth/login", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogin))))
 	mux.Handle("/auth/refresh", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleRefresh))))
 	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))
+	// The invitation and password reset links are used before signing in.
+	// They share accountLimiter.
+	mux.Handle("/auth/invitations/inspect", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleInspectInvitation))))
+	mux.Handle("/auth/invitations/accept", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleAcceptInvitation))))
+	mux.Handle("/auth/password-resets/inspect", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleInspectPasswordReset))))
+	mux.Handle("/auth/password-resets/complete", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleCompletePasswordReset))))
 	// Every /api/v1/* route must be wrapped with either requireUser (access
 	// JWT only) or requireUserOrAPIToken (access JWT or API token). Routes that
-	// manage credentials or the account use requireUser.
+	// manage credentials or the account use requireUser. The user management
+	// routes use requireOwner, which is requireUser plus the owner role.
 	mux.Handle("/api/v1/me", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleMe))))
+	mux.Handle("/api/v1/users", allow(http.MethodGet, s.requireOwner(http.HandlerFunc(s.handleListUsers))))
+	mux.Handle("/api/v1/users/{id}", allow(http.MethodPatch, s.requireOwner(requireJSON(http.HandlerFunc(s.handlePatchUser)))))
+	// The password reset link takes no body, so no content type is required.
+	mux.Handle("/api/v1/users/{id}/password-resets", allow(http.MethodPost, s.requireOwner(http.HandlerFunc(s.handleCreatePasswordReset))))
+	mux.Handle("/api/v1/invitations", allowMethods(map[string]http.Handler{
+		http.MethodGet:  s.requireOwner(http.HandlerFunc(s.handleListInvitations)),
+		http.MethodPost: s.requireOwner(requireJSON(http.HandlerFunc(s.handleCreateInvitation))),
+	}))
+	mux.Handle("/api/v1/invitations/{id}", allow(http.MethodDelete, s.requireOwner(http.HandlerFunc(s.handleDeleteInvitation))))
 	mux.Handle("/api/v1/action-items", allowMethods(map[string]http.Handler{
 		http.MethodGet:  s.requireUserOrAPIToken(http.HandlerFunc(s.handleListActionItems)),
 		http.MethodPost: s.requireUserOrAPIToken(requireJSON(http.HandlerFunc(s.handleCreateActionItem))),
@@ -329,7 +370,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		s.authError(w, r, store.ErrUnauthorized)
 		return
 	}
-	writeJSON(w, 200, toUserResponse(u))
+	writeJSON(w, 200, s.toUserResponse(r.Context(), u))
 }
 
 // decode reads a single JSON object of at most limit bytes into out.
@@ -384,7 +425,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.authError(w, r, err)
 		return
 	}
-	s.writeAuthResult(w, result)
+	s.writeAuthResult(w, r, result)
 }
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var empty struct{}
@@ -396,7 +437,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		s.authError(w, r, err)
 		return
 	}
-	s.writeAuthResult(w, result)
+	s.writeAuthResult(w, r, result)
 }
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	var empty struct{}
@@ -416,9 +457,10 @@ func refreshCookie(r *http.Request) string {
 	}
 	return ""
 }
-func (s *Server) writeAuthResult(w http.ResponseWriter, result auth.Result) {
+func (s *Server) writeAuthResult(w http.ResponseWriter, r *http.Request, result auth.Result) {
+	user := s.toUserResponse(r.Context(), result.User)
 	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: result.Refresh, Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(result.ExpiresAt, 0), MaxAge: result.MaxAge})
-	writeJSON(w, 200, authResponse{AccessToken: result.AccessToken, ExpiresIn: result.ExpiresIn, User: toUserResponse(result.User)})
+	writeJSON(w, 200, authResponse{AccessToken: result.AccessToken, ExpiresIn: result.ExpiresIn, User: user})
 }
 func (s *Server) clearCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(0, 0), MaxAge: -1})
@@ -482,19 +524,23 @@ func readOnly(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // screenPath reports whether p is a screen of the web UI: /, /candidates,
-// /auto, /settings, /settings/<page>, /tasks/<id> or /consent, optionally
-// with a trailing slash.
+// /auto, /settings, /settings/<page>, /tasks/<id>, /consent, /invite or
+// /reset-password, optionally with a trailing slash. The tokens of /invite
+// and /reset-password are in the URL fragment, which never reaches here.
 func screenPath(p string) bool {
 	if p == "/" {
 		return true
 	}
 	p = strings.TrimSuffix(p, "/")
 	switch p {
-	case "/candidates", "/auto", "/settings", "/consent":
+	case "/candidates", "/auto", "/settings", "/account", "/consent", "/invite", "/reset-password":
 		return true
 	}
 	if id, ok := strings.CutPrefix(p, "/tasks/"); ok {
 		return itemIDPattern.MatchString(id)
+	}
+	if page, ok := strings.CutPrefix(p, "/account/"); ok {
+		return pageName.MatchString(page)
 	}
 	page, ok := strings.CutPrefix(p, "/settings/")
 	return ok && pageName.MatchString(page)

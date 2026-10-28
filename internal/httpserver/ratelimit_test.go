@@ -139,7 +139,7 @@ func TestLoginRateLimitIgnoresForwardedFor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}); err != nil {
+	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, Role: store.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")

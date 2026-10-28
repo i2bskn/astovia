@@ -21,7 +21,7 @@ func TestActionItems(t *testing.T) {
 func testActionItems(t *testing.T, driver string) {
 	ctx := context.Background()
 	s, _ := testutil.Database(t, driver)
-	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: "x"}} {
+	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: "x", Role: store.RoleOwner}} {
 		if err := s.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -116,7 +116,7 @@ func TestActionItemPaging(t *testing.T) {
 func testActionItemPaging(t *testing.T, driver string) {
 	ctx := context.Background()
 	s, _ := testutil.Database(t, driver)
-	if err := s.CreateUser(ctx, store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}); err != nil {
+	if err := s.CreateUser(ctx, store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
 	created := map[string]map[string]bool{"": {}, "open": {}, "done": {}}
@@ -179,7 +179,7 @@ func TestCandidateSweep(t *testing.T) {
 func testCandidateSweep(t *testing.T, driver string) {
 	ctx := context.Background()
 	s, _ := testutil.Database(t, driver)
-	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: "x"}, {ID: "carol-id", Email: "carol@example.com", PasswordHash: "x"}} {
+	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: "x", Role: store.RoleOwner}, {ID: "carol-id", Email: "carol@example.com", PasswordHash: "x", Role: store.RoleOwner}} {
 		if err := s.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}

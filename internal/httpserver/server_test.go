@@ -52,7 +52,7 @@ func testHTTP(t *testing.T, driver string) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}); e != nil {
+	if e = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, Role: store.RoleOwner}); e != nil {
 		t.Fatal(e)
 	}
 	a, e := auth.New(s, make([]byte, 32), "https://astovia.test")
@@ -100,8 +100,11 @@ func testHTTP(t *testing.T, driver string) {
 	if !reflect.DeepEqual(keys, []string{"access_token", "expires_in", "user"}) {
 		t.Fatalf("login keys: %v", keys)
 	}
-	if _, keys = jsonKeys(t, body["user"]); !reflect.DeepEqual(keys, []string{"email", "id"}) {
+	if _, keys = jsonKeys(t, body["user"]); !reflect.DeepEqual(keys, []string{"email", "id", "password_reset", "role"}) {
 		t.Fatalf("login user keys: %v", keys)
+	}
+	if result.User.Role != "owner" || result.User.PasswordReset != nil {
+		t.Fatalf("login user: %+v", result.User)
 	}
 	if strings.Contains(w.Body.String(), hash) || strings.Contains(w.Body.String(), "password_hash") {
 		t.Fatal("private hash serialized")
@@ -119,8 +122,11 @@ func testHTTP(t *testing.T, driver string) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "alice-id") || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if _, keys = jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"email", "id"}) {
+	if _, keys = jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"email", "id", "password_reset", "role"}) {
 		t.Fatalf("me keys: %v", keys)
+	}
+	if !strings.Contains(w.Body.String(), `"role":"owner"`) || !strings.Contains(w.Body.String(), `"password_reset":null`) {
+		t.Fatalf("me: %s", w.Body.String())
 	}
 	w = request("POST", "/auth/refresh", "{}", "https://astovia.test", "application/json", cookie, "")
 	if w.Code != 200 {
@@ -128,6 +134,9 @@ func testHTTP(t *testing.T, driver string) {
 	}
 	if e = json.Unmarshal(w.Body.Bytes(), &result); e != nil {
 		t.Fatal(e)
+	}
+	if result.User.Role != "owner" || result.User.ID != "alice-id" || !strings.Contains(w.Body.String(), `"password_reset":null`) {
+		t.Fatalf("refresh user: %s", w.Body.String())
 	}
 	w = request("POST", "/auth/logout", "{}", "https://astovia.test", "application/json", cookie, "")
 	if w.Code != 204 || w.Result().Cookies()[0].MaxAge != -1 {
@@ -137,13 +146,13 @@ func testHTTP(t *testing.T, driver string) {
 	if w.Code != 401 {
 		t.Fatal("logout did not revoke access")
 	}
-	for _, p := range []string{"/api/nope", "/api/v1/unknown", "/integrations/nope", "/assets/missing.js", "/missing.css", "/index.html", "/foo", "/settings/foo/bar"} {
+	for _, p := range []string{"/api/nope", "/api/v1/unknown", "/integrations/nope", "/assets/missing.js", "/missing.css", "/index.html", "/foo", "/settings/foo/bar", "/account/users/x", "/account/Users", "/accounts", "/invite/x", "/reset-password/x", "/invites"} {
 		w = request("GET", p, "", "", "", "", "")
 		if w.Code != 404 || strings.Contains(w.Body.String(), "<html>") {
 			t.Fatalf("fallback escaped: %s %d", p, w.Code)
 		}
 	}
-	for _, p := range []string{"/", "/candidates", "/auto", "/settings/foo", "/consent"} {
+	for _, p := range []string{"/", "/candidates", "/auto", "/settings/foo", "/account", "/account/users", "/consent", "/invite", "/invite/", "/reset-password", "/reset-password/"} {
 		w = request("GET", p, "", "", "", "", "")
 		if w.Code != 200 || !strings.Contains(w.Body.String(), "<html>") {
 			t.Fatal(p, w.Code)
@@ -274,7 +283,7 @@ func TestCanonicalPublicURLAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}); err != nil {
+	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, Role: store.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := auth.New(s, cfg.Secret, cfg.PublicURL)
@@ -368,7 +377,7 @@ func TestAuthEndpointInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}); err != nil {
+	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, Role: store.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
 	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")

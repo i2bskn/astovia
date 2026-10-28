@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useId, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from 'react-router';
 import { aiStatus, createAIClient } from './ai';
 import AISettings from './AISettings';
-import { auth, request } from './auth';
+import { request } from './auth';
 import APITokenList from './APITokenList';
 import { createAPITokensClient } from './apiTokens';
 import ConnectionList from './ConnectionList';
 import GitHubSettings from './GitHubSettings';
-import { BellIcon, ChevronLeftIcon, ChevronRightIcon, PlugIcon, SourceIcon, SparkleIcon, UserIcon } from './icons';
+import { BellIcon, ChevronLeftIcon, ChevronRightIcon, PlugIcon, SourceIcon, SparkleIcon } from './icons';
 import { createIntegrationsClient } from './integrations';
 import NotificationSettings from './NotificationSettings';
 import { createOAuthClient } from './oauth';
@@ -26,7 +26,6 @@ const pageIcons: Record<SettingsPage, () => React.JSX.Element> = {
   ai: () => <SparkleIcon />,
   notifications: () => <BellIcon />,
   'ai-clients': () => <PlugIcon />,
-  account: () => <UserIcon />,
 };
 
 const phoneQuery = '(max-width: 767px)';
@@ -41,22 +40,9 @@ function usePhone(): boolean {
   return useSyncExternalStore(subscribePhone, useCallback(() => window.matchMedia?.(phoneQuery).matches ?? false, []));
 }
 
-function AccountSettings({ email }: { email: string }) {
-  const state = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
-  const headingID = useId();
-  return <section className="action-panel settings-panel" id="account" aria-labelledby={headingID}>
-    <h2 id={headingID}>アカウント</h2>
-    <div className="account-row">
-      <span className="avatar large" aria-hidden="true">{email.slice(0, 1).toUpperCase()}</span>
-      <p className="account-row-email"><span className="sr-only">ログイン中: </span>{email}</p>
-      <button className="button secondary" type="button" disabled={state.busy === 'logout'} onClick={() => { void auth.logout(); }}>{state.busy === 'logout' ? 'ログアウト中…' : 'ログアウト'}</button>
-    </div>
-  </section>;
-}
-
 // SettingsIndex lists the pages on phones, with the state of each so that
 // what needs attention is visible before opening it.
-function SettingsIndex({ email }: { email: string }) {
+function SettingsIndex() {
   const [status, setStatus] = useState<Partial<Record<SettingsPage, string>>>({});
 
   useEffect(() => {
@@ -81,7 +67,7 @@ function SettingsIndex({ email }: { email: string }) {
         <span className="settings-link-icon">{pageIcons[p.value]()}</span>
         <span className="settings-link-body">
           <span className="settings-link-label">{p.label}</span>
-          <span className="settings-link-status">{p.value === 'account' ? email : status[p.value] ?? p.summary}</span>
+          <span className="settings-link-status">{status[p.value] ?? p.summary}</span>
         </span>
         <ChevronRightIcon />
       </Link>
@@ -91,7 +77,8 @@ function SettingsIndex({ email }: { email: string }) {
 
 // Settings has a page per errand. Wider screens switch pages with tabs and
 // open on the first one; phones open on a list and each page links back.
-export default function Settings({ email }: { email: string }) {
+// The account pages moved to /account; their old URLs lead there.
+export default function Settings() {
   const location = useLocation();
   const page = settingsPageAt(location.pathname);
   const phone = usePhone();
@@ -106,12 +93,13 @@ export default function Settings({ email }: { email: string }) {
       {settingsPages.map((p) => <NavLink key={p.value} className="settings-tab" to={`/settings/${p.path}`}>{pageIcons[p.value]()}{p.label}</NavLink>)}
     </nav>
     <Routes>
-      <Route index element={phone ? <SettingsIndex email={email} /> : <Navigate to="/settings/integrations" replace />} />
+      <Route index element={phone ? <SettingsIndex /> : <Navigate to="/settings/integrations" replace />} />
       <Route path="integrations" element={<div className="settings-stack"><GitHubSettings /><SlackSettings /></div>} />
       <Route path="ai" element={<AISettings />} />
       <Route path="notifications" element={<NotificationSettings />} />
       <Route path="ai-clients" element={<div className="settings-stack"><ConnectionList /><APITokenList /></div>} />
-      <Route path="account" element={<AccountSettings email={email} />} />
+      <Route path="account" element={<Navigate to="/account" replace />} />
+      <Route path="users" element={<Navigate to="/account/users" replace />} />
       <Route path="*" element={<Navigate to="/settings" replace />} />
     </Routes>
   </>;

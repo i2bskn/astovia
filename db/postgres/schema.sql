@@ -13,6 +13,7 @@ CREATE TABLE "users" (
   "password_hash" text NOT NULL,
   "disabled" bigint NOT NULL,
   "created_at" bigint NOT NULL,
+  "role" text NOT NULL DEFAULT 'owner',
   PRIMARY KEY ("id")
 );
 -- Create index "users_email_key" to table: "users"
@@ -113,6 +114,28 @@ CREATE TABLE "github_connections" (
 );
 -- Create index "github_connections_status_next_poll_idx" to table: "github_connections"
 CREATE INDEX "github_connections_status_next_poll_idx" ON "github_connections" ("status", "next_poll_at");
+-- Create "invitations" table
+CREATE TABLE "invitations" (
+  "id" text NOT NULL,
+  "token_hash" text NOT NULL,
+  "email" text NOT NULL,
+  "role" text NOT NULL,
+  "invited_by" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL,
+  "accepted_at" bigint NULL,
+  "accepted_user_id" text NULL,
+  "revoked_at" bigint NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "invitations_accepted_user_id_fk" FOREIGN KEY ("accepted_user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION,
+  CONSTRAINT "invitations_invited_by_fk" FOREIGN KEY ("invited_by") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
+);
+-- Create index "invitations_created_at_idx" to table: "invitations"
+CREATE INDEX "invitations_created_at_idx" ON "invitations" ("created_at");
+-- Create index "invitations_email_idx" to table: "invitations"
+CREATE INDEX "invitations_email_idx" ON "invitations" ("email");
+-- Create index "invitations_token_hash_key" to table: "invitations"
+CREATE UNIQUE INDEX "invitations_token_hash_key" ON "invitations" ("token_hash");
 -- Create "notification_settings" table
 CREATE TABLE "notification_settings" (
   "user_id" text NOT NULL,
@@ -204,6 +227,24 @@ CREATE TABLE "oauth_tokens" (
 CREATE INDEX "oauth_tokens_grant_idx" ON "oauth_tokens" ("grant_id");
 -- Create index "oauth_tokens_user_expires_idx" to table: "oauth_tokens"
 CREATE INDEX "oauth_tokens_user_expires_idx" ON "oauth_tokens" ("user_id", "expires_at");
+-- Create "password_resets" table
+CREATE TABLE "password_resets" (
+  "id" text NOT NULL,
+  "token_hash" text NOT NULL,
+  "user_id" text NOT NULL,
+  "created_by" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL,
+  "used_at" bigint NULL,
+  "revoked_at" bigint NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "password_resets_created_by_fk" FOREIGN KEY ("created_by") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION,
+  CONSTRAINT "password_resets_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
+);
+-- Create index "password_resets_token_hash_key" to table: "password_resets"
+CREATE UNIQUE INDEX "password_resets_token_hash_key" ON "password_resets" ("token_hash");
+-- Create index "password_resets_user_id_idx" to table: "password_resets"
+CREATE INDEX "password_resets_user_id_idx" ON "password_resets" ("user_id");
 -- Create "sessions" table
 CREATE TABLE "sessions" (
   "id" text NOT NULL,

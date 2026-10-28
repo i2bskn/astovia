@@ -54,7 +54,7 @@ Docker Composeが動き、80番と443番のポートを外部から受け付け�
    docker compose run --rm migrate
    ```
 
-4. 初期ユーザーを作成します。パスワードは画面に表示されない対話入力で設定します。
+4. 初期ユーザー（オーナー）を作成します。パスワードは画面に表示されない対話入力で設定します。2人目以降は、画面の「アカウント → ユーザー管理」（サイドバー下のメールアドレス、スマホは右上のアイコンから開きます）から招待できます。
 
    ```sh
    docker compose run --rm app users create --email you@example.com
@@ -66,7 +66,7 @@ Docker Composeが動き、80番と443番のポートを外部から受け付け�
    docker compose up -d
    ```
 
-DBは名前付きボリューム`astovia-data`に保存します。ユーザーの追加・パスワード再設定・無効化は`docker compose run --rm app users ...`で行います（「ユーザーを管理する」を参照）。Caddyを経由するため、ログインのレート制限はCaddyのIPにまとめて数えられます（「認証と運用上の制約」を参照）。
+DBは名前付きボリューム`astovia-data`に保存します。ユーザーの招待・パスワード再設定リンクの発行・無効化は画面の「アカウント → ユーザー管理」で、画面が使えないときは`docker compose run --rm app users ...`で行います（「ユーザーを管理する」を参照）。Caddyを経由するため、ログインのレート制限はCaddyのIPにまとめて数えられます（「認証と運用上の制約」を参照）。
 
 #### バックアップと復元（VPS）
 
@@ -151,7 +151,7 @@ Lightsailのコンテナサービスのようなコンテナの実行環境と�
 
 この`.env`は本番DBの認証情報を含みます。使い終えたら削除するか、パーミッション600のまま保管してください。
 
-初期ユーザーは手元のDockerから作成します。接続URLはシェルの環境変数に設定し、`-e ASTOVIA_DB_DSN`の形で渡します（コマンドラインに直接書かないでください）。
+初期ユーザー（オーナー）は手元のDockerから作成します。2人目以降は画面から招待できます。接続URLはシェルの環境変数に設定し、`-e ASTOVIA_DB_DSN`の形で渡します（コマンドラインに直接書かないでください）。
 
 ```sh
 docker run --rm -it -e ASTOVIA_DB_DRIVER=postgres -e ASTOVIA_DB_DSN ghcr.io/i2bskn/astovia:X.Y.Z users create --email you@example.com
@@ -244,7 +244,7 @@ docker compose -f compose.test.yaml run --rm atlas schema apply --url 'sqlite://
 make user-create USER_EMAIL=alice@example.com
 ```
 
-ログインIDはメールアドレスです。パスワードは画面に表示されない対話入力で設定します。`USER_EMAIL`はmakeのコマンドライン引数で指定してください。シェルの環境変数として設定した`USER_EMAIL`は使用せず、未指定時と同じく何も実行せずに失敗します。make経由で使える文字は英数字と`._%+@-`だけで、`@`を含まない値や3〜254文字に収まらない値も実行前に拒否します。それ以外の記号を含むアドレスは`astovia users ... --email`を直接使ってください。形式の検証はCLIが行います。
+ログインIDはメールアドレスです。作成したユーザーはオーナーになります。パスワードは画面に表示されない対話入力で設定します。`USER_EMAIL`はmakeのコマンドライン引数で指定してください。シェルの環境変数として設定した`USER_EMAIL`は使用せず、未指定時と同じく何も実行せずに失敗します。make経由で使える文字は英数字と`._%+@-`だけで、`@`を含まない値や3〜254文字に収まらない値も実行前に拒否します。それ以外の記号を含むアドレスは`astovia users ... --email`を直接使ってください。形式の検証はCLIが行います。
 
 ログインIDをメールアドレスに変更する前に作成したSQLiteのDBは、`users`表の列が異なるため起動時のスキーマ確認で失敗します。開発中のデータしか無い場合は、DBファイルを削除して`make migrate`で作り直し、`make user-create USER_EMAIL=...`でユーザーを作り直してください。自動移行は用意していません。旧DBに対して`make migrate`を実行すると、`username`列の削除と`email`列の追加の計画が表示されます。データが残らないため承認せず、DBファイルを作り直してください。
 
@@ -335,7 +335,25 @@ atlas schema apply --url "$ASTOVIA_DB_DSN" --to file://db/postgres/schema.hcl --
 
 ## ユーザーを管理する
 
-公開登録画面とメールによる復旧機能はありません。選択したDBにアクセスできる運用者が、初期ユーザーと追加ユーザーを作成します。
+ユーザーの権限はオーナー（`owner`）とメンバー（`member`）の2種類です。タスク・連携（GitHub・Slack・AI）・通知などのデータはユーザーごとに別で、オーナーも通常の画面では他のユーザーのタスクを見られません。ただし、オーナーはパスワード再設定リンクを発行し、それを自分で開けばそのユーザーとしてログインできます。オーナーは完全に信頼された立場として扱ってください。公開の新規登録画面とメールの送信はありません。
+
+### 画面で管理する（オーナー）
+
+オーナーは「アカウント → ユーザー管理」で次の操作ができます（メンバーにはこの画面は表示されず、APIも403で拒否します）。
+
+- 招待: メールアドレスと権限を決めて招待リンク（`/invite#…`）を作ります。リンクは7日間有効で、表示は作成時の1回だけです。コピーして本人に渡してください。リンクを開いた人がパスワードを決めるとアカウントができ、そのままログインします。同じメールアドレスへ招待し直すと、前の招待リンクは使えなくなります。既にユーザーがいるメールアドレス（無効化中を含む）は招待できません。
+- 有効な招待の一覧と取り消し。
+- 権限の変更（オーナーにする／メンバーにする）。データは消えません。メンバーにしたユーザーのログインは続き、次の操作からユーザー管理が使えなくなります。そのユーザーが発行した有効な招待とパスワード再設定リンクは取り消します。
+- 無効化と再開。無効化は次のCLIの`disable`と同じものを削除し、そのユーザーが発行した招待と再設定リンク、そのユーザー宛ての再設定リンクも取り消します。タスクと通知の設定は残ります。再開しても削除したものは戻りません（以前のパスワードでログインできます）。
+- パスワード再設定リンク（`/reset-password#…`）の発行。リンクは24時間有効で、表示は発行時の1回だけです。発行し直すと、そのユーザーの前のリンクは使えなくなります。再設定は次のCLIの`reset-password`と同じものを削除し、他の端末からはログアウトされます。リンクで再設定したユーザーの画面には、日時と発行したオーナーのメールアドレスを14日間表示します（表示するのは直近の1件だけです。閉じるとそのブラウザでは表示しません）。
+
+有効なオーナーが常に1人以上いるように、最後の有効なオーナーをメンバーにする操作は拒否します。オーナーは自分自身を無効化できません。他にオーナーがいれば、自分をメンバーにすることはできます。
+
+リンクのトークンはURLのフラグメント（`#`以降）に置くため、サーバーのアクセスログや`Referer`には出ません。画面は読み取った直後にURLから取り除きます。DBにはトークンのハッシュだけを保存します。リンクを受け取った人以外に見せないでください。
+
+### CLIで管理する
+
+選択したDBにアクセスできる運用者は、CLIでも操作できます。初期ユーザーの作成と、画面が使えないときの復旧に使います。
 
 Dockerで起動している場合は、同じCompose構成で操作します。現在のソースから`go run`で実行するため、イメージの再ビルドは不要です。
 
@@ -343,19 +361,23 @@ Dockerで起動している場合は、同じCompose構成で操作します。�
 make user-create USER_EMAIL=alice@example.com
 make user-reset-password USER_EMAIL=alice@example.com
 make user-disable USER_EMAIL=alice@example.com
+make user-enable USER_EMAIL=alice@example.com
 ```
 
 ネイティブバイナリでは次のように実行します。
 
 ```sh
-./bin/astovia users create --email alice@example.com
+./bin/astovia users create --email alice@example.com [--role owner|member]
 ./bin/astovia users reset-password --email alice@example.com
 ./bin/astovia users disable --email alice@example.com
+./bin/astovia users enable --email alice@example.com
 ```
+
+`users create`はオーナーを作成します。メンバーにするときは`--role member`を指定します（`--role`は`create`だけが受け付けます）。`users enable`は無効化したユーザーを再開し（`--password-stdin`は受け付けません）、無効化で削除したものは戻りません。CLIの`disable`には最後のオーナーの規則を適用しません（運用者の最終手段のため）。CLIで最後のオーナーを無効化すると、画面からユーザー管理ができなくなります。その場合は`users create`で新しいオーナーを作るか、`users enable`で再開して戻してください。
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）、未送信の通知をすべて削除します。ユーザー無効化はGitHub連携とSlack連携も削除します（パスワード再設定では残します。「GitHub連携と通知」「Slack連携」を参照）。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです（画面の招待・再設定も同じです）。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）、未送信の通知をすべて削除し、そのユーザーが発行した招待と再設定リンク、そのユーザー宛ての再設定リンクを取り消します。ユーザー無効化はGitHub連携とSlack連携も削除します（パスワード再設定では残します。「GitHub連携と通知」「Slack連携」を参照）。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## 認証と運用上の制約
 
@@ -364,11 +386,12 @@ make user-disable USER_EMAIL=alice@example.com
 - 使用済みRefresh Tokenを再利用すると、そのセッションを失効させます。対応ブラウザではWeb Locksでタブ間の認証操作を直列化します。Web Locksがない環境では、同時操作によって再ログインが必要になる場合があります。
 - 非公開APIへのリクエストごとに、DB上のユーザーとセッションが有効か確認します。ログアウト、パスワード再設定、ユーザー無効化、再利用検出の後は、発行済みJWTも次の検証から拒否します。実行中のリクエストを遡って取り消すことはできません。
 - ブラウザ向け認証POSTは、設定されたOriginとの完全一致、`application/json`、JSONオブジェクトを必須とします。RefreshとLogoutの本文は`{}`です。コマンドラインからのリクエストも、Originがなければ拒否します。Refresh失敗時にはCookieを消さず、遅れて返った失敗応答が新しいCookieを削除することを防ぎます。
+- 招待とパスワード再設定リンクの4つの公開API（確認・受諾・完了）は、ログインとは別に、4つ合わせて接続元IPごとに1分間で10回までです。数え方はログインと同じです。
 - ログインは接続元IPごとに1分間で10回までです。IPv6は`/64`単位でまとめて数え、IPv4を埋め込んだIPv6はIPv4として扱います。記録件数に上限（4096件）のあるプロセス内テーブルを使用し、転送ヘッダーは信頼しません。上限に達した場合は新しい接続元を拒否せず、制限中でない最も古い記録（すべて制限中なら最も古い記録）を削除して受け付けます。このため、上限を超える数の接続元を用意できる攻撃者に対しては、毎分の総試行回数に上限がなくなります。実質的な上限はbcrypt（コスト12）のCPU負荷で、パスワードは12バイト以上を必須としています。全利用者がログインできなくなる事態を避けることを優先しています。リバースプロキシ配下の利用者はプロキシのIPにまとめて制限され、複数インスタンス間では制限を共有しません。利用範囲を広げる際は、手前のプロキシ等にも適切なレート制限を設定してください。
 - リバースプロキシを使用する場合は、`ASTOVIA_PUBLIC_URL`にHTTPSのOriginを設定します。パス、認証情報、クエリ、フラグメントは指定できません。プロキシでTLSを終端し、バックエンドへの直接接続を制限してください。HTTPの公開URLはループバック開発用途だけに限ります。
 - ホスト名はASCIIのDNS名か明示的なIPアドレスを使用します。国際化ドメイン名はpunycodeで指定してください。数値ホストの省略表記、スコープ付きIPv6、IPv4を埋め込んだIPv6は拒否します。DNS名の大文字・小文字、標準ポート、ポートの数値表記、IPv6の表記は設定読込時に正規化し、Origin検証とJWT issuerで共用します。以前の正規化されていないissuerで発行したトークンは再ログインが必要です。正規化済みの設定には影響しません。
 
-Web画面は`/`（タスク）、`/candidates`（タスク候補）、`/auto`（自動で処理したもの）、`/settings`（設定）、`/tasks/{id}`（タスクの詳細）で開きます。以前の版の`/admin/`以下のURL（ブックマークや送信待ちの通知を含む）は、対応する新しいURLへリダイレクトします。Web画面で役割管理、共有Inbox、他ユーザーの非公開情報へのアクセス権が付くことはありません。本番での動かし方は「本番で動かす」を参照してください。
+Web画面は`/`（タスク）、`/candidates`（タスク候補）、`/auto`（自動で処理したもの）、`/settings`（設定）、`/account`（アカウント。オーナーには`/account/users`のユーザー管理もあります）、`/tasks/{id}`（タスクの詳細）で開きます。以前の`/settings/account`と`/settings/users`は`/account`と`/account/users`に移ります。招待リンクは`/invite`、パスワード再設定リンクは`/reset-password`で開きます。以前の版の`/admin/`以下のURL（ブックマークや送信待ちの通知を含む）は、対応する新しいURLへリダイレクトします。権限はオーナーとメンバーの2種類だけで、共有Inboxや、通常の画面で他ユーザーの非公開情報を見る権限はありません（オーナーによるパスワード再設定リンクの扱いは「ユーザーを管理する」を参照）。本番での動かし方は「本番で動かす」を参照してください。
 
 ## APIトークン
 
@@ -580,14 +603,24 @@ GitHubのメンションとSlackの発言を読んで、自分がやることが
 
 | URL | 動作 |
 | --- | --- |
-| `GET /`、`/candidates`、`/auto`、`/settings`、`/settings/<page>`、`/tasks/<id>`、`/consent` | 埋め込みWeb画面（`index.html`） |
+| `GET /`、`/candidates`、`/auto`、`/settings`、`/settings/<page>`、`/account`、`/account/<page>`、`/tasks/<id>`、`/consent`、`/invite`、`/reset-password` | 埋め込みWeb画面（`index.html`） |
 | `GET /assets/*`、`/favicon.ico`等 | 埋め込みWeb画面の静的ファイル（`/sw.js`、`/manifest.webmanifest`を含む）。存在しないファイルは404 |
 | `GET /admin/*` | 以前の版のURL。対応する新しいURLへ308でリダイレクト（不明なものは`/`へ）。`/admin/oauth/authorize`は`/consent`へ。`/admin/sw.js`は古い登録の更新用に`/sw.js`と同じ内容を返す |
 | `GET /healthz` | プロセスの稼働確認のみ。非公開情報は返さない |
 | `POST /auth/login` | 本文は`{ "email": "alice@example.com", "password": "…" }` |
 | `POST /auth/refresh` | Cookieのトークンを更新。本文は`{}` |
 | `POST /auth/logout` | セッション失効とCookie削除。本文は`{}` |
-| `GET /api/v1/me` | 本人の`{id, email}`。Bearer Access JWTが必要 |
+| `POST /auth/invitations/inspect` | 本文`{token}`で招待の`{email, role, expires_at}`を返す。無効・期限切れ・受諾済み・取り消し済み・存在しない招待は区別せず404`invitation_invalid` |
+| `POST /auth/invitations/accept` | 本文`{token, password}`でユーザーを作成し、Loginと同じ応答とCookieを返す。同じメールアドレスのユーザーがいれば409`email_taken`、パスワードが12〜72バイトでなければ400。リクエストに付いてきた既存のRefresh Cookieのセッションは失効させる。作成後のログインだけに失敗した場合は503（ログイン画面からログインできる） |
+| `POST /auth/password-resets/inspect` | 本文`{token}`で再設定の`{email}`を返す。無効・期限切れ・使用済み・取り消し済みのリンクと、無効化されたユーザーのリンクは区別せず404`reset_invalid` |
+| `POST /auth/password-resets/complete` | 本文`{token, password}`でパスワードを再設定し、Loginと同じ応答とCookieを返す。既存のRefresh Cookieの扱いと503はacceptと同じ |
+| `GET /api/v1/me` | 本人の`{id, email, role, password_reset}`。Bearer Access JWTが必要 |
+| `GET /api/v1/users` | ユーザーの一覧`{users: [{id, email, role, disabled, created_at}]}`（作成日時の古い順、1000件まで）。オーナーのAccess JWTが必要（メンバーは403`forbidden`、APIトークンは401。以下のユーザー管理APIも同じ） |
+| `PATCH /api/v1/users/{id}` | 本文`{role}`か`{disabled}`のどちらか1つで変更し、変更後のユーザーを返す。今と同じ値なら何もせず200。最後の有効なオーナーをメンバーにすると409`last_owner`、自分の無効化は409`self`、存在しないユーザーは404 |
+| `POST /api/v1/users/{id}/password-resets` | パスワード再設定リンクを発行し201`{url, expires_at}`を返す（本文なし）。`url`は一度だけ返す。無効化されたユーザーは409`user_disabled` |
+| `GET /api/v1/invitations` | 有効な招待の一覧`{invitations: [{id, email, role, created_at, expires_at, invited_by_email}]}`（新しい順、200件まで） |
+| `POST /api/v1/invitations` | 本文`{email, role}`で招待を作成し201`{id, email, role, created_at, expires_at, url}`を返す。`url`は一度だけ返す。同じメールアドレスのユーザーがいれば（無効化中も含め）409`email_taken` |
+| `DELETE /api/v1/invitations/{id}` | 有効な招待を取り消し204を返す。無い・既に無効な招待は404 |
 | `GET /api/v1/action-items` | 本人の対応事項の一覧。クエリは`status`（`open`／`candidate`／`done`／`dismissed`）、`limit`（1〜100、既定50）、`cursor`、`auto`（`true`のみ。自動で処理したもの（自動で完了・対象外にしたもの）だけを処理の新しい順に返す。カーソルは`auto`の有無で別物で、混ぜると400）、`parent_id`（その親の子タスクを作成日時の古い順に100件まで返す。ページングはなく、他のクエリと併用すると400。存在しない・他のユーザーの親は空の一覧）、`view`（`top`のみ。親を持たない対応事項と、親と違う状態の子タスクだけを返す。`status`を省略した場合は親を持たない対応事項だけ。並びとカーソルは`view`なしと同じで、`auto`・`parent_id`と併用すると400）。`{items, next_cursor}`を返す |
 | `POST /api/v1/action-items` | 対応事項を作成し201と`Location`を返す。本文は`{content, status?, note?, due_at?, refs?, parent_id?}` |
 | `GET /api/v1/action-items/{id}` | 本人の対応事項を1件返す |
@@ -624,7 +657,7 @@ GitHubのメンションとSlackの発言を読んで、自分がやることが
 | `POST /oauth/token` | トークン発行（`authorization_code`／`refresh_token`）。`application/x-www-form-urlencoded`、64KiB以内 |
 | `POST /mcp` | MCP（Streamable HTTP、ステートレス）。OAuthのアクセストークンかAPIトークンが必要 |
 
-LoginとRefreshは`{access_token, expires_in, user: {id, email}}`を返します。
+LoginとRefresh（と招待の受諾・パスワード再設定の完了）は`{access_token, expires_in, user: {id, email, role, password_reset}}`を返します。`role`は`owner`か`member`、`password_reset`は直近14日以内にパスワード再設定リンクで再設定していれば最新の1件の`{at, by_email}`（発行したオーナーのメールアドレス）、なければ`null`です。
 
 対応事項は`{id, content, status, note, due_at, refs, version, created_at, updated_at, source, auto, kind, event, parent_id, parent, children}`で（`parent_id`は親タスクのidか`null`、`parent`は親タスクの`{id, content, status}`か`null`、`children`は子タスクがあれば`{total, done, remaining, next_due_at}`（`total`は対象外を除いた子の数、`remaining`は未完了とタスク候補の数、`next_due_at`は未完了とタスク候補の子の一番近い期限か`null`）、なければ`null`。`status`は`open`／`candidate`（AIが見つけた未確定のタスク候補）／`done`／`dismissed`。`source`は連携が作ったものなら`"github"`か`"slack"`、それ以外は`null`。`auto`は自動で完了・対象外にしたものなら`{reason, ref_url, at}`、それ以外は`null`。`kind`は`"task"`か`"event"`（予定タスク）で、`event`は予定タスクなら`{title, start_at, end_at}`（`end_at`は終了時刻がなければ`null`）、それ以外は`null`。`kind`と`event`は作成・更新の本文では受け付けません。MCPの応答も同じ形です）、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, conversation_name?, message_id?, url?}`の配列（10件まで、`url`はhttp／https。`conversation_name`は`#general`のような表示用の会話名で、画面ではアカウント名の代わりに表示します）、`parent_id`は自分の対応事項で親を持たないもののid（入れ子は2段までで、子を持つ対応事項には付けられません。違反は400）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。`status`を変更すると（REST・MCPとも）、その対応事項は連携による自動完了・再オープンの対象から外れ、`auto`は`null`に戻ります。ただし`candidate`と`open`の間の変更（タスク候補をタスクにする、その取り消し）では、Slackの返信による自動完了の対象のままです。開始時刻を過ぎた予定タスクを完了・対象外から`open`か`candidate`に戻すと、`kind`は`"task"`になります。エラーは`{error: {code, message}}`です（`/oauth/*`の処理内で返すエラーだけは、OAuthの形式`{error, error_description}`です）。認証・非公開API・MCP・`/oauth/*`の応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
 

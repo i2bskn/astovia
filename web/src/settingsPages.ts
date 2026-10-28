@@ -3,7 +3,7 @@ import type { GitHubState, PushDevice, SlackState } from './integrations';
 import type { Connection } from './oauth';
 
 // Pages of Settings, one per errand. path is relative to /settings.
-export type SettingsPage = 'integrations' | 'ai' | 'notifications' | 'ai-clients' | 'account';
+export type SettingsPage = 'integrations' | 'ai' | 'notifications' | 'ai-clients';
 
 // summary describes the page in the phone list until its status is loaded.
 export const settingsPages: readonly { value: SettingsPage; label: string; path: string; summary: string }[] = [
@@ -11,8 +11,39 @@ export const settingsPages: readonly { value: SettingsPage; label: string; path:
   { value: 'ai', label: 'AI', path: 'ai', summary: 'タスクを判断する AI のキーとモデル' },
   { value: 'notifications', label: '通知', path: 'notifications', summary: '受け取る端末と通知のタイミング' },
   { value: 'ai-clients', label: 'AI クライアント', path: 'ai-clients', summary: '接続のしかたと API トークン' },
-  { value: 'account', label: 'アカウント', path: 'account', summary: 'ログイン中のアカウントとログアウト' },
 ];
+
+// Pages of the account screen: the signed-in account and, for owners, the
+// users of this Astovia. path is relative to /account.
+export type AccountPage = 'account' | 'users';
+
+export const accountPages: readonly { value: AccountPage; label: string; path: string }[] = [
+  { value: 'account', label: 'アカウント', path: '' },
+  { value: 'users', label: 'ユーザー管理', path: 'users' },
+];
+
+// visibleAccountPages returns the account pages of a user with role. The
+// server refuses the user management APIs to members as well; hiding the
+// page only keeps members from a page they cannot use.
+export function visibleAccountPages(role: 'owner' | 'member'): typeof accountPages {
+  return role === 'owner' ? accountPages : accountPages.filter((p) => p.value !== 'users');
+}
+
+// accountPageAt returns the account page a pathname shows, or null for
+// other screens.
+export function accountPageAt(pathname: string): AccountPage | null {
+  const match = /^\/account(?:\/([^/]+))?\/?$/.exec(pathname);
+  if (!match) return null;
+  return accountPages.find((p) => p.path === (match[1] ?? ''))?.value ?? null;
+}
+
+// legacyAccountPath returns where an old Settings URL of the account pages
+// moved, or null.
+export function legacyAccountPath(pathname: string): string | null {
+  const match = /^\/settings\/(account|users)\/?$/.exec(pathname);
+  if (!match) return null;
+  return match[1] === 'users' ? '/account/users' : '/account';
+}
 
 // settingsPageAt returns the page a pathname
 // shows, or null for /settings itself and other screens.

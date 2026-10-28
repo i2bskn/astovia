@@ -21,7 +21,7 @@ func apiTokenFixture(t *testing.T, driver string) (*store.Store, map[string]stor
 	s, _ := testutil.Database(t, driver)
 	users := map[string]store.User{}
 	for _, name := range []string{"alice", "bob"} {
-		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: "x"}
+		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: "x", Role: store.RoleOwner}
 		if err := s.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -152,7 +152,7 @@ func TestAPITokenDisabledUser(t *testing.T) {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
 			s, dsn := testutil.Database(t, driver)
-			if err := s.CreateUser(ctx, store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}); err != nil {
+			if err := s.CreateUser(ctx, store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.Login(ctx, store.User{ID: "alice-id", PasswordHash: "x"}, store.Session{ID: "sid", UserID: "alice-id", ExpiresAt: tokenTestNow + 60, CreatedAt: tokenTestNow}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: tokenTestNow}); err != nil {

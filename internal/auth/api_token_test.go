@@ -66,7 +66,7 @@ func TestAuthenticateAPIToken(t *testing.T) {
 	}
 	now := time.Unix(1_800_000_000, 0)
 	a.Now = func() time.Time { return now }
-	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}
+	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}
 	if err = s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}

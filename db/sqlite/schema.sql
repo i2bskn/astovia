@@ -5,6 +5,7 @@ CREATE TABLE "users" (
   "password_hash" text NOT NULL,
   "disabled" integer NOT NULL,
   "created_at" integer NOT NULL,
+  "role" text NOT NULL DEFAULT 'owner',
   PRIMARY KEY ("id")
 );
 -- Create index "users_email_key" to table: "users"
@@ -274,3 +275,43 @@ CREATE TABLE "instance_secrets" (
   "updated_at" integer NOT NULL,
   PRIMARY KEY ("name")
 );
+-- Create "invitations" table
+CREATE TABLE "invitations" (
+  "id" text NOT NULL,
+  "token_hash" text NOT NULL,
+  "email" text NOT NULL,
+  "role" text NOT NULL,
+  "invited_by" text NOT NULL,
+  "created_at" integer NOT NULL,
+  "expires_at" integer NOT NULL,
+  "accepted_at" integer NULL,
+  "accepted_user_id" text NULL,
+  "revoked_at" integer NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "invitations_invited_by_fk" FOREIGN KEY ("invited_by") REFERENCES "users" ("id"),
+  CONSTRAINT "invitations_accepted_user_id_fk" FOREIGN KEY ("accepted_user_id") REFERENCES "users" ("id")
+);
+-- Create index "invitations_token_hash_key" to table: "invitations"
+CREATE UNIQUE INDEX "invitations_token_hash_key" ON "invitations" ("token_hash");
+-- Create index "invitations_email_idx" to table: "invitations"
+CREATE INDEX "invitations_email_idx" ON "invitations" ("email");
+-- Create index "invitations_created_at_idx" to table: "invitations"
+CREATE INDEX "invitations_created_at_idx" ON "invitations" ("created_at");
+-- Create "password_resets" table
+CREATE TABLE "password_resets" (
+  "id" text NOT NULL,
+  "token_hash" text NOT NULL,
+  "user_id" text NOT NULL,
+  "created_by" text NOT NULL,
+  "created_at" integer NOT NULL,
+  "expires_at" integer NOT NULL,
+  "used_at" integer NULL,
+  "revoked_at" integer NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "password_resets_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id"),
+  CONSTRAINT "password_resets_created_by_fk" FOREIGN KEY ("created_by") REFERENCES "users" ("id")
+);
+-- Create index "password_resets_token_hash_key" to table: "password_resets"
+CREATE UNIQUE INDEX "password_resets_token_hash_key" ON "password_resets" ("token_hash");
+-- Create index "password_resets_user_id_idx" to table: "password_resets"
+CREATE INDEX "password_resets_user_id_idx" ON "password_resets" ("user_id");

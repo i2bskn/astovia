@@ -1,15 +1,34 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { clientsStatus, devicesStatus, githubStatus, integrationsStatus, settingsPageAt, settingsPages, slackStatus } from '../.test-build/settingsPages.js';
+import { accountPageAt, accountPages, clientsStatus, devicesStatus, githubStatus, integrationsStatus, legacyAccountPath, settingsPageAt, settingsPages, slackStatus, visibleAccountPages } from '../.test-build/settingsPages.js';
 
-test('settings has five pages under /settings', () => {
-  assert.deepEqual(settingsPages.map((p) => p.path), ['integrations', 'ai', 'notifications', 'ai-clients', 'account']);
+test('settings has four pages under /settings', () => {
+  assert.deepEqual(settingsPages.map((p) => p.path), ['integrations', 'ai', 'notifications', 'ai-clients']);
   assert.equal(settingsPageAt('/settings/ai'), 'ai');
   assert.equal(settingsPageAt('/settings/notifications'), 'notifications');
   assert.equal(settingsPageAt('/settings/ai-clients/'), 'ai-clients');
   assert.equal(settingsPageAt('/settings'), null);
   assert.equal(settingsPageAt('/settings/unknown'), null);
+  assert.equal(settingsPageAt('/settings/account'), null);
   assert.equal(settingsPageAt('/auto'), null);
+});
+
+test('the account screen has its own pages under /account', () => {
+  assert.deepEqual(accountPages.map((p) => p.path), ['', 'users']);
+  assert.equal(accountPageAt('/account'), 'account');
+  assert.equal(accountPageAt('/account/'), 'account');
+  assert.equal(accountPageAt('/account/users'), 'users');
+  assert.equal(accountPageAt('/account/users/'), 'users');
+  assert.equal(accountPageAt('/account/unknown'), null);
+  assert.equal(accountPageAt('/accounts'), null);
+  assert.equal(accountPageAt('/settings/account'), null);
+});
+
+test('the old account URLs under /settings lead to /account', () => {
+  assert.equal(legacyAccountPath('/settings/account'), '/account');
+  assert.equal(legacyAccountPath('/settings/account/'), '/account');
+  assert.equal(legacyAccountPath('/settings/users'), '/account/users');
+  assert.equal(legacyAccountPath('/settings/ai'), null);
 });
 
 const github = { connected: true, login: 'octo', token_last4: '1234', scopes: ['repo'], immediate_notify: true, status: 'active', last_error: null, last_synced_at: null, created_at: '2026-10-01T00:00:00Z' };
@@ -36,4 +55,10 @@ test('the integrations page sums up GitHub and Slack', () => {
   assert.equal(integrationsStatus(github, { ...slack, status: 'error' }), 'Slack（Acme）の接続を確認してください');
   assert.equal(integrationsStatus(undefined, slack), 'Slack（Acme）と連携中');
   assert.equal(integrationsStatus(undefined, undefined), undefined);
+});
+
+test('the user management page is shown to owners only', () => {
+  assert.deepEqual(visibleAccountPages('owner').map((p) => p.value), ['account', 'users']);
+  assert.deepEqual(visibleAccountPages('member').map((p) => p.value), ['account']);
+  assert.equal(accountPages.find((p) => p.value === 'users').label, 'ユーザー管理');
 });

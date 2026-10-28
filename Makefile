@@ -2,7 +2,7 @@
 COMPOSE_TEST := docker compose -f compose.test.yaml
 WEB_SOURCES := $(shell find web/src web/public -type f) web/index.html web/package.json web/pnpm-lock.yaml web/tsconfig.json web/vite.config.ts
 
-.PHONY: help env migrate up stop logs user-create user-reset-password user-disable test-web frontend test-go test check generate postgres build check-user-email
+.PHONY: help env migrate up stop logs user-create user-reset-password user-disable user-enable test-web frontend test-go test check generate postgres build check-user-email
 
 help: ## Show this list
 	@awk 'BEGIN { FS = ":.*## " } /^[A-Za-z0-9_.\/-]+:.*## / { printf "  %-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -67,6 +67,9 @@ user-reset-password: check-user-email ## Reset a user's password (make user-rese
 
 user-disable: check-user-email ## Disable a user (make user-disable USER_EMAIL=alice@example.com)
 	docker compose run --rm app go run ./cmd/astovia users disable --email '$(USER_EMAIL)'
+
+user-enable: check-user-email ## Enable a disabled user again (make user-enable USER_EMAIL=alice@example.com)
+	docker compose run --rm app go run ./cmd/astovia users enable --email '$(USER_EMAIL)'
 
 web/dist/index.html: $(WEB_SOURCES) ## Build the embedded UI only when its sources changed
 	$(COMPOSE_TEST) run --rm node sh -c 'corepack pnpm install --frozen-lockfile && corepack pnpm build'

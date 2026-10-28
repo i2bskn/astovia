@@ -39,7 +39,7 @@ func main() {
 func run(args []string) error {
 	users := len(args) > 0 && args[0] == "users"
 	if !users && len(args) > 0 && (len(args) != 1 || args[0] != "serve") {
-		return errors.New("usage: astovia [serve | users create/reset-password/disable --email ADDRESS [--password-stdin]]")
+		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable --email ADDRESS [--password-stdin] [--role owner|member]]")
 	}
 	c, e := config.Load(!users)
 	if e != nil {
@@ -149,27 +149,40 @@ func waitWorkers(wg *sync.WaitGroup, deadline time.Time) {
 }
 func account(ctx context.Context, s *store.Store, args []string, in io.Reader) error {
 	if len(args) < 1 {
-		return errors.New("users command requires create, reset-password, or disable")
+		return errors.New("users command requires create, reset-password, disable, or enable")
 	}
 	op := args[0]
-	if op != "create" && op != "reset-password" && op != "disable" {
+	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" {
 		return errors.New("unknown users command")
 	}
 	f := flag.NewFlagSet(op, flag.ContinueOnError)
 	email := f.String("email", "", "email address")
 	stdin := f.Bool("password-stdin", false, "read password from stdin")
+	role := f.String("role", store.RoleOwner, "role of the new user (owner or member)")
 	if e := f.Parse(args[1:]); e != nil {
 		return e
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected arguments")
 	}
+	roleSet := false
+	f.Visit(func(fl *flag.Flag) { roleSet = roleSet || fl.Name == "role" })
+	if op != "create" && roleSet {
+		return errors.New(op + " does not accept --role")
+	}
+	if !store.ValidRole(*role) {
+		return errors.New("role must be owner or member")
+	}
 	u, e := auth.Email(*email)
 	if e != nil {
 		return e
 	}
 	hash := ""
-	if op != "disable" {
+	if op == "disable" || op == "enable" {
+		if *stdin {
+			return errors.New(op + " does not accept --password-stdin")
+		}
+	} else {
 		p, e := readPassword(in, *stdin)
 		if e != nil {
 			return e
@@ -178,22 +191,31 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		if e != nil {
 			return e
 		}
-	} else if *stdin {
-		return errors.New("disable does not accept --password-stdin")
 	}
-	if op == "create" {
+	switch op {
+	case "create":
 		id, e := auth.Random()
 		if e != nil {
 			return e
 		}
-		e = s.CreateUser(ctx, store.User{ID: id, Email: u, PasswordHash: hash, CreatedAt: time.Now().Unix()})
+		e = s.CreateUser(ctx, store.User{ID: id, Email: u, PasswordHash: hash, CreatedAt: time.Now().Unix(), Role: *role})
 		if e != nil {
 			if errors.Is(e, store.ErrConflict) {
 				return e
 			}
 			return errors.New("could not create user")
 		}
-	} else {
+	case "enable":
+		e = s.EnableUser(ctx, u)
+		if e != nil {
+			if errors.Is(e, store.ErrNotFound) {
+				return e
+			}
+			return errors.New("could not update user")
+		}
+	default:
+		// The CLI does not apply the last-owner rule of the user management
+		// API: it is the operator's last resort.
 		e = s.ChangeUser(ctx, u, hash, op == "disable", time.Now().Unix())
 		if e != nil {
 			if errors.Is(e, store.ErrNotFound) {

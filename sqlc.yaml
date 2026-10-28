@@ -140,6 +140,26 @@ sql:
             go_type:
               import: database/sql
               type: NullString
+          - column: invitations.accepted_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: invitations.accepted_user_id
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: invitations.revoked_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: password_resets.used_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: password_resets.revoked_at
+            go_type:
+              import: database/sql
+              type: NullInt64
   - engine: postgresql
     schema: db/postgres/schema.sql
     queries: db/postgres/queries.sql

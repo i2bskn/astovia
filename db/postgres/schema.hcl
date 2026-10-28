@@ -21,6 +21,11 @@ table "users" {
     type = bigint
     null = false
   }
+  column "role" {
+    type    = text
+    null    = false
+    default = "owner"
+  }
   primary_key {
     columns = [column.id]
   }
@@ -854,5 +859,122 @@ table "instance_secrets" {
   }
   primary_key {
     columns = [column.name]
+  }
+}
+table "invitations" {
+  schema = schema.public
+  column "id" {
+    type = text
+    null = false
+  }
+  column "token_hash" {
+    type = text
+    null = false
+  }
+  column "email" {
+    type = text
+    null = false
+  }
+  column "role" {
+    type = text
+    null = false
+  }
+  column "invited_by" {
+    type = text
+    null = false
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "expires_at" {
+    type = bigint
+    null = false
+  }
+  column "accepted_at" {
+    type = bigint
+    null = true
+  }
+  column "accepted_user_id" {
+    type = text
+    null = true
+  }
+  column "revoked_at" {
+    type = bigint
+    null = true
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "invitations_invited_by_fk" {
+    columns = [column.invited_by]
+    ref_columns = [table.users.column.id]
+  }
+  foreign_key "invitations_accepted_user_id_fk" {
+    columns = [column.accepted_user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "invitations_token_hash_key" {
+    unique  = true
+    columns = [column.token_hash]
+  }
+  index "invitations_email_idx" {
+    columns = [column.email]
+  }
+  index "invitations_created_at_idx" {
+    columns = [column.created_at]
+  }
+}
+table "password_resets" {
+  schema = schema.public
+  column "id" {
+    type = text
+    null = false
+  }
+  column "token_hash" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "created_by" {
+    type = text
+    null = false
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "expires_at" {
+    type = bigint
+    null = false
+  }
+  column "used_at" {
+    type = bigint
+    null = true
+  }
+  column "revoked_at" {
+    type = bigint
+    null = true
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "password_resets_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  foreign_key "password_resets_created_by_fk" {
+    columns = [column.created_by]
+    ref_columns = [table.users.column.id]
+  }
+  index "password_resets_token_hash_key" {
+    unique  = true
+    columns = [column.token_hash]
+  }
+  index "password_resets_user_id_idx" {
+    columns = [column.user_id]
   }
 }

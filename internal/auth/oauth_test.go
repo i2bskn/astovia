@@ -60,7 +60,7 @@ func TestAuthenticateOAuthAccess(t *testing.T) {
 		return a
 	}
 	a := service("https://astovia.test")
-	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}
+	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}

@@ -194,7 +194,7 @@ func newSyncTest(t *testing.T, driver string, immediate bool) *syncTest {
 	ctx := context.Background()
 	s, _ := testutil.Database(t, driver)
 	st := &syncTest{t: t, s: s, now: time.Date(2026, 10, 24, 1, 0, 0, 0, time.UTC)}
-	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x"}
+	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}

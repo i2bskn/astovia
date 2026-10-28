@@ -90,11 +90,18 @@ func TestUsersCommand(t *testing.T) {
 				{"disable with password-stdin", []string{"disable", "--email", "alice@example.com", "--password-stdin"}, "disable does not accept --password-stdin"},
 				{"extra arguments", []string{"create", "--email", "alice@example.com", "extra"}, "unexpected arguments"},
 				{"unknown subcommand", []string{"rename", "--email", "alice@example.com"}, "unknown users command"},
-				{"no subcommand", nil, "users command requires create, reset-password, or disable"},
+				{"no subcommand", nil, "users command requires create, reset-password, disable, or enable"},
 				{"username flag", []string{"create", "--username", "alice@example.com", "--password-stdin"}, "flag provided but not defined: -username"},
 				{"invalid email on create", []string{"create", "--email", "alice", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
 				{"invalid email on reset-password", []string{"reset-password", "--email", "alice@", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
 				{"invalid email on disable", []string{"disable", "--email", "alice@@example.com"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"enable with password-stdin", []string{"enable", "--email", "alice@example.com", "--password-stdin"}, "enable does not accept --password-stdin"},
+				{"invalid email on enable", []string{"enable", "--email", "alice"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"invalid role", []string{"create", "--email", "bob@example.com", "--password-stdin", "--role", "admin"}, "role must be owner or member"},
+				{"empty role", []string{"create", "--email", "bob@example.com", "--password-stdin", "--role="}, "role must be owner or member"},
+				{"role on reset-password", []string{"reset-password", "--email", "alice@example.com", "--password-stdin", "--role", "member"}, "reset-password does not accept --role"},
+				{"role on disable", []string{"disable", "--email", "alice@example.com", "--role", "owner"}, "disable does not accept --role"},
+				{"role on enable", []string{"enable", "--email", "alice@example.com", "--role", "owner"}, "enable does not accept --role"},
 			} {
 				if err = call("correct-password-123\n", tc.args...); err == nil || err.Error() != tc.want {
 					t.Fatalf("%s: got %v, want %q", tc.name, err, tc.want)
@@ -120,6 +127,38 @@ func TestUsersCommand(t *testing.T) {
 			if err = login("replacement-password-123"); !errors.Is(err, store.ErrUnauthorized) {
 				t.Fatalf("login after disable: %v", err)
 			}
+			// enable lets the user sign in again with the same password.
+			if err = call("", "enable", "--email", "missing@example.com"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("enable a missing user: %v", err)
+			}
+			for i := 0; i < 2; i++ {
+				if err = call("", "enable", "--email", "Alice@example.com"); err != nil {
+					t.Fatalf("enable: %v", err)
+				}
+			}
+			if err = login("replacement-password-123"); err != nil {
+				t.Fatalf("login after enable: %v", err)
+			}
+
+			// create makes owners unless --role says otherwise.
+			for _, tc := range []struct {
+				email, role string
+				args        []string
+			}{
+				{"alice@example.com", store.RoleOwner, nil},
+				{"bob@example.com", store.RoleMember, []string{"--role", "member"}},
+				{"carol@example.com", store.RoleOwner, []string{"--role=owner"}},
+			} {
+				if tc.email != "alice@example.com" {
+					if err = call("correct-password-123\n", append([]string{"create", "--email", tc.email, "--password-stdin"}, tc.args...)...); err != nil {
+						t.Fatalf("create %s: %v", tc.email, err)
+					}
+				}
+				u, err := s.UserByEmail(ctx, tc.email)
+				if err != nil || u.Role != tc.role {
+					t.Fatalf("%s: %+v %v", tc.email, u, err)
+				}
+			}
 		})
 	}
 }
@@ -129,7 +168,7 @@ func TestUsersCommand(t *testing.T) {
 func TestRunUsage(t *testing.T) {
 	for _, args := range [][]string{{"serve", "x"}, {"foo"}} {
 		err := run(args)
-		if err == nil || !strings.HasPrefix(err.Error(), "usage: astovia") {
+		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable --email ADDRESS [--password-stdin] [--role owner|member]]" {
 			t.Fatalf("%q: got %v", args, err)
 		}
 	}

@@ -100,6 +100,46 @@ func IsAPIToken(v string) bool {
 	return len(v) == len(apiTokenPrefix)+43 && strings.HasPrefix(v, apiTokenPrefix) && validToken(v[len(apiTokenPrefix):])
 }
 
+// Prefixes of the invitation and password reset tokens. They differ from
+// the "ast_" API tokens and the "aso_" OAuth tokens, so that a link token
+// presented as a bearer token is never taken for one of them.
+const (
+	invitationTokenPrefix    = "inv_"
+	passwordResetTokenPrefix = "pwr_"
+)
+
+// NewInvitationToken returns a new invitation token and the hash stored for
+// it.
+func NewInvitationToken() (raw, hash string, err error) {
+	return newPrefixed(invitationTokenPrefix)
+}
+
+// NewPasswordResetToken returns a new password reset token and the hash
+// stored for it.
+func NewPasswordResetToken() (raw, hash string, err error) {
+	return newPrefixed(passwordResetTokenPrefix)
+}
+
+// InvitationTokenHash returns the hash to look up an invitation token, or
+// false when v does not have the form of a token from NewInvitationToken.
+// Malformed values are rejected before hashing.
+func InvitationTokenHash(v string) (string, bool) {
+	if !isPrefixed(v, invitationTokenPrefix) {
+		return "", false
+	}
+	return Hash(v), true
+}
+
+// PasswordResetTokenHash returns the hash to look up a password reset token,
+// or false when v does not have the form of a token from
+// NewPasswordResetToken.
+func PasswordResetTokenHash(v string) (string, bool) {
+	if !isPrefixed(v, passwordResetTokenPrefix) {
+		return "", false
+	}
+	return Hash(v), true
+}
+
 type claims struct {
 	Use       string `json:"use"`
 	SessionID string `json:"sid"`
@@ -151,6 +191,14 @@ func (s *Service) Login(ctx context.Context, email, password string) (Result, er
 	if e != nil || check != nil || u.Disabled != 0 {
 		return Result{}, store.ErrUnauthorized
 	}
+	return s.LoginUser(ctx, u)
+}
+
+// LoginUser starts a session for u without a password, after the caller
+// has verified the user another way: accepting an invitation or completing
+// a password reset. u must be the stored user, including its current
+// password hash; the store rejects a disabled user or a changed hash.
+func (s *Service) LoginUser(ctx context.Context, u store.User) (Result, error) {
 	sid, e := Random()
 	if e != nil {
 		return Result{}, e

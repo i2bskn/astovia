@@ -10,6 +10,31 @@ import (
 	"database/sql"
 )
 
+const acceptInvitation = `-- name: AcceptInvitation :execrows
+UPDATE invitations SET accepted_at = $1, accepted_user_id = $2
+WHERE id = $3 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > $4
+`
+
+type AcceptInvitationParams struct {
+	AcceptedAt     sql.NullInt64
+	AcceptedUserID sql.NullString
+	ID             string
+	Now            int64
+}
+
+func (q *Queries) AcceptInvitation(ctx context.Context, arg AcceptInvitationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, acceptInvitation,
+		arg.AcceptedAt,
+		arg.AcceptedUserID,
+		arg.ID,
+		arg.Now,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const consumeRefresh = `-- name: ConsumeRefresh :execrows
 UPDATE refresh_tokens SET consumed_at = $1 WHERE hash = $2 AND consumed_at IS NULL
 `
@@ -363,6 +388,34 @@ func (q *Queries) CreateInstanceSecret(ctx context.Context, arg CreateInstanceSe
 	return result.RowsAffected()
 }
 
+const createInvitation = `-- name: CreateInvitation :exec
+INSERT INTO invitations (id,token_hash,email,role,invited_by,created_at,expires_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+`
+
+type CreateInvitationParams struct {
+	ID        string
+	TokenHash string
+	Email     string
+	Role      string
+	InvitedBy string
+	CreatedAt int64
+	ExpiresAt int64
+}
+
+func (q *Queries) CreateInvitation(ctx context.Context, arg CreateInvitationParams) error {
+	_, err := q.db.ExecContext(ctx, createInvitation,
+		arg.ID,
+		arg.TokenHash,
+		arg.Email,
+		arg.Role,
+		arg.InvitedBy,
+		arg.CreatedAt,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
 const createNotificationSettingsIfMissing = `-- name: CreateNotificationSettingsIfMissing :exec
 INSERT INTO notification_settings (user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days)
 VALUES ($1,$2,$3,$4,$5,$6)
@@ -480,6 +533,32 @@ func (q *Queries) CreateOAuthToken(ctx context.Context, arg CreateOAuthTokenPara
 		arg.Kind,
 		arg.GrantID,
 		arg.UserID,
+		arg.CreatedAt,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
+const createPasswordReset = `-- name: CreatePasswordReset :exec
+INSERT INTO password_resets (id,token_hash,user_id,created_by,created_at,expires_at)
+VALUES ($1,$2,$3,$4,$5,$6)
+`
+
+type CreatePasswordResetParams struct {
+	ID        string
+	TokenHash string
+	UserID    string
+	CreatedBy string
+	CreatedAt int64
+	ExpiresAt int64
+}
+
+func (q *Queries) CreatePasswordReset(ctx context.Context, arg CreatePasswordResetParams) error {
+	_, err := q.db.ExecContext(ctx, createPasswordReset,
+		arg.ID,
+		arg.TokenHash,
+		arg.UserID,
+		arg.CreatedBy,
 		arg.CreatedAt,
 		arg.ExpiresAt,
 	)
@@ -611,7 +690,7 @@ func (q *Queries) CreateSlackConnection(ctx context.Context, arg CreateSlackConn
 }
 
 const createUser = `-- name: CreateUser :exec
-INSERT INTO users (id,email,password_hash,disabled,created_at) VALUES ($1,$2,$3,0,$4)
+INSERT INTO users (id,email,password_hash,disabled,created_at,role) VALUES ($1,$2,$3,0,$4,$5)
 `
 
 type CreateUserParams struct {
@@ -619,6 +698,7 @@ type CreateUserParams struct {
 	Email        string
 	PasswordHash string
 	CreatedAt    int64
+	Role         string
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
@@ -627,6 +707,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
 		arg.Email,
 		arg.PasswordHash,
 		arg.CreatedAt,
+		arg.Role,
 	)
 	return err
 }
@@ -882,6 +963,15 @@ UPDATE users SET disabled = 1 WHERE id = $1
 
 func (q *Queries) DisableUser(ctx context.Context, id string) error {
 	_, err := q.db.ExecContext(ctx, disableUser, id)
+	return err
+}
+
+const enableUser = `-- name: EnableUser :exec
+UPDATE users SET disabled = 0 WHERE id = $1
+`
+
+func (q *Queries) EnableUser(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, enableUser, id)
 	return err
 }
 
@@ -1246,6 +1336,28 @@ func (q *Queries) GetInstanceSecret(ctx context.Context, name string) (InstanceS
 	return i, err
 }
 
+const getInvitationByTokenHash = `-- name: GetInvitationByTokenHash :one
+SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations WHERE token_hash = $1
+`
+
+func (q *Queries) GetInvitationByTokenHash(ctx context.Context, tokenHash string) (Invitation, error) {
+	row := q.db.QueryRowContext(ctx, getInvitationByTokenHash, tokenHash)
+	var i Invitation
+	err := row.Scan(
+		&i.ID,
+		&i.TokenHash,
+		&i.Email,
+		&i.Role,
+		&i.InvitedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.AcceptedAt,
+		&i.AcceptedUserID,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const getNotificationSettings = `-- name: GetNotificationSettings :one
 SELECT user_id, timezone, digest_hour, stale_days, updated_at, candidate_expire_days FROM notification_settings
 WHERE user_id = $1
@@ -1364,6 +1476,26 @@ func (q *Queries) GetOAuthTokenByHash(ctx context.Context, tokenHash string) (Oa
 	return i, err
 }
 
+const getPasswordResetByTokenHash = `-- name: GetPasswordResetByTokenHash :one
+SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, revoked_at FROM password_resets WHERE token_hash = $1
+`
+
+func (q *Queries) GetPasswordResetByTokenHash(ctx context.Context, tokenHash string) (PasswordReset, error) {
+	row := q.db.QueryRowContext(ctx, getPasswordResetByTokenHash, tokenHash)
+	var i PasswordReset
+	err := row.Scan(
+		&i.ID,
+		&i.TokenHash,
+		&i.UserID,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.UsedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const getRefresh = `-- name: GetRefresh :one
 SELECT hash, session_id, consumed_at, created_at FROM refresh_tokens WHERE hash = $1
 `
@@ -1434,7 +1566,7 @@ func (q *Queries) GetSlackConnection(ctx context.Context, userID string) (SlackC
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, disabled, created_at FROM users WHERE email = $1
+SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -1446,12 +1578,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.PasswordHash,
 		&i.Disabled,
 		&i.CreatedAt,
+		&i.Role,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, password_hash, disabled, created_at FROM users WHERE id = $1
+SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -1463,8 +1596,43 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 		&i.PasswordHash,
 		&i.Disabled,
 		&i.CreatedAt,
+		&i.Role,
 	)
 	return i, err
+}
+
+const getUsersByIDs = `-- name: GetUsersByIDs :many
+SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE strpos(',' || $1::text || ',', ',' || id || ',') > 0
+`
+
+func (q *Queries) GetUsersByIDs(ctx context.Context, ids string) ([]User, error) {
+	rows, err := q.db.QueryContext(ctx, getUsersByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []User
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.PasswordHash,
+			&i.Disabled,
+			&i.CreatedAt,
+			&i.Role,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const insertSourcedActionItem = `-- name: InsertSourcedActionItem :execrows
@@ -1546,6 +1714,33 @@ func (q *Queries) LatestNotificationCreatedAt(ctx context.Context, arg LatestNot
 	var created_at int64
 	err := row.Scan(&created_at)
 	return created_at, err
+}
+
+const latestUsedPasswordReset = `-- name: LatestUsedPasswordReset :one
+SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, revoked_at FROM password_resets
+WHERE user_id = $1 AND used_at > $2
+ORDER BY used_at DESC, id DESC LIMIT 1
+`
+
+type LatestUsedPasswordResetParams struct {
+	UserID string
+	Since  sql.NullInt64
+}
+
+func (q *Queries) LatestUsedPasswordReset(ctx context.Context, arg LatestUsedPasswordResetParams) (PasswordReset, error) {
+	row := q.db.QueryRowContext(ctx, latestUsedPasswordReset, arg.UserID, arg.Since)
+	var i PasswordReset
+	err := row.Scan(
+		&i.ID,
+		&i.TokenHash,
+		&i.UserID,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.UsedAt,
+		&i.RevokedAt,
+	)
+	return i, err
 }
 
 const listAPITokens = `-- name: ListAPITokens :many
@@ -1712,6 +1907,51 @@ func (q *Queries) ListActionItemsByStatus(ctx context.Context, arg ListActionIte
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listActiveInvitations = `-- name: ListActiveInvitations :many
+SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations
+WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > $1
+ORDER BY created_at DESC, id DESC LIMIT $2
+`
+
+type ListActiveInvitationsParams struct {
+	Now      int64
+	PageSize int32
+}
+
+func (q *Queries) ListActiveInvitations(ctx context.Context, arg ListActiveInvitationsParams) ([]Invitation, error) {
+	rows, err := q.db.QueryContext(ctx, listActiveInvitations, arg.Now, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Invitation
+	for rows.Next() {
+		var i Invitation
+		if err := rows.Scan(
+			&i.ID,
+			&i.TokenHash,
+			&i.Email,
+			&i.Role,
+			&i.InvitedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.AcceptedAt,
+			&i.AcceptedUserID,
+			&i.RevokedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -2592,6 +2832,40 @@ func (q *Queries) ListTrackedActionItems(ctx context.Context, arg ListTrackedAct
 	return items, nil
 }
 
+const listUsers = `-- name: ListUsers :many
+SELECT id, email, password_hash, disabled, created_at, role FROM users ORDER BY created_at, id LIMIT $1
+`
+
+func (q *Queries) ListUsers(ctx context.Context, pageSize int32) ([]User, error) {
+	rows, err := q.db.QueryContext(ctx, listUsers, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []User
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.PasswordHash,
+			&i.Disabled,
+			&i.CreatedAt,
+			&i.Role,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockAISettings = `-- name: LockAISettings :one
 SELECT user_id, generation, provider, model, api_key_sealed, key_last4, status, last_error, activated_at, created_at, updated_at FROM ai_settings
 WHERE user_id = $1 FOR UPDATE
@@ -2698,6 +2972,50 @@ func (q *Queries) LockActionItemBySourceKey(ctx context.Context, arg LockActionI
 	return i, err
 }
 
+const lockActivePasswordResets = `-- name: LockActivePasswordResets :many
+SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, revoked_at FROM password_resets
+WHERE (user_id = $1 OR created_by = $2) AND used_at IS NULL AND revoked_at IS NULL AND expires_at > $3
+ORDER BY id FOR UPDATE
+`
+
+type LockActivePasswordResetsParams struct {
+	UserID    string
+	CreatedBy string
+	Now       int64
+}
+
+func (q *Queries) LockActivePasswordResets(ctx context.Context, arg LockActivePasswordResetsParams) ([]PasswordReset, error) {
+	rows, err := q.db.QueryContext(ctx, lockActivePasswordResets, arg.UserID, arg.CreatedBy, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PasswordReset
+	for rows.Next() {
+		var i PasswordReset
+		if err := rows.Scan(
+			&i.ID,
+			&i.TokenHash,
+			&i.UserID,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.UsedAt,
+			&i.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockGitHubConnection = `-- name: LockGitHubConnection :one
 SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
 WHERE user_id = $1 FOR UPDATE
@@ -2725,6 +3043,28 @@ func (q *Queries) LockGitHubConnection(ctx context.Context, userID string) (Gith
 		&i.LastTrackedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockInvitationByTokenHash = `-- name: LockInvitationByTokenHash :one
+SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations WHERE token_hash = $1 FOR UPDATE
+`
+
+func (q *Queries) LockInvitationByTokenHash(ctx context.Context, tokenHash string) (Invitation, error) {
+	row := q.db.QueryRowContext(ctx, lockInvitationByTokenHash, tokenHash)
+	var i Invitation
+	err := row.Scan(
+		&i.ID,
+		&i.TokenHash,
+		&i.Email,
+		&i.Role,
+		&i.InvitedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.AcceptedAt,
+		&i.AcceptedUserID,
+		&i.RevokedAt,
 	)
 	return i, err
 }
@@ -2843,7 +3183,7 @@ func (q *Queries) LockSlackConnection(ctx context.Context, userID string) (Slack
 }
 
 const lockUserByID = `-- name: LockUserByID :one
-SELECT id, email, password_hash, disabled, created_at FROM users WHERE id = $1 FOR UPDATE
+SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {
@@ -2855,8 +3195,50 @@ func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {
 		&i.PasswordHash,
 		&i.Disabled,
 		&i.CreatedAt,
+		&i.Role,
 	)
 	return i, err
+}
+
+const lockUsersForOwnerChange = `-- name: LockUsersForOwnerChange :many
+SELECT id, email, password_hash, disabled, created_at, role FROM users
+WHERE id = $1 OR id = $2 OR (role = 'owner' AND disabled = 0)
+ORDER BY id FOR UPDATE
+`
+
+type LockUsersForOwnerChangeParams struct {
+	OperatorID string
+	TargetID   string
+}
+
+func (q *Queries) LockUsersForOwnerChange(ctx context.Context, arg LockUsersForOwnerChangeParams) ([]User, error) {
+	rows, err := q.db.QueryContext(ctx, lockUsersForOwnerChange, arg.OperatorID, arg.TargetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []User
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.PasswordHash,
+			&i.Disabled,
+			&i.CreatedAt,
+			&i.Role,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const markOAuthCodeUsed = `-- name: MarkOAuthCodeUsed :execrows
@@ -3062,6 +3444,71 @@ func (q *Queries) ResetPassword(ctx context.Context, arg ResetPasswordParams) er
 	return err
 }
 
+const revokeEmailInvitations = `-- name: RevokeEmailInvitations :exec
+UPDATE invitations SET revoked_at = $1
+WHERE email = $2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > $3
+`
+
+type RevokeEmailInvitationsParams struct {
+	RevokedAt sql.NullInt64
+	Email     string
+	Now       int64
+}
+
+func (q *Queries) RevokeEmailInvitations(ctx context.Context, arg RevokeEmailInvitationsParams) error {
+	_, err := q.db.ExecContext(ctx, revokeEmailInvitations, arg.RevokedAt, arg.Email, arg.Now)
+	return err
+}
+
+const revokeInvitation = `-- name: RevokeInvitation :execrows
+UPDATE invitations SET revoked_at = $1
+WHERE id = $2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > $3
+`
+
+type RevokeInvitationParams struct {
+	RevokedAt sql.NullInt64
+	ID        string
+	Now       int64
+}
+
+func (q *Queries) RevokeInvitation(ctx context.Context, arg RevokeInvitationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeInvitation, arg.RevokedAt, arg.ID, arg.Now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const revokeIssuedInvitations = `-- name: RevokeIssuedInvitations :exec
+UPDATE invitations SET revoked_at = $1
+WHERE invited_by = $2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > $3
+`
+
+type RevokeIssuedInvitationsParams struct {
+	RevokedAt sql.NullInt64
+	InvitedBy string
+	Now       int64
+}
+
+func (q *Queries) RevokeIssuedInvitations(ctx context.Context, arg RevokeIssuedInvitationsParams) error {
+	_, err := q.db.ExecContext(ctx, revokeIssuedInvitations, arg.RevokedAt, arg.InvitedBy, arg.Now)
+	return err
+}
+
+const revokePasswordReset = `-- name: RevokePasswordReset :exec
+UPDATE password_resets SET revoked_at = $1 WHERE id = $2 AND used_at IS NULL AND revoked_at IS NULL
+`
+
+type RevokePasswordResetParams struct {
+	RevokedAt sql.NullInt64
+	ID        string
+}
+
+func (q *Queries) RevokePasswordReset(ctx context.Context, arg RevokePasswordResetParams) error {
+	_, err := q.db.ExecContext(ctx, revokePasswordReset, arg.RevokedAt, arg.ID)
+	return err
+}
+
 const revokeSession = `-- name: RevokeSession :exec
 UPDATE sessions SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL
 `
@@ -3087,6 +3534,20 @@ type RevokeUserSessionsParams struct {
 
 func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessionsParams) error {
 	_, err := q.db.ExecContext(ctx, revokeUserSessions, arg.RevokedAt, arg.UserID)
+	return err
+}
+
+const setUserRole = `-- name: SetUserRole :exec
+UPDATE users SET role = $1 WHERE id = $2
+`
+
+type SetUserRoleParams struct {
+	Role string
+	ID   string
+}
+
+func (q *Queries) SetUserRole(ctx context.Context, arg SetUserRoleParams) error {
+	_, err := q.db.ExecContext(ctx, setUserRole, arg.Role, arg.ID)
 	return err
 }
 
@@ -3497,4 +3958,21 @@ func (q *Queries) UpsertNotificationSettings(ctx context.Context, arg UpsertNoti
 		arg.CandidateExpireDays,
 	)
 	return err
+}
+
+const usePasswordReset = `-- name: UsePasswordReset :execrows
+UPDATE password_resets SET used_at = $1 WHERE id = $2 AND used_at IS NULL AND revoked_at IS NULL
+`
+
+type UsePasswordResetParams struct {
+	UsedAt sql.NullInt64
+	ID     string
+}
+
+func (q *Queries) UsePasswordReset(ctx context.Context, arg UsePasswordResetParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, usePasswordReset, arg.UsedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

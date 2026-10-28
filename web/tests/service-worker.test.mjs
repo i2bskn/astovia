@@ -15,10 +15,11 @@ async function loadWorker() {
 
 test('a notification click reuses windows showing a screen', async () => {
   const { screenWindow } = await loadWorker();
-  for (const path of ['/', '/candidates', '/candidates/', '/auto', '/auto/', '/tasks/abc', '/tasks/abc/', '/settings', '/settings/notifications']) {
+  for (const path of ['/', '/candidates', '/candidates/', '/auto', '/auto/', '/tasks/abc', '/tasks/abc/', '/settings', '/settings/notifications', '/account', '/account/users']) {
     assert.equal(screenWindow(`https://astovia.test${path}`), true, path);
   }
-  for (const url of ['https://astovia.test/consent?request=x', 'https://astovia.test/tasks', 'https://astovia.test/candidatesx', 'https://other.test/tasks/abc']) {
+  // The link screens are used signed out and are never reused.
+  for (const url of ['https://astovia.test/consent?request=x', 'https://astovia.test/invite', 'https://astovia.test/invite/', 'https://astovia.test/reset-password', 'https://astovia.test/tasks', 'https://astovia.test/candidatesx', 'https://other.test/tasks/abc']) {
     assert.equal(screenWindow(url), false, url);
   }
 });

@@ -49,7 +49,7 @@ func newOAuthAPI(t *testing.T, driver string) *oauthAPI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: hash}} {
+	for _, u := range []store.User{{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, Role: store.RoleOwner}, {ID: "bob-id", Email: "bob@example.com", PasswordHash: hash, Role: store.RoleOwner}} {
 		if err = s.CreateUser(context.Background(), u); err != nil {
 			t.Fatal(err)
 		}

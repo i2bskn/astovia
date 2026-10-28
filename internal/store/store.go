@@ -31,6 +31,8 @@ type User struct {
 	PasswordHash string
 	Disabled     int64
 	CreatedAt    int64
+	// Role is RoleOwner or RoleMember. CreateUser requires one of them.
+	Role string
 }
 type Session struct {
 	ID, UserID string
@@ -242,6 +244,25 @@ type queries interface {
 	deleteUserPendingNotifications(ctx context.Context, userID string) error
 	deleteUserPendingNotificationsBySource(ctx context.Context, userID, kind, source string) error
 	deleteSentNotificationsBefore(ctx context.Context, before int64) error
+	enableUser(ctx context.Context, id string) error
+	setUserRole(ctx context.Context, id, role string) error
+	listUsers(ctx context.Context, limit int) ([]User, error)
+	usersByIDs(ctx context.Context, ids string) ([]User, error)
+	lockUsersForOwnerChange(ctx context.Context, operatorID, targetID string) ([]User, error)
+	createInvitation(ctx context.Context, inv Invitation) error
+	invitationByTokenHash(ctx context.Context, hash string) (Invitation, error)
+	lockInvitationByTokenHash(ctx context.Context, hash string) (Invitation, error)
+	acceptInvitation(ctx context.Context, id, userID string, now int64) (int64, error)
+	revokeInvitation(ctx context.Context, id string, now int64) (int64, error)
+	revokeEmailInvitations(ctx context.Context, email string, now int64) error
+	revokeIssuedInvitations(ctx context.Context, invitedBy string, now int64) error
+	listActiveInvitations(ctx context.Context, now int64, limit int) ([]Invitation, error)
+	createPasswordReset(ctx context.Context, r PasswordReset) error
+	passwordResetByTokenHash(ctx context.Context, hash string) (PasswordReset, error)
+	lockActivePasswordResets(ctx context.Context, userID string, now int64) ([]PasswordReset, error)
+	revokePasswordReset(ctx context.Context, id string, now int64) error
+	usePasswordReset(ctx context.Context, id string, now int64) (int64, error)
+	latestUsedPasswordReset(ctx context.Context, userID string, since int64) (PasswordReset, error)
 	instanceSecret(ctx context.Context, name string) (InstanceSecret, error)
 	createInstanceSecret(ctx context.Context, sec InstanceSecret) (int64, error)
 	replaceInstanceSecret(ctx context.Context, name, oldValue, newValue string, now int64) (int64, error)
@@ -284,7 +305,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -309,7 +330,13 @@ func (s *Store) transaction(ctx context.Context, fn func(queries) error) error {
 	}
 	return tx.Commit()
 }
+
+// CreateUser stores a new enabled user. u.Role must be RoleOwner or
+// RoleMember; the column default is not relied on.
 func (s *Store) CreateUser(ctx context.Context, u User) error {
+	if !ValidRole(u.Role) {
+		return ErrInvalidRole
+	}
 	err := s.transaction(ctx, func(q queries) error { return q.createUser(ctx, u) })
 	if err != nil {
 		existing, e := s.q.userByEmail(ctx, u.Email)
@@ -319,6 +346,10 @@ func (s *Store) CreateUser(ctx context.Context, u User) error {
 	}
 	return err
 }
+
+// ChangeUser resets the password of (hash) or disables the user with email,
+// for the operator's CLI. It does not apply the last-owner rule of the user
+// management API: the CLI is the operator's last resort.
 func (s *Store) ChangeUser(ctx context.Context, email, hash string, disable bool, now int64) error {
 	u, err := s.q.userByEmail(ctx, email)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -331,57 +362,74 @@ func (s *Store) ChangeUser(ctx context.Context, email, hash string, disable bool
 		if _, e := q.lockUser(ctx, u.ID); e != nil {
 			return e
 		}
-		var e error
-		if disable {
-			e = q.disableUser(ctx, u.ID)
-		} else {
-			e = q.resetPassword(ctx, u.ID, hash)
-		}
-		if e != nil {
-			return e
-		}
-		if e = q.revokeUserSessions(ctx, u.ID, now); e != nil {
-			return e
-		}
-		// API tokens have no expiry, so a token issued from a stolen access
-		// token must not survive the password reset that recovers the account.
-		// OAuth connections are granted from a session as well and go with it.
-		// Tokens are deleted before grants because they reference them.
-		if e = q.deleteUserAPITokens(ctx, u.ID); e != nil {
-			return e
-		}
-		if e = q.deleteUserOAuthTokens(ctx, u.ID); e != nil {
-			return e
-		}
-		if e = q.deleteUserOAuthGrants(ctx, u.ID); e != nil {
-			return e
-		}
-		// Integrations and notifications follow, in the lock order of their
-		// tables (github_connections, slack_connections, ai_settings,
-		// web_push_subscriptions, notifications). A push subscription
-		// registered during a takeover would keep receiving item titles, so
-		// it goes with a password reset as well. The GitHub and Slack
-		// connections are removed only when the user is disabled. The AI
-		// settings go with a password reset too: a key registered during a
-		// takeover would keep sending conversation text to the attacker's
-		// organization.
-		if disable {
-			if e = q.deleteGitHubConnection(ctx, u.ID); e != nil {
-				return e
-			}
-			if e = q.deleteSlackConnection(ctx, u.ID); e != nil {
-				return e
-			}
-		}
-		if e = q.deleteAISettings(ctx, u.ID); e != nil {
-			return e
-		}
-		if e = q.deleteUserPushSubscriptions(ctx, u.ID); e != nil {
-			return e
-		}
-		return q.deleteUserPendingNotifications(ctx, u.ID)
+		return revokeAccount(ctx, q, u.ID, hash, disable, now)
 	})
 }
+
+// revokeAccount resets the password of userID to passwordHash, or disables
+// the user, and removes what a stolen session could have left behind. The
+// caller holds the lock of the user row (lockUser or
+// lockUsersForOwnerChange). It is shared by the CLI (ChangeUser), the
+// disabling from the user management API and the completion of a password
+// reset link.
+func revokeAccount(ctx context.Context, q queries, userID, passwordHash string, disable bool, now int64) error {
+	var e error
+	if disable {
+		e = q.disableUser(ctx, userID)
+	} else {
+		e = q.resetPassword(ctx, userID, passwordHash)
+	}
+	if e != nil {
+		return e
+	}
+	if e = q.revokeUserSessions(ctx, userID, now); e != nil {
+		return e
+	}
+	// API tokens have no expiry, so a token issued from a stolen access
+	// token must not survive the password reset that recovers the account.
+	// OAuth connections are granted from a session as well and go with it.
+	// Tokens are deleted before grants because they reference them.
+	if e = q.deleteUserAPITokens(ctx, userID); e != nil {
+		return e
+	}
+	if e = q.deleteUserOAuthTokens(ctx, userID); e != nil {
+		return e
+	}
+	if e = q.deleteUserOAuthGrants(ctx, userID); e != nil {
+		return e
+	}
+	// Integrations and notifications follow, in the lock order of their
+	// tables (github_connections, slack_connections, ai_settings,
+	// web_push_subscriptions, notifications). A push subscription
+	// registered during a takeover would keep receiving item titles, so
+	// it goes with a password reset as well. The GitHub and Slack
+	// connections are removed only when the user is disabled. The AI
+	// settings go with a password reset too: a key registered during a
+	// takeover would keep sending conversation text to the attacker's
+	// organization.
+	if disable {
+		if e = q.deleteGitHubConnection(ctx, userID); e != nil {
+			return e
+		}
+		if e = q.deleteSlackConnection(ctx, userID); e != nil {
+			return e
+		}
+	}
+	if e = q.deleteAISettings(ctx, userID); e != nil {
+		return e
+	}
+	if e = q.deleteUserPushSubscriptions(ctx, userID); e != nil {
+		return e
+	}
+	if e = q.deleteUserPendingNotifications(ctx, userID); e != nil {
+		return e
+	}
+	// Links are revoked last: the reset links sent to the user, and the
+	// reset links and invitations the user issued. A link issued during a
+	// takeover must not outlive the recovery of the account.
+	return revokeLinks(ctx, q, userID, true, now)
+}
+
 func (s *Store) Login(ctx context.Context, verified User, session Session, refresh Refresh) error {
 	return s.transaction(ctx, func(q queries) error {
 		u, e := q.lockUser(ctx, verified.ID)

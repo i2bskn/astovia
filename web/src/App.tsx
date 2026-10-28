@@ -2,16 +2,22 @@ import { useEffect, useId, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch, useParams } from 'react-router';
 import { auth } from './auth';
+import type { User } from './auth';
+import Account from './Account';
+import AccountLinkPage from './AccountLinkPage';
 import ActionItemList from './ActionItemList';
 import AutoItemList from './AutoItemList';
 import CandidateList from './CandidateList';
 import { candidates } from './candidates';
 import ConsentPage from './ConsentPage';
+import { dateTime } from './format';
+import { linkPageAt } from './links';
+import { resetNoticeKey, resetNoticeText, showResetNotice } from './resetNotice';
 import { AutoIcon, SettingsIcon, SidebarIcon, SparkleIcon, TasksIcon } from './icons';
 import Phrased from './Phrased';
 import Settings from './Settings';
 import TaskDetail from './TaskDetail';
-import { settingsPageAt, settingsPages } from './settingsPages';
+import { accountPageAt, accountPages, settingsPageAt, settingsPages } from './settingsPages';
 import { countLabel, views } from './view';
 import type { View } from './view';
 
@@ -69,7 +75,7 @@ function LoginForm() {
       {error ? <p id={errorID} className="notice error" role="alert">{error}</p> : null}
       <button className="button primary block" type="submit" disabled={busy}>{busy ? 'ログイン中…' : 'ログイン'}</button>
     </form>
-    <p className="gate-help"><Phrased text="アカウントの作成やパスワードの再設定は、この Astovia の運用者に連絡してください。" /></p>
+    <p className="gate-help"><Phrased text="アカウントの作成やパスワードの再設定は、この Astovia のオーナーに連絡してください。" /></p>
   </section>;
 }
 
@@ -81,6 +87,14 @@ function Gate({ children }: { children: React.ReactNode }) {
     <main className="gate-main">{children}</main>
     <footer className="gate-footer">「忘れてた！」を防ぐタスク管理 · セルフホスト版</footer>
   </div>;
+}
+
+function LoadingCard() {
+  return <section className="gate-card status-card" aria-live="polite" aria-busy="true"><span className="loading-dot" aria-hidden="true" /><p>ログイン状態を確認しています…</p></section>;
+}
+
+function ConnectionCard({ error }: { error: string | null }) {
+  return <section className="gate-card status-card" aria-labelledby="connection-heading"><h1 id="connection-heading">接続を確認してください</h1><p className="gate-lead" role="alert">{error}</p><button className="button primary block" onClick={() => auth.retry()}>もう一度接続する</button></section>;
 }
 
 const sidebarKey = 'astovia.sidebar';
@@ -113,8 +127,9 @@ function ViewLink({ view, path, className, title, children }: { view: View; path
   return <NavLink to={path} className={className} title={title}>{children}</NavLink>;
 }
 
-// Sign-out lives in Settings > Account, one step away, so that it is not
-// pressed by accident next to the menu toggle.
+// The account (and, for owners, user management) opens from the email at
+// the bottom; sign-out lives there, one step away, so that it is not pressed
+// by accident next to the menu toggle.
 function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boolean; onToggle: () => void }) {
   return <aside className="sidebar" aria-label="メニュー">
     <Link to="/" className="sidebar-brand" aria-label="Astovia タスク">
@@ -126,10 +141,10 @@ function Sidebar({ email, collapsed, onToggle }: { email: string; collapsed: boo
       </ViewLink>)}
     </nav>
     <div className="sidebar-foot">
-      <Link to="/settings/account" className="nav-item sidebar-account" title={email}>
+      <NavLink to="/account" className="nav-item sidebar-account" title={email}>
         <span className="avatar" aria-hidden="true">{email.slice(0, 1).toUpperCase()}</span>
         {collapsed ? <span className="nav-label">アカウント</span> : <span className="nav-label account-email"><span className="sr-only">アカウント: </span>{email}</span>}
-      </Link>
+      </NavLink>
       <button className="nav-item sidebar-toggle" type="button" aria-expanded={!collapsed} title={collapsed ? 'メニューを広げる' : undefined} onClick={onToggle}>
         <SidebarIcon /><span className="nav-label">{collapsed ? '広げる' : 'メニューを畳む'}</span>{collapsed ? <span className="sr-only">（メニュー）</span> : null}
       </button>
@@ -150,14 +165,16 @@ function PageHeader({ title, lead }: { title: string; lead: string }) {
   return <header className="page-header"><h1>{title}</h1><p className="page-lead"><Phrased text={lead} /></p></header>;
 }
 
-const titles: Record<string, string> = { '/': 'タスク', '/candidates': 'タスク候補', '/auto': '自動で処理したもの', '/settings': '設定' };
+const titles: Record<string, string> = { '/': 'タスク', '/candidates': 'タスク候補', '/auto': '自動で処理したもの', '/settings': '設定', '/account': 'アカウント' };
 
 // titleAt is the default title of a screen. A task's detail screen replaces
 // it with the task's content once the task is read.
 function titleAt(pathname: string): string | undefined {
   if (pathname.startsWith('/tasks/')) return 'タスクの詳細';
   const page = settingsPages.find((p) => p.value === settingsPageAt(pathname));
-  return page ? `${page.label}の設定` : titles[pathname];
+  if (page) return `${page.label}の設定`;
+  const account = accountPages.find((p) => p.value === accountPageAt(pathname));
+  return account?.label ?? titles[pathname];
 }
 
 // TaskDetailRoute creates the detail screen again for each id, so that no
@@ -167,7 +184,40 @@ function TaskDetailRoute() {
   return <TaskDetail key={id} id={id} />;
 }
 
-function Workspace({ email, error }: { email: string; error: string | null }) {
+// readClosedNotice returns the at of the reset notice closed in this browser,
+// or null. Without storage the notice is shown on every load.
+function readClosedNotice(userID: string): string | null {
+  try {
+    return localStorage.getItem(resetNoticeKey(userID));
+  } catch {
+    return null;
+  }
+}
+
+// ResetNotice tells the user, on every screen for 14 days, that the password
+// was reset with a link an owner issued. Closing it hides it in this browser.
+function ResetNotice({ user }: { user: User }) {
+  const [closedAt, setClosedAt] = useState(() => readClosedNotice(user.id));
+  const notice = user.password_reset;
+  if (!notice || !showResetNotice(notice, closedAt)) return null;
+
+  function close(at: string): void {
+    try {
+      localStorage.setItem(resetNoticeKey(user.id), at);
+    } catch {
+      // Not remembered; hidden until the next load.
+    }
+    setClosedAt(at);
+  }
+
+  return <div className="notice warning reset-notice" role="status">
+    <p><Phrased text={resetNoticeText(notice, dateTime(notice.at, new Date()))} /></p>
+    <button className="button secondary small" type="button" onClick={() => close(notice.at)}>閉じる</button>
+  </div>;
+}
+
+function Workspace({ user, error }: { user: User; error: string | null }) {
+  const email = user.email;
   const [collapsed, setCollapsed] = useState(initialCollapsed);
   const location = useLocation();
 
@@ -200,9 +250,16 @@ function Workspace({ email, error }: { email: string; error: string | null }) {
   return <div className="workspace" data-sidebar={collapsed ? 'collapsed' : 'expanded'}>
     <a className="skip-link" href="#main">本文へ移動</a>
     <Sidebar email={email} collapsed={collapsed} onToggle={toggle} />
-    <header className="topbar"><Link to="/" aria-label="Astovia タスク"><Logo width={112} /></Link></header>
+    <header className="topbar">
+      <Link to="/" aria-label="Astovia タスク"><Logo width={112} /></Link>
+      {/* Phones have no sidebar; the account opens from here instead. */}
+      <NavLink to="/account" className="topbar-account" aria-label={`アカウント（${email}）`} title={email}>
+        <span className="avatar" aria-hidden="true">{email.slice(0, 1).toUpperCase()}</span>
+      </NavLink>
+    </header>
     <main className="workspace-main" id="main" tabIndex={-1}>
       <div className="page">
+        <ResetNotice key={user.id} user={user} />
         {error ? <p className="notice error" role="alert">{error}</p> : null}
         <Routes>
           <Route index element={<>
@@ -218,7 +275,8 @@ function Workspace({ email, error }: { email: string; error: string | null }) {
             <AutoItemList />
           </>} />
           <Route path="tasks/:id" element={<TaskDetailRoute />} />
-          <Route path="settings/*" element={<Settings email={email} />} />
+          <Route path="settings/*" element={<Settings />} />
+          <Route path="account/*" element={<Account userID={user.id} email={email} role={user.role} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>
@@ -232,12 +290,23 @@ export default function App() {
   const signedIn = state.status === 'authenticated' && state.user !== null;
   // The OAuth consent page replaces the workspace on this path.
   const consentPage = useMatch('/consent') !== null;
+  // The invitation and password reset links have their own screens, before
+  // the login check: they are used signed out.
+  const linkPage = linkPageAt(useLocation().pathname);
 
-  if (signedIn && !consentPage) return <Workspace email={state.user?.email ?? ''} error={state.error} />;
+  if (linkPage) {
+    return <Gate>
+      {state.status === 'loading' ? <LoadingCard /> : null}
+      {state.status === 'unavailable' ? <ConnectionCard error={state.error} /> : null}
+      {state.status === 'anonymous' || state.status === 'authenticated' ? <AccountLinkPage key={linkPage} page={linkPage} /> : null}
+    </Gate>;
+  }
+
+  if (signedIn && !consentPage && state.user) return <Workspace user={state.user} error={state.error} />;
 
   return <Gate>
-    {state.status === 'loading' ? <section className="gate-card status-card" aria-live="polite" aria-busy="true"><span className="loading-dot" aria-hidden="true" /><p>ログイン状態を確認しています…</p></section> : null}
-    {state.status === 'unavailable' ? <section className="gate-card status-card" aria-labelledby="connection-heading"><h1 id="connection-heading">接続を確認してください</h1><p className="gate-lead" role="alert">{state.error}</p><button className="button primary block" onClick={() => auth.retry()}>もう一度接続する</button></section> : null}
+    {state.status === 'loading' ? <LoadingCard /> : null}
+    {state.status === 'unavailable' ? <ConnectionCard error={state.error} /> : null}
     {state.status === 'anonymous' ? <LoginForm /> : null}
     {signedIn && consentPage ? <ConsentPage email={state.user?.email ?? ''} /> : null}
   </Gate>;

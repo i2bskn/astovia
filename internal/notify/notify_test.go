@@ -34,7 +34,7 @@ func newFixture(t *testing.T, driver string, users ...string) *fixture {
 	s, _ := testutil.Database(t, driver)
 	f := &fixture{t: t, s: s, now: time.Date(2026, 10, 24, 0, 30, 0, 0, time.UTC), box: secretbox.New([]byte(strings.Repeat("s", 32)))}
 	for _, name := range users {
-		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: "x"}
+		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: "x", Role: store.RoleOwner}
 		if err := s.CreateUser(context.Background(), u); err != nil {
 			t.Fatal(err)
 		}

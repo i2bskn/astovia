@@ -40,7 +40,7 @@ func TestRefreshNearSessionExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, CreatedAt: base.Unix()}
+	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, CreatedAt: base.Unix(), Role: store.RoleOwner}
 	if err = s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func newContractFixture(t *testing.T, driver string, names ...string) *contractF
 	}
 	f.hash = hash
 	for _, name := range names {
-		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: hash, CreatedAt: f.now.Unix()}
+		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: hash, CreatedAt: f.now.Unix(), Role: store.RoleOwner}
 		if err = s.CreateUser(ctx, u); err != nil {
 			t.Fatal(err)
 		}
@@ -168,14 +168,14 @@ func TestContracts(t *testing.T) {
 		t.Run(driver, func(t *testing.T) {
 			t.Run("duplicate email conflicts", func(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
-				if err := f.store.CreateUser(f.ctx, store.User{ID: "other", Email: "alice@example.com", PasswordHash: f.hash}); !errors.Is(err, store.ErrConflict) {
+				if err := f.store.CreateUser(f.ctx, store.User{ID: "other", Email: "alice@example.com", PasswordHash: f.hash, Role: store.RoleOwner}); !errors.Is(err, store.ErrConflict) {
 					t.Fatalf("duplicate: %v", err)
 				}
 				email, err := Email("Alice@Example.com")
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err = f.store.CreateUser(f.ctx, store.User{ID: "other-case", Email: email, PasswordHash: f.hash}); !errors.Is(err, store.ErrConflict) {
+				if err = f.store.CreateUser(f.ctx, store.User{ID: "other-case", Email: email, PasswordHash: f.hash, Role: store.RoleOwner}); !errors.Is(err, store.ErrConflict) {
 					t.Fatalf("duplicate differing only in case: %v", err)
 				}
 			})
@@ -556,7 +556,7 @@ func activeAuthFixture(t *testing.T, driver string, names ...string) (*Service, 
 	}
 	results := make(map[string]Result, len(names))
 	for _, name := range names {
-		if err = s.CreateUser(ctx, store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: hash, CreatedAt: now.Unix()}); err != nil {
+		if err = s.CreateUser(ctx, store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: hash, CreatedAt: now.Unix(), Role: store.RoleOwner}); err != nil {
 			t.Fatal(err)
 		}
 		result, err := a.Login(ctx, name+"@example.com", "correct-password-123")

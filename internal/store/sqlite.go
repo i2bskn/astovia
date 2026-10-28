@@ -23,7 +23,7 @@ func (q sqliteQueries) lockUser(ctx context.Context, id string) (User, error) {
 	return User(user), err
 }
 func (q sqliteQueries) createUser(ctx context.Context, user User) error {
-	return q.q.CreateUser(ctx, db.CreateUserParams{ID: user.ID, Email: user.Email, PasswordHash: user.PasswordHash, CreatedAt: user.CreatedAt})
+	return q.q.CreateUser(ctx, db.CreateUserParams{ID: user.ID, Email: user.Email, PasswordHash: user.PasswordHash, CreatedAt: user.CreatedAt, Role: user.Role})
 }
 func (q sqliteQueries) resetPassword(ctx context.Context, id, hash string) error {
 	return q.q.ResetPassword(ctx, db.ResetPasswordParams{ID: id, PasswordHash: hash})
@@ -526,4 +526,94 @@ func fromSQLiteAISetting(row db.AiSetting) AISettings {
 
 func fromSQLiteSlack(row db.SlackConnection) SlackConnection {
 	return SlackConnection{UserID: row.UserID, Generation: row.Generation, TokenSealed: row.TokenSealed, TokenLast4: row.TokenLast4, TeamID: row.TeamID, TeamName: row.TeamName, TeamURL: row.TeamUrl, SlackUserID: row.SlackUserID, SlackUserName: row.SlackUserName, Scopes: row.Scopes, ImmediateNotify: row.ImmediateNotify, DetectMentions: row.DetectMentions, DetectDMs: row.DetectDms, DetectGroupDMs: row.DetectGroupDms, Status: row.Status, LastError: row.LastError, FailureCount: row.FailureCount, ConnectedAt: row.ConnectedAt, NextPollAt: row.NextPollAt, LastSyncedAt: row.LastSyncedAt, LastTrackedAt: row.LastTrackedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
+}
+
+func (q sqliteQueries) enableUser(ctx context.Context, id string) error {
+	return q.q.EnableUser(ctx, id)
+}
+func (q sqliteQueries) setUserRole(ctx context.Context, id, role string) error {
+	return q.q.SetUserRole(ctx, db.SetUserRoleParams{Role: role, ID: id})
+}
+func (q sqliteQueries) listUsers(ctx context.Context, limit int) ([]User, error) {
+	return q.users(q.q.ListUsers(ctx, int64(limit)))
+}
+func (q sqliteQueries) usersByIDs(ctx context.Context, ids string) ([]User, error) {
+	return q.users(q.q.GetUsersByIDs(ctx, ids))
+}
+func (q sqliteQueries) lockUsersForOwnerChange(ctx context.Context, operatorID, targetID string) ([]User, error) {
+	return q.users(q.q.LockUsersForOwnerChange(ctx, db.LockUsersForOwnerChangeParams{OperatorID: operatorID, TargetID: targetID}))
+}
+func (q sqliteQueries) createInvitation(ctx context.Context, inv Invitation) error {
+	return q.q.CreateInvitation(ctx, db.CreateInvitationParams{ID: inv.ID, TokenHash: inv.TokenHash, Email: inv.Email, Role: inv.Role, InvitedBy: inv.InvitedBy, CreatedAt: inv.CreatedAt, ExpiresAt: inv.ExpiresAt})
+}
+func (q sqliteQueries) invitationByTokenHash(ctx context.Context, hash string) (Invitation, error) {
+	row, err := q.q.GetInvitationByTokenHash(ctx, hash)
+	return Invitation(row), err
+}
+func (q sqliteQueries) lockInvitationByTokenHash(ctx context.Context, hash string) (Invitation, error) {
+	row, err := q.q.LockInvitationByTokenHash(ctx, hash)
+	return Invitation(row), err
+}
+func (q sqliteQueries) acceptInvitation(ctx context.Context, id, userID string, now int64) (int64, error) {
+	return q.q.AcceptInvitation(ctx, db.AcceptInvitationParams{AcceptedAt: sql.NullInt64{Int64: now, Valid: true}, AcceptedUserID: sql.NullString{String: userID, Valid: true}, ID: id, Now: now})
+}
+func (q sqliteQueries) revokeInvitation(ctx context.Context, id string, now int64) (int64, error) {
+	return q.q.RevokeInvitation(ctx, db.RevokeInvitationParams{RevokedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id, Now: now})
+}
+func (q sqliteQueries) revokeEmailInvitations(ctx context.Context, email string, now int64) error {
+	return q.q.RevokeEmailInvitations(ctx, db.RevokeEmailInvitationsParams{RevokedAt: sql.NullInt64{Int64: now, Valid: true}, Email: email, Now: now})
+}
+func (q sqliteQueries) revokeIssuedInvitations(ctx context.Context, invitedBy string, now int64) error {
+	return q.q.RevokeIssuedInvitations(ctx, db.RevokeIssuedInvitationsParams{RevokedAt: sql.NullInt64{Int64: now, Valid: true}, InvitedBy: invitedBy, Now: now})
+}
+func (q sqliteQueries) listActiveInvitations(ctx context.Context, now int64, limit int) ([]Invitation, error) {
+	rows, err := q.q.ListActiveInvitations(ctx, db.ListActiveInvitationsParams{Now: now, PageSize: int64(limit)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Invitation, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, Invitation(row))
+	}
+	return out, nil
+}
+func (q sqliteQueries) createPasswordReset(ctx context.Context, r PasswordReset) error {
+	return q.q.CreatePasswordReset(ctx, db.CreatePasswordResetParams{ID: r.ID, TokenHash: r.TokenHash, UserID: r.UserID, CreatedBy: r.CreatedBy, CreatedAt: r.CreatedAt, ExpiresAt: r.ExpiresAt})
+}
+func (q sqliteQueries) passwordResetByTokenHash(ctx context.Context, hash string) (PasswordReset, error) {
+	row, err := q.q.GetPasswordResetByTokenHash(ctx, hash)
+	return PasswordReset(row), err
+}
+func (q sqliteQueries) lockActivePasswordResets(ctx context.Context, userID string, now int64) ([]PasswordReset, error) {
+	rows, err := q.q.LockActivePasswordResets(ctx, db.LockActivePasswordResetsParams{UserID: userID, CreatedBy: userID, Now: now})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PasswordReset, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, PasswordReset(row))
+	}
+	return out, nil
+}
+func (q sqliteQueries) revokePasswordReset(ctx context.Context, id string, now int64) error {
+	return q.q.RevokePasswordReset(ctx, db.RevokePasswordResetParams{RevokedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id})
+}
+func (q sqliteQueries) usePasswordReset(ctx context.Context, id string, now int64) (int64, error) {
+	return q.q.UsePasswordReset(ctx, db.UsePasswordResetParams{UsedAt: sql.NullInt64{Int64: now, Valid: true}, ID: id})
+}
+func (q sqliteQueries) latestUsedPasswordReset(ctx context.Context, userID string, since int64) (PasswordReset, error) {
+	row, err := q.q.LatestUsedPasswordReset(ctx, db.LatestUsedPasswordResetParams{UserID: userID, Since: sql.NullInt64{Int64: since, Valid: true}})
+	return PasswordReset(row), err
+}
+
+// users converts the rows of a user list query.
+func (sqliteQueries) users(rows []db.User, err error) ([]User, error) {
+	if err != nil {
+		return nil, err
+	}
+	out := make([]User, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, User(row))
+	}
+	return out, nil
 }
