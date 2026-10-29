@@ -11,7 +11,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"html"
 	"log"
 	"log/slog"
 	"net/url"
@@ -19,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/i2bskn/astovia/internal/ai"
@@ -635,67 +633,20 @@ func (r *run) eligible(m slack.Message) bool {
 // slackURL returns v when it is an https URL on a slack.com host, for refs
 // and automatic completion evidence.
 func slackURL(v string) sql.NullString {
-	u, err := url.Parse(v)
-	if err != nil || u.Scheme != "https" || len(v) > 2048 || strings.ContainsRune(v, 0) || u.User != nil {
-		return sql.NullString{}
-	}
-	if host := strings.ToLower(u.Hostname()); !strings.HasSuffix(host, ".slack.com") {
+	if !slack.ValidURL(v) {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: v, Valid: true}
 }
 
-var markupPattern = regexp.MustCompile(`<([^<>]*)>`)
-
-// formatText turns Slack markup into plain text: <@U1> and <@U1|name>
-// become @name(U1) with the member's display name, <#C1|name> becomes
-// #name, <url|text> becomes "text (url)" and <url> the URL. HTML entities
-// are decoded.
+// formatText turns Slack markup into plain text with the members' display
+// names (see slack.FormatText).
 func (r *run) formatText(text string) (string, error) {
-	var err error
-	out := markupPattern.ReplaceAllStringFunc(text, func(m string) string {
-		inner := m[1 : len(m)-1]
-		target, label, hasLabel := strings.Cut(inner, "|")
-		switch {
-		case strings.HasPrefix(target, "@"):
-			id := target[1:]
-			name, e := r.userName(id)
-			if e != nil {
-				err = e
-				return m
-			}
-			return "@" + name + "(" + id + ")"
-		case strings.HasPrefix(target, "#"):
-			if hasLabel && label != "" {
-				return "#" + label
-			}
-			return target
-		case strings.HasPrefix(target, "!"):
-			if hasLabel && label != "" {
-				return label
-			}
-			return "@" + strings.TrimPrefix(target, "!")
-		case hasLabel && label != "":
-			return label + " (" + target + ")"
-		}
-		return target
-	})
-	if err != nil {
-		return "", err
-	}
-	return html.UnescapeString(out), nil
+	return slack.FormatText(text, r.userName)
 }
 
 // cleanText removes control and format characters and surrounding spaces.
-func cleanText(v string) string {
-	v = strings.Map(func(r rune) rune {
-		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
-			return -1
-		}
-		return r
-	}, v)
-	return strings.TrimFunc(v, unicode.IsSpace)
-}
+func cleanText(v string) string { return slack.CleanText(v) }
 
 // excerpt returns the first n characters of a body on one line.
 func excerpt(v string, n int) string {

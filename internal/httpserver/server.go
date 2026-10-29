@@ -71,6 +71,15 @@ type Server struct {
 	// tools per user, leaving most of Chatwork's limit (shared with the
 	// synchronization) to the synchronization.
 	chatworkMCPLimiter *loginLimiter
+	// The Slack limiters limit the Slack API calls made by the MCP tools
+	// per user and method, so that twice their limits (at the edge of a
+	// window) and the synchronization's budget stay within Slack's limits
+	// for the methods. slackHistoryLimiter counts conversations.history and
+	// conversations.replies together.
+	slackSearchLimiter        *loginLimiter
+	slackConversationsLimiter *loginLimiter
+	slackHistoryLimiter       *loginLimiter
+	slackUsersLimiter         *loginLimiter
 }
 
 // userResponse is the public representation of the signed-in user.
@@ -139,7 +148,8 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
 		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute),
-		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute)}
+		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute), slackSearchLimiter: newKeyLimiter(5, time.Minute), slackConversationsLimiter: newKeyLimiter(10, time.Minute),
+		slackHistoryLimiter: newKeyLimiter(4, time.Minute), slackUsersLimiter: newKeyLimiter(30, time.Minute)}
 }
 
 // handler returns the routes wrapped with the common response headers.

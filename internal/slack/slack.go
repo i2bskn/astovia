@@ -11,13 +11,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // DefaultBaseURL is the Slack Web API.
@@ -212,7 +215,8 @@ func ParseScopes(v string) []string {
 
 // Message is the part of a Slack message the integration uses. ThreadTS is
 // the parent's ts for a message in a thread (equal to TS for the parent
-// itself). Permalink and Channel are set only by SearchMessages.
+// itself). ReplyCount is the number of replies of a parent. Permalink and
+// Channel are set only by SearchMessages.
 type Message struct {
 	TS          string
 	User        string
@@ -221,6 +225,7 @@ type Message struct {
 	Text        string
 	ThreadTS    string
 	LatestReply string
+	ReplyCount  int
 	Permalink   string
 	Channel     Channel
 	// HasBotID and HasSubtype tell whether the response included the
@@ -230,12 +235,15 @@ type Message struct {
 }
 
 // Channel is a conversation as described by search results and
-// users.conversations.
+// users.conversations. User is the other member of a direct message
+// (users.conversations only).
 type Channel struct {
-	ID     string
-	Name   string
-	IsIM   bool
-	IsMPIM bool
+	ID        string
+	Name      string
+	IsIM      bool
+	IsMPIM    bool
+	IsPrivate bool
+	User      string
 }
 
 type messageJSON struct {
@@ -246,19 +254,22 @@ type messageJSON struct {
 	Text        string           `json:"text"`
 	ThreadTS    string           `json:"thread_ts"`
 	LatestReply string           `json:"latest_reply"`
+	ReplyCount  int              `json:"reply_count"`
 	Permalink   string           `json:"permalink"`
 	Channel     *json.RawMessage `json:"channel"`
 }
 
 type channelJSON struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	IsIM   bool   `json:"is_im"`
-	IsMPIM bool   `json:"is_mpim"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	IsIM      bool   `json:"is_im"`
+	IsMPIM    bool   `json:"is_mpim"`
+	IsPrivate bool   `json:"is_private"`
+	User      string `json:"user"`
 }
 
 func (m messageJSON) message() Message {
-	out := Message{TS: m.TS, User: m.User, Text: m.Text, ThreadTS: m.ThreadTS, LatestReply: m.LatestReply, Permalink: m.Permalink}
+	out := Message{TS: m.TS, User: m.User, Text: m.Text, ThreadTS: m.ThreadTS, LatestReply: m.LatestReply, ReplyCount: m.ReplyCount, Permalink: m.Permalink}
 	if m.BotID != nil {
 		out.BotID, out.HasBotID = *m.BotID, true
 	}
@@ -283,11 +294,13 @@ func messages(list []messageJSON) []Message {
 	return out
 }
 
-// SearchPage is one page of search.messages. Pages is the number of pages.
+// SearchPage is one page of search.messages. Pages is the number of pages
+// and Total the number of matches (0 when Slack did not tell).
 type SearchPage struct {
 	Matches []Message
 	Page    int
 	Pages   int
+	Total   int
 }
 
 // SearchMessages runs search.messages for one page (from 1) of up to count
@@ -300,6 +313,7 @@ func (c *Client) SearchMessages(ctx context.Context, token, query string, count,
 			Paging  struct {
 				Page  int `json:"page"`
 				Pages int `json:"pages"`
+				Total int `json:"total"`
 			} `json:"paging"`
 		} `json:"messages"`
 	}
@@ -307,26 +321,37 @@ func (c *Client) SearchMessages(ctx context.Context, token, query string, count,
 	if _, err := c.call(ctx, token, "search.messages", q, &out); err != nil {
 		return SearchPage{}, err
 	}
-	return SearchPage{Matches: messages(out.Messages.Matches), Page: out.Messages.Paging.Page, Pages: out.Messages.Paging.Pages}, nil
+	return SearchPage{Matches: messages(out.Messages.Matches), Page: out.Messages.Paging.Page, Pages: out.Messages.Paging.Pages, Total: out.Messages.Paging.Total}, nil
 }
 
 // UserConversations returns one page of the conversations of the given
 // types (for example "mpim") the user is a member of, archived ones
 // excluded.
 func (c *Client) UserConversations(ctx context.Context, token, types string, limit int) ([]Channel, error) {
+	list, _, err := c.UserConversationsPage(ctx, token, types, limit, "")
+	return list, err
+}
+
+// UserConversationsPage is UserConversations from cursor (the first page
+// when empty). It also returns the cursor of the next page, empty on the
+// last page.
+func (c *Client) UserConversationsPage(ctx context.Context, token, types string, limit int, cursor string) ([]Channel, string, error) {
 	var out struct {
 		envelope
 		Channels []channelJSON `json:"channels"`
 	}
 	q := url.Values{"types": {types}, "exclude_archived": {"true"}, "limit": {strconv.Itoa(limit)}}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
 	if _, err := c.call(ctx, token, "users.conversations", q, &out); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	list := make([]Channel, 0, len(out.Channels))
 	for _, ch := range out.Channels {
 		list = append(list, Channel(ch))
 	}
-	return list, nil
+	return list, out.ResponseMetadata.NextCursor, nil
 }
 
 // HistoryParams are the arguments of conversations.history and
@@ -431,4 +456,66 @@ func (c *Client) Permalink(ctx context.Context, token, channel, ts string) (stri
 		return "", err
 	}
 	return out.Permalink, nil
+}
+
+// ValidURL reports whether v is an https URL on a slack.com host, without
+// user information, NUL or more than 2048 bytes.
+func ValidURL(v string) bool {
+	u, err := url.Parse(v)
+	if err != nil || u.Scheme != "https" || len(v) > 2048 || strings.ContainsRune(v, 0) || u.User != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(u.Hostname()), ".slack.com")
+}
+
+var markupPattern = regexp.MustCompile(`<([^<>]*)>`)
+
+// FormatText turns Slack markup into plain text: <@U1> and <@U1|name>
+// become @name(U1) with the name given by name, <#C1|name> becomes #name,
+// <url|text> becomes "text (url)" and <url> the URL. HTML entities are
+// decoded. An error of name is returned as is.
+func FormatText(text string, name func(id string) (string, error)) (string, error) {
+	var err error
+	out := markupPattern.ReplaceAllStringFunc(text, func(m string) string {
+		inner := m[1 : len(m)-1]
+		target, label, hasLabel := strings.Cut(inner, "|")
+		switch {
+		case strings.HasPrefix(target, "@"):
+			id := target[1:]
+			v, e := name(id)
+			if e != nil {
+				err = e
+				return m
+			}
+			return "@" + v + "(" + id + ")"
+		case strings.HasPrefix(target, "#"):
+			if hasLabel && label != "" {
+				return "#" + label
+			}
+			return target
+		case strings.HasPrefix(target, "!"):
+			if hasLabel && label != "" {
+				return label
+			}
+			return "@" + strings.TrimPrefix(target, "!")
+		case hasLabel && label != "":
+			return label + " (" + target + ")"
+		}
+		return target
+	})
+	if err != nil {
+		return "", err
+	}
+	return html.UnescapeString(out), nil
+}
+
+// CleanText removes control and format characters and surrounding spaces.
+func CleanText(v string) string {
+	v = strings.Map(func(r rune) rune {
+		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
+			return -1
+		}
+		return r
+	}, v)
+	return strings.TrimFunc(v, unicode.IsSpace)
 }

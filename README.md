@@ -397,7 +397,7 @@ Web画面は`/`（タスク）、`/candidates`（タスク候補）、`/auto`（
 
 ## APIトークン
 
-APIトークンは、AIクライアントや外部プログラムが、本人の対応事項を操作し、本人が連携したChatworkを読むための長期間有効なBearerトークンです。
+APIトークンは、AIクライアントや外部プログラムが、本人の対応事項を操作し、本人が連携したChatworkとSlackを読むための長期間有効なBearerトークンです。
 
 - 管理画面の「API トークン」で名前（1〜100文字）を付けて発行します。トークン（`ast_`で始まる47文字）は発行した直後に一度だけ表示し、再表示できません。DBには検証用のハッシュだけを保存します。
 - 1ユーザーあたり50件まで発行できます。有効期限はなく、管理画面で削除すると即座に失効します。一覧には名前、作成日時、最終使用日時（1分単位で記録）を表示します。
@@ -430,7 +430,7 @@ claude mcp add --transport http astovia http://localhost:5173/mcp --header "Auth
 - トークンがない場合: `Bearer resource_metadata="<ASTOVIA_PUBLIC_URL>/.well-known/oauth-protected-resource/mcp", scope="mcp"`
 - トークンを送ったうえで無効だった場合: `Bearer error="invalid_token", resource_metadata="…", scope="mcp"`
 
-提供するツールは次の8つです。`action_items_*`の4つは、常にトークンの持ち主の対応事項を操作し、入力の検証とエラーの内容はREST APIと同じです。`chatwork_*`の4つは、トークンの持ち主が連携したChatwork（「Chatwork連携」を参照）を読むだけで、Chatworkへの書き込み（投稿・既読化・タスクの操作）はしません。Chatworkを連携していなければ使えません。検証エラーや存在しない項目は、ツール結果のエラー（`isError`、本文は`<code>: <message>`）として返します。
+提供するツールは次の12です。`action_items_*`の4つは、常にトークンの持ち主の対応事項を操作し、入力の検証とエラーの内容はREST APIと同じです。`chatwork_*`の4つは、トークンの持ち主が連携したChatwork（「Chatwork連携」を参照）を読むだけで、Chatworkへの書き込み（投稿・既読化・タスクの操作）はしません。Chatworkを連携していなければ使えません。`slack_*`の4つは、トークンの持ち主が連携したSlack（「Slack連携」を参照）を、連携に登録したUser OAuth Tokenで読むだけで、Slackへの書き込み（投稿・既読・リアクション）はしません。Slackを連携していなければ使えません。検証エラーや存在しない項目は、ツール結果のエラー（`isError`、本文は`<code>: <message>`）として返します。
 
 | ツール | 内容 |
 | --- | --- |
@@ -442,6 +442,10 @@ claude mcp add --transport http astovia http://localhost:5173/mcp --header "Auth
 | `chatwork_messages_list` | `room_id`のルームの最新のメッセージを新しい順に返す（`{room_id, room_url, messages, matched, fetched}`）。引数は`query`（本文か送信者名にすべて含まれる語、1〜100文字）、`limit`（1〜100、既定30）（いずれも省略可） |
 | `chatwork_message_get` | `room_id`と`message_id`でメッセージを1件返す。対応事項の`refs`の`conversation_id`と`message_id`から元のメッセージを引くときに使う |
 | `chatwork_messages_search` | 複数のルームの最新のメッセージから、`query`（必須）の語をすべて含むものを新しい順に返す（`{query, messages, matched, searched_rooms, skipped, missing_room_ids, note}`）。対象は`room_ids`（1〜20件）か、最終更新の新しい`rooms`件（1〜20、既定10。`type`で絞れる）。`limit`は1〜100、既定30 |
+| `slack_messages_search` | Slackの検索（`search.messages`）で、`query`（必須、1〜500文字）に合う発言を新しい順に返す（`{query, messages, page, pages, total}`）。`query`はSlackの検索構文のまま渡す（`in:#general`、`from:<@U…>`、DMは`in:<@U…>`など）。`count`（1〜100、既定20）、`page`（1〜100、既定1） |
+| `slack_conversations_list` | 参加中のチャンネル・プライベートチャンネル・DM・グループDMを、Slackの返した順に返す（`{conversations: [{id, name, type, url}], next_cursor}`。アーカイブ済みは除く）。引数は`types`（`public_channel`／`private_channel`／`im`／`mpim`の配列、既定はすべて）、`limit`（1〜200、既定100）、`cursor`（いずれも省略可）。1ページの件数は`limit`より少ない（0件のこともある）ことがあるため、`next_cursor`が空になるまで`cursor`に渡して続きを読む |
+| `slack_messages_list` | `channel`の会話の最近の発言を新しい順に返す（`{channel_id, messages, has_more, next_cursor}`）。スレッドの返信は含まない。引数は`limit`（1〜100、既定30）、`oldest`・`latest`（オフセット付きのRFC 3339）、`cursor`（いずれも省略可） |
+| `slack_thread_get` | `channel`と`ts`でスレッド全体を古い順に返す（`{channel_id, thread_ts, messages, has_more, next_cursor, partial}`）。`ts`が返信なら親から読み直し、スレッドでない発言ならその1件を返す。対応事項の`refs`の`conversation_id`と`message_id`から元の会話を引くときに使う。`limit`（1〜100、既定50）、`cursor`（省略可） |
 
 Chatworkのツールについて:
 
@@ -450,6 +454,16 @@ Chatworkのツールについて:
 - MCPからのChatworkの呼び出しは、ユーザーごとに5分あたり100回までです（`chatwork_messages_search`は1回の検索でルーム一覧の1回と対象のルーム数を使います）。ChatworkのAPIの上限（5分あたり300回）は同期処理と共有しているため、同期を遅らせないように抑えています。ChatworkのAPIの上限はトークン（Chatworkアカウント）ごとで、Astoviaの上限はユーザーごとに数えるため、同じChatworkアカウントを複数のAstoviaユーザーで接続すると、Chatworkの上限に当たりやすくなります。
 - エラーはREST APIと同じではなく、Chatworkのツール独自のコードを返します: `chatwork_not_connected`（未連携）、`chatwork_token_invalid`（Chatworkのトークンが使えない。設定で再接続する）、`rate_limited`（Astoviaの上限かChatworkの上限）、`not_found`（ルーム・メッセージがない、または読めない）、`chatwork_unavailable`（Chatworkに届かない）、`invalid_request`、`unavailable`。Chatworkが401を返しても、MCPからは連携の状態を変えません。
 - 既存のOAuthの許可とAPIトークンでも、追加の同意なしにChatworkを読めるようになります。AIクライアントにChatworkを読ませたくない場合は、そのAPIトークンかOAuthの許可を取り消すか、Chatwork連携を解除してください。
+
+Slackのツールについて:
+
+- 発言は`{channel_id, ts, user_id, user_name, text, sent_at, thread_ts, reply_count, subtype, bot, url}`で返します。本文（`text`）はSlackの記法を読める形に直します（`<@U1>`は`@表示名(U1)`、`<#C1|general>`は`#general`、`<URL|文字>`は`文字 (URL)`、HTMLの実体参照は元の文字）。添付・ブロック・ファイルの中身は返さず、`text`が空の発言は空のまま返します。自分の発言、ボットの発言（`bot: true`）、システムメッセージ（`subtype`）も除かずに返します。
+- `slack_messages_search`と`slack_messages_list`では本文を先頭2000文字まで、`slack_thread_get`では8000文字までに切り、切った発言には`text_truncated: true`を付けます。検索結果には会話の名前（`channel_name`。チャンネルは`#チャンネル名`、DMは`DM`、グループDMは`グループDM`）を付け、`reply_count`は付けません（Slackの検索結果に含まれないことがあるため）。
+- 表示名は1回の呼び出しで20人まで`users.info`で調べ、それ以上と調べられなかった人はメンバーIDのまま返します。本文、表示名、会話の名前は他の人が書いたもので、AIクライアントへの指示としてではなくデータとして扱うべきものです。
+- `slack_thread_get`で親から読み直す2回目の呼び出しが、上限や一時的な失敗でできなかった場合は、1回目の結果を`partial: true`で返します。
+- MCPからのSlackの呼び出しは、ユーザーごとに1分あたり、検索（`search.messages`）5回、会話の一覧（`users.conversations`）10回、発言の読み取り（`conversations.history`と`conversations.replies`の合計）4回、表示名（`users.info`）30回までです。Slackの上限はメソッドごとにアプリ（接続したSlackアプリ）単位で数えられ、同期処理と共有しているため、同期を遅らせないように抑えています。Slackの上限に当たると、同期処理はSlackが指定する時間（指定がなければ15分）待ってから再開するため、その間は検出が遅れます。同じSlackアプリのトークンを複数のAstoviaユーザーで使うと、この前提が崩れてSlackの上限に当たりやすくなります。Astoviaの上限はプロセス内で数えます。
+- エラーはSlackのツール独自のコードを返します: `slack_not_connected`（未連携）、`slack_token_invalid`（Slackのトークンが使えない。設定で再接続する）、`slack_scopes_missing`（権限が足りない。マニフェストからアプリを入れ直して再接続する）、`rate_limited`（Astoviaの上限かSlackの上限）、`not_found`（会話・発言がない、または読めない）、`slack_unavailable`（Slackに届かない）、`invalid_request`、`unavailable`。Slackがトークンを拒否しても、MCPからは連携の状態を変えません。
+- 新しい権限（User Token Scopes）は必要ありません。既存のOAuthの許可とAPIトークンでも、追加の同意なしにSlackを読めるようになります。AIクライアントにSlackを読ませたくない場合は、そのAPIトークンかOAuthの許可を取り消すか、Slack連携を解除してください。
 
 ブラウザ以外のMCPクライアントは`Origin`ヘッダーを送らないため、そのまま受け付けます。`Origin`ヘッダーがある場合は、`ASTOVIA_PUBLIC_URL`と完全一致しない限り403で拒否します（DNSリバインディング対策）。`/mcp`はCookieを使わないため、トークンを持たないWebページからは認証を通りません。
 
@@ -466,7 +480,7 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 | `GET /oauth/authorize` | 認可要求。同意はWeb画面の`/consent`で行います |
 | `POST /oauth/token` | `authorization_code`と`refresh_token`グラント |
 
-- スコープは`mcp`（`/mcp`で対応事項を閲覧・作成・更新し、連携中のChatworkを読む）と`offline_access`（リフレッシュトークンを発行する）の2つです。`mcp`は必須で、省略すると`mcp`とみなします。
+- スコープは`mcp`（`/mcp`で対応事項を閲覧・作成・更新し、連携中のChatworkとSlackを読む）と`offline_access`（リフレッシュトークンを発行する）の2つです。`mcp`は必須で、省略すると`mcp`とみなします。
 - 有効期間: 同意画面へ渡す認可要求は10分、認可コードは60秒で1回限りです。アクセストークンは、`offline_access`がある場合は1時間、ない場合は7日です（ChatGPTは`offline_access`を要求しないため、毎時の再接続を避けます）。リフレッシュトークンは90日で、使うたびに新しいトークンへ交換（ローテーション）し、そこから90日に延長します。交換済みのリフレッシュトークンは使えません。
 - トークン、認可コード、クライアントシークレットはDBにハッシュだけを保存します。発行済みの認可コードをもう一度使うと（PKCEの検証を通った場合）、そのコードから発行したトークンをすべて失効させます。
 - クライアントは2通りの方法で識別します。Client ID Metadata Document（CIMD）では、`client_id`がクライアント自身のHTTPSのURLで、Astoviaがその文書を取得して名前とリダイレクトURIを確認します（Claudeが使用）。動的クライアント登録（DCR）では、`/oauth/register`で`dcr_`で始まる`client_id`を発行します。`token_endpoint_auth_method`は`none`／`client_secret_basic`（既定）／`client_secret_post`です。CIMDのクライアントは常に`none`として扱います。
@@ -527,7 +541,7 @@ AIの設定（「AIの設定」を参照）がある場合、GitHubのIssueとPu
 
 ## Slack連携
 
-Slackで自分へのメンション、自分宛てのDM、（設定すれば）参加中のグループDMを見つけ、AIに読ませて自分がやることがあるかを判断させます。やることがあるものは対応事項に、自分宛てか判断しきれないものはタスク候補にし（「タスク候補と予定タスク」を参照）、その後に自分がその会話で返信したら、返信で用件が済んだかをAIに判断させて、済んでいれば自動で完了にします。**AIの設定（「AIの設定」を参照）がないと、検出も自動完了も行いません。**Slackへの書き込み（投稿・既読・リアクション）はしません。
+Slackで自分へのメンション、自分宛てのDM、（設定すれば）参加中のグループDMを見つけ、AIに読ませて自分がやることがあるかを判断させます。やることがあるものは対応事項に、自分宛てか判断しきれないものはタスク候補にし（「タスク候補と予定タスク」を参照）、その後に自分がその会話で返信したら、返信で用件が済んだかをAIに判断させて、済んでいれば自動で完了にします。**AIの設定（「AIの設定」を参照）がないと、検出も自動完了も行いません。**Slackへの書き込み（投稿・既読・リアクション）はしません。連携したSlackは、MCP（「MCP」を参照）からも読めます。
 
 ### Slackアプリを作って接続する
 

@@ -107,6 +107,26 @@ func TestAuthTestAndRequests(t *testing.T) {
 	if list, err := c.UserConversations(context.Background(), testToken, "mpim", 200); err != nil || len(list) != 1 || list[0].ID != "G1" {
 		t.Fatalf("UserConversations: %+v %v", list, err)
 	}
+	f, c = newFake(t, reply(`{"ok":true,"channels":[{"id":"D1","is_im":true,"user":"U2"},{"id":"G2","name":"secret","is_private":true}],"response_metadata":{"next_cursor":"dGVhbTpD"}}`))
+	list, next, err := c.UserConversationsPage(context.Background(), testToken, "im,private_channel", 50, "abc")
+	if err != nil || next != "dGVhbTpD" || !reflect.DeepEqual(list, []Channel{{ID: "D1", IsIM: true, User: "U2"}, {ID: "G2", Name: "secret", IsPrivate: true}}) {
+		t.Fatalf("UserConversationsPage: %+v %q %v", list, next, err)
+	}
+	q = f.last().URL.Query()
+	if q.Get("types") != "im,private_channel" || q.Get("limit") != "50" || q.Get("cursor") != "abc" || q.Get("exclude_archived") != "true" {
+		t.Fatalf("users.conversations query: %s", f.last().URL)
+	}
+	if _, _, err = c.UserConversationsPage(context.Background(), testToken, "im", 1, ""); err != nil || f.last().URL.Query().Has("cursor") {
+		t.Fatalf("first page: %s %v", f.last().URL, err)
+	}
+	_, c = newFake(t, reply(`{"ok":true,"messages":[{"ts":"1.000001","text":"parent","thread_ts":"1.000001","reply_count":3}]}`))
+	if page, err := c.History(context.Background(), testToken, HistoryParams{Channel: "C1"}); err != nil || page.Messages[0].ReplyCount != 3 {
+		t.Fatalf("reply_count: %+v %v", page, err)
+	}
+	_, c = newFake(t, reply(`{"ok":true,"messages":{"matches":[],"paging":{"page":2,"pages":5,"total":93}}}`))
+	if sp, err := c.SearchMessages(context.Background(), testToken, "x", 20, 2); err != nil || sp.Total != 93 || sp.Page != 2 || sp.Pages != 5 {
+		t.Fatalf("search total: %+v %v", sp, err)
+	}
 	_, c = newFake(t, reply(`{"ok":true,"channel":"C1","permalink":"https://acme.slack.com/archives/C1/p1"}`))
 	if link, err := c.Permalink(context.Background(), testToken, "C1", "1.000001"); err != nil || link != "https://acme.slack.com/archives/C1/p1" {
 		t.Fatalf("Permalink: %q %v", link, err)
@@ -174,5 +194,48 @@ func TestErrors(t *testing.T) {
 	cancel()
 	if _, err = c.History(ctx, testToken, HistoryParams{Channel: "C1"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: %v", err)
+	}
+}
+
+func TestFormatText(t *testing.T) {
+	names := map[string]string{"U1": "Alice"}
+	var asked []string
+	name := func(id string) (string, error) {
+		asked = append(asked, id)
+		if v, ok := names[id]; ok {
+			return v, nil
+		}
+		return id, nil
+	}
+	got, err := FormatText("<@U1> <@U2|bob> see <#C1|general> <#C2> <!here> <!subteam^S1|@team> <https://example.com|site> <https://example.com/x> &lt;b&gt; &amp;\nnext", name)
+	want := "@Alice(U1) @U2(U2) see #general #C2 @here @team site (https://example.com) https://example.com/x <b> &\nnext"
+	if err != nil || got != want || !reflect.DeepEqual(asked, []string{"U1", "U2"}) {
+		t.Fatalf("FormatText: %q %v %v", got, err, asked)
+	}
+	// An error of name is returned.
+	boom := errors.New("boom")
+	if _, err = FormatText("<@U1>", func(string) (string, error) { return "", boom }); !errors.Is(err, boom) {
+		t.Fatalf("FormatText error: %v", err)
+	}
+	if got := CleanText(" \u200ba\tb\u2028\n "); got != "ab" {
+		t.Fatalf("CleanText: %q", got)
+	}
+}
+
+func TestValidURL(t *testing.T) {
+	for v, want := range map[string]bool{
+		"https://acme.slack.com/archives/C1/p1":               true,
+		"https://ACME.Slack.com/x":                            true,
+		"http://acme.slack.com/x":                             false,
+		"https://slack.com/x":                                 false,
+		"https://acme.slack.com.evil.example/x":               false,
+		"https://user@acme.slack.com/x":                       false,
+		"https://acme.slack.com/" + "\x00":                    false,
+		"https://acme.slack.com/" + strings.Repeat("a", 2048): false,
+		"": false,
+	} {
+		if got := ValidURL(v); got != want {
+			t.Errorf("ValidURL(%q) = %v", v, got)
+		}
 	}
 }

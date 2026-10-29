@@ -238,7 +238,7 @@ func TestMCPHTTP(t *testing.T) {
 		}
 		err = json.NewDecoder(resp.Body).Decode(&body)
 		_ = resp.Body.Close()
-		if resp.StatusCode != 200 || err != nil || len(body.Result.Tools) != 8 || resp.Header.Get("Cache-Control") != "no-store" {
+		if resp.StatusCode != 200 || err != nil || len(body.Result.Tools) != 12 || resp.Header.Get("Cache-Control") != "no-store" {
 			t.Fatalf("Host astovia.example origin %q: %d %v %d %v", origin, resp.StatusCode, err, len(body.Result.Tools), resp.Header)
 		}
 	}
@@ -294,8 +294,9 @@ func testMCPTools(t *testing.T, driver string) {
 		if tool.Description == "" || tool.Annotations == nil || tool.Annotations.OpenWorldHint == nil {
 			t.Fatalf("%s: description or annotations: %+v", tool.Name, tool.Annotations)
 		}
-		// The Chatwork tools read an external service and nothing else.
-		if strings.HasPrefix(tool.Name, "chatwork_") {
+		// The Chatwork and Slack tools read an external service and nothing
+		// else.
+		if strings.HasPrefix(tool.Name, "chatwork_") || strings.HasPrefix(tool.Name, "slack_") {
 			if !tool.Annotations.ReadOnlyHint || !*tool.Annotations.OpenWorldHint {
 				t.Fatalf("%s annotations: %+v", tool.Name, tool.Annotations)
 			}
@@ -318,7 +319,7 @@ func testMCPTools(t *testing.T, driver string) {
 		}
 	}
 	sort.Strings(names)
-	if strings.Join(names, ",") != "action_items_create,action_items_get,action_items_list,action_items_update,chatwork_message_get,chatwork_messages_list,chatwork_messages_search,chatwork_rooms_list" {
+	if strings.Join(names, ",") != "action_items_create,action_items_get,action_items_list,action_items_update,chatwork_message_get,chatwork_messages_list,chatwork_messages_search,chatwork_rooms_list,slack_conversations_list,slack_messages_list,slack_messages_search,slack_thread_get" {
 		t.Fatalf("tools: %v", names)
 	}
 
