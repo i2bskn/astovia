@@ -188,6 +188,10 @@ func testMCPParents(t *testing.T, driver string) {
 		t.Fatal(err)
 	}
 	for _, tool := range tools.Tools {
+		// The Chatwork tools have no action items.
+		if strings.HasPrefix(tool.Name, "chatwork_") {
+			continue
+		}
 		props := tool.InputSchema.(map[string]any)["properties"].(map[string]any)
 		p, ok := props["parent_id"].(map[string]any)
 		if tool.Name == "action_items_get" {

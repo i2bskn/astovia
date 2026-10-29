@@ -246,3 +246,52 @@ func TestIDs(t *testing.T) {
 		t.Fatal("ValidMessageID")
 	}
 }
+
+func TestRoomCounts(t *testing.T) {
+	_, c := newFake(t, reply(`[{"room_id":1,"name":"My","type":"my","last_update_time":100,"unread_num":3,"mention_num":1},`+
+		`{"room_id":2,"name":"Team","type":"group","last_update_time":200,"unread_num":"3","mention_num":null},`+
+		`{"room_id":3,"name":"Bob","type":"direct","last_update_time":300,"unread_num":1.5}]`))
+	rooms, err := c.Rooms(context.Background(), testToken)
+	want := []Room{
+		{ID: "1", Name: "My", Type: "my", LastUpdate: 100, UnreadNum: 3, MentionNum: 1},
+		{ID: "2", Name: "Team", Type: "group", LastUpdate: 200},
+		{ID: "3", Name: "Bob", Type: "direct", LastUpdate: 300},
+	}
+	if err != nil || !reflect.DeepEqual(rooms, want) {
+		t.Fatalf("Rooms: %+v %v", rooms, err)
+	}
+}
+
+func TestMessage(t *testing.T) {
+	f, c := newFake(t, reply(`{"message_id":"1001","account":{"account_id":7,"name":"Bob"},"body":"[To:123] hi","send_time":300,"update_time":0}`))
+	m, err := c.Message(context.Background(), testToken, "2", "1001")
+	if err != nil || m != (Message{ID: "1001", AccountID: "7", AccountName: "Bob", Body: "[To:123] hi", SendTime: 300}) {
+		t.Fatalf("Message: %+v %v", m, err)
+	}
+	r := f.last()
+	if r.URL.Path != "/v2/rooms/2/messages/1001" || r.URL.RawQuery != "" || r.Header.Get("x-chatworktoken") != testToken {
+		t.Fatalf("message request: %s", r.URL)
+	}
+	// Invalid IDs are not requested.
+	for _, ids := range [][2]string{{"0", "1001"}, {"2/../me", "1001"}, {"2", "01"}, {"2", ""}, {"2", "1/../../me"}} {
+		if _, err = c.Message(context.Background(), testToken, ids[0], ids[1]); !errors.Is(err, ErrUnexpected) {
+			t.Fatalf("ids %q: %v", ids, err)
+		}
+	}
+	if n := f.count(); n != 1 {
+		t.Fatalf("requests for invalid ids: %d", n)
+	}
+
+	_, c = newFake(t, reply(`{"message_id":"0","body":"x"}`))
+	if _, err = c.Message(context.Background(), testToken, "2", "1001"); !errors.Is(err, ErrUnexpected) {
+		t.Fatalf("invalid message_id: %v", err)
+	}
+	// 204 and 404 are a missing message.
+	for _, code := range []int{http.StatusNoContent, http.StatusNotFound} {
+		_, c = newFake(t, status(code))
+		var a *APIError
+		if _, err = c.Message(context.Background(), testToken, "2", "1001"); !errors.As(err, &a) || a.Status != 404 || a.Method != "message" {
+			t.Fatalf("%d: %v", code, err)
+		}
+	}
+}

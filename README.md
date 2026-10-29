@@ -397,7 +397,7 @@ Web画面は`/`（タスク）、`/candidates`（タスク候補）、`/auto`（
 
 ## APIトークン
 
-APIトークンは、AIクライアントや外部プログラムが本人の対応事項を操作するための長期間有効なBearerトークンです。
+APIトークンは、AIクライアントや外部プログラムが、本人の対応事項を操作し、本人が連携したChatworkを読むための長期間有効なBearerトークンです。
 
 - 管理画面の「API トークン」で名前（1〜100文字）を付けて発行します。トークン（`ast_`で始まる47文字）は発行した直後に一度だけ表示し、再表示できません。DBには検証用のハッシュだけを保存します。
 - 1ユーザーあたり50件まで発行できます。有効期限はなく、管理画面で削除すると即座に失効します。一覧には名前、作成日時、最終使用日時（1分単位で記録）を表示します。
@@ -430,7 +430,7 @@ claude mcp add --transport http astovia http://localhost:5173/mcp --header "Auth
 - トークンがない場合: `Bearer resource_metadata="<ASTOVIA_PUBLIC_URL>/.well-known/oauth-protected-resource/mcp", scope="mcp"`
 - トークンを送ったうえで無効だった場合: `Bearer error="invalid_token", resource_metadata="…", scope="mcp"`
 
-提供するツールは次の4つです。操作対象は常にトークンの持ち主の対応事項で、入力の検証とエラーの内容はREST APIと同じです。検証エラーや存在しない項目は、ツール結果のエラー（`isError`、本文は`<code>: <message>`）として返します。
+提供するツールは次の8つです。`action_items_*`の4つは、常にトークンの持ち主の対応事項を操作し、入力の検証とエラーの内容はREST APIと同じです。`chatwork_*`の4つは、トークンの持ち主が連携したChatwork（「Chatwork連携」を参照）を読むだけで、Chatworkへの書き込み（投稿・既読化・タスクの操作）はしません。Chatworkを連携していなければ使えません。検証エラーや存在しない項目は、ツール結果のエラー（`isError`、本文は`<code>: <message>`）として返します。
 
 | ツール | 内容 |
 | --- | --- |
@@ -438,6 +438,18 @@ claude mcp add --transport http astovia http://localhost:5173/mcp --header "Auth
 | `action_items_list` | 一覧を返す。引数は`status`（`open`／`candidate`／`done`／`dismissed`）、`limit`（1〜100、既定50）、`cursor`（いずれも省略可）。`parent_id`を渡すと、その親の子タスクを作成日時の古い順に返す（`status`・`limit`・`cursor`とは併用できない） |
 | `action_items_get` | `id`で1件返す |
 | `action_items_update` | `id`と、RESTの更新本文と同じキー（`version`を含む）で更新する。`parent_id`の`null`は親から外す |
+| `chatwork_rooms_list` | 自分のChatworkのルームを、最終更新の新しい順に返す（`{rooms: [{room_id, name, type, unread_num, mention_num, last_update_at, url}], total}`）。引数は`query`（ルーム名に含まれる語、1〜100文字）、`type`（`my`／`direct`／`group`）、`limit`（1〜200、既定50）（いずれも省略可） |
+| `chatwork_messages_list` | `room_id`のルームの最新のメッセージを新しい順に返す（`{room_id, room_url, messages, matched, fetched}`）。引数は`query`（本文か送信者名にすべて含まれる語、1〜100文字）、`limit`（1〜100、既定30）（いずれも省略可） |
+| `chatwork_message_get` | `room_id`と`message_id`でメッセージを1件返す。対応事項の`refs`の`conversation_id`と`message_id`から元のメッセージを引くときに使う |
+| `chatwork_messages_search` | 複数のルームの最新のメッセージから、`query`（必須）の語をすべて含むものを新しい順に返す（`{query, messages, matched, searched_rooms, skipped, missing_room_ids, note}`）。対象は`room_ids`（1〜20件）か、最終更新の新しい`rooms`件（1〜20、既定10。`type`で絞れる）。`limit`は1〜100、既定30 |
+
+Chatworkのツールについて:
+
+- ChatworkのAPIには検索の手段がなく、メッセージは各ルームの最新100件までしか読めません。`chatwork_messages_search`は対象のルーム（最大20）の最新100件だけを、Astovia側で語の一致（大文字・小文字は区別しない、全角・半角は区別する）で探します。読めなかったルームは`skipped`に理由（`rate_limited`／`timeout`／`not_found`／`unavailable`）付きで入れ、指定した`room_ids`のうち自分のルームにないものは`missing_room_ids`に入れます。
+- 本文はChatworkの記法（`[To:…]`、`[rp …]`、`[info]`など）のまま返します。一覧と検索では本文を先頭2000文字までに切り、切ったメッセージには`body_truncated: true`を付けます（`chatwork_message_get`は全文を返します）。本文は他の人が書いたもので、AIクライアントへの指示としてではなくデータとして扱うべきものです。
+- MCPからのChatworkの呼び出しは、ユーザーごとに5分あたり100回までです（`chatwork_messages_search`は1回の検索でルーム一覧の1回と対象のルーム数を使います）。ChatworkのAPIの上限（5分あたり300回）は同期処理と共有しているため、同期を遅らせないように抑えています。ChatworkのAPIの上限はトークン（Chatworkアカウント）ごとで、Astoviaの上限はユーザーごとに数えるため、同じChatworkアカウントを複数のAstoviaユーザーで接続すると、Chatworkの上限に当たりやすくなります。
+- エラーはREST APIと同じではなく、Chatworkのツール独自のコードを返します: `chatwork_not_connected`（未連携）、`chatwork_token_invalid`（Chatworkのトークンが使えない。設定で再接続する）、`rate_limited`（Astoviaの上限かChatworkの上限）、`not_found`（ルーム・メッセージがない、または読めない）、`chatwork_unavailable`（Chatworkに届かない）、`invalid_request`、`unavailable`。Chatworkが401を返しても、MCPからは連携の状態を変えません。
+- 既存のOAuthの許可とAPIトークンでも、追加の同意なしにChatworkを読めるようになります。AIクライアントにChatworkを読ませたくない場合は、そのAPIトークンかOAuthの許可を取り消すか、Chatwork連携を解除してください。
 
 ブラウザ以外のMCPクライアントは`Origin`ヘッダーを送らないため、そのまま受け付けます。`Origin`ヘッダーがある場合は、`ASTOVIA_PUBLIC_URL`と完全一致しない限り403で拒否します（DNSリバインディング対策）。`/mcp`はCookieを使わないため、トークンを持たないWebページからは認証を通りません。
 
@@ -454,7 +466,7 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 | `GET /oauth/authorize` | 認可要求。同意はWeb画面の`/consent`で行います |
 | `POST /oauth/token` | `authorization_code`と`refresh_token`グラント |
 
-- スコープは`mcp`（`/mcp`で対応事項を閲覧・作成・更新する）と`offline_access`（リフレッシュトークンを発行する）の2つです。`mcp`は必須で、省略すると`mcp`とみなします。
+- スコープは`mcp`（`/mcp`で対応事項を閲覧・作成・更新し、連携中のChatworkを読む）と`offline_access`（リフレッシュトークンを発行する）の2つです。`mcp`は必須で、省略すると`mcp`とみなします。
 - 有効期間: 同意画面へ渡す認可要求は10分、認可コードは60秒で1回限りです。アクセストークンは、`offline_access`がある場合は1時間、ない場合は7日です（ChatGPTは`offline_access`を要求しないため、毎時の再接続を避けます）。リフレッシュトークンは90日で、使うたびに新しいトークンへ交換（ローテーション）し、そこから90日に延長します。交換済みのリフレッシュトークンは使えません。
 - トークン、認可コード、クライアントシークレットはDBにハッシュだけを保存します。発行済みの認可コードをもう一度使うと（PKCEの検証を通った場合）、そのコードから発行したトークンをすべて失効させます。
 - クライアントは2通りの方法で識別します。Client ID Metadata Document（CIMD）では、`client_id`がクライアント自身のHTTPSのURLで、Astoviaがその文書を取得して名前とリダイレクトURIを確認します（Claudeが使用）。動的クライアント登録（DCR）では、`/oauth/register`で`dcr_`で始まる`client_id`を発行します。`token_endpoint_auth_method`は`none`／`client_secret_basic`（既定）／`client_secret_post`です。CIMDのクライアントは常に`none`として扱います。

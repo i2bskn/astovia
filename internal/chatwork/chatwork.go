@@ -246,13 +246,32 @@ func (c *Client) Me(ctx context.Context, token string) (Account, error) {
 	return Account{ID: accountID, Name: out.Name, OrganizationName: out.OrganizationName}, nil
 }
 
+// MessageURL links to a message, and RoomURL to a room.
+func MessageURL(room, message string) string {
+	return "https://www.chatwork.com/#!rid" + room + "-" + message
+}
+
+func RoomURL(room string) string { return "https://www.chatwork.com/#!rid" + room }
+
 // Room is a chat the user is a member of. Type is "my", "direct" or
-// "group"; LastUpdate is the Unix time of its last update.
+// "group"; LastUpdate is the Unix time of its last update. UnreadNum and
+// MentionNum are 0 when the response has no integer for them.
 type Room struct {
 	ID         string
 	Name       string
 	Type       string
 	LastUpdate int64
+	UnreadNum  int
+	MentionNum int
+}
+
+// count returns the JSON integer in raw, or 0 for anything else.
+func count(raw json.RawMessage) int {
+	var n int
+	if len(raw) == 0 || json.Unmarshal(raw, &n) != nil {
+		return 0
+	}
+	return n
 }
 
 // Rooms returns the user's rooms. Rooms with an invalid room_id are left
@@ -268,6 +287,8 @@ func (c *Client) Rooms(ctx context.Context, token string) ([]Room, error) {
 		Name           string          `json:"name"`
 		Type           string          `json:"type"`
 		LastUpdateTime int64           `json:"last_update_time"`
+		UnreadNum      json.RawMessage `json:"unread_num"`
+		MentionNum     json.RawMessage `json:"mention_num"`
 	}
 	if err = decode(method, body, &out); err != nil {
 		return nil, err
@@ -278,7 +299,8 @@ func (c *Client) Rooms(ctx context.Context, token string) ([]Room, error) {
 		if !ok {
 			continue
 		}
-		rooms = append(rooms, Room{ID: roomID, Name: r.Name, Type: r.Type, LastUpdate: r.LastUpdateTime})
+		rooms = append(rooms, Room{ID: roomID, Name: r.Name, Type: r.Type, LastUpdate: r.LastUpdateTime,
+			UnreadNum: count(r.UnreadNum), MentionNum: count(r.MentionNum)})
 	}
 	return rooms, nil
 }
@@ -301,6 +323,27 @@ type MessagePage struct {
 	Raw      int
 }
 
+// messageJSON is a message in a response of GET /rooms/{room_id}/messages.
+type messageJSON struct {
+	MessageID json.RawMessage `json:"message_id"`
+	Account   struct {
+		AccountID json.RawMessage `json:"account_id"`
+		Name      string          `json:"name"`
+	} `json:"account"`
+	Body     string `json:"body"`
+	SendTime int64  `json:"send_time"`
+}
+
+// message returns m, or false when its message_id is invalid.
+func (m messageJSON) message() (Message, bool) {
+	messageID, ok := id(m.MessageID, messageIDPattern)
+	if !ok {
+		return Message{}, false
+	}
+	accountID, _ := id(m.Account.AccountID, idPattern)
+	return Message{ID: messageID, AccountID: accountID, AccountName: m.Account.Name, Body: m.Body, SendTime: m.SendTime}, true
+}
+
 // Messages returns the latest (up to 100) messages of the room. It always
 // sends force=1, so that the result does not depend on what was read before
 // with the same token.
@@ -313,28 +356,42 @@ func (c *Client) Messages(ctx context.Context, token, roomID string) (MessagePag
 	if err != nil || body == nil {
 		return MessagePage{}, err
 	}
-	var out []struct {
-		MessageID json.RawMessage `json:"message_id"`
-		Account   struct {
-			AccountID json.RawMessage `json:"account_id"`
-			Name      string          `json:"name"`
-		} `json:"account"`
-		Body     string `json:"body"`
-		SendTime int64  `json:"send_time"`
-	}
+	var out []messageJSON
 	if err = decode(method, body, &out); err != nil {
 		return MessagePage{}, err
 	}
 	page := MessagePage{Messages: make([]Message, 0, len(out)), Raw: len(out)}
 	for _, m := range out {
-		messageID, ok := id(m.MessageID, messageIDPattern)
-		if !ok {
-			continue
+		if msg, ok := m.message(); ok {
+			page.Messages = append(page.Messages, msg)
 		}
-		accountID, _ := id(m.Account.AccountID, idPattern)
-		page.Messages = append(page.Messages, Message{ID: messageID, AccountID: accountID, AccountName: m.Account.Name, Body: m.Body, SendTime: m.SendTime})
 	}
 	return page, nil
+}
+
+// Message returns one message of the room. A missing message (204 No
+// Content) is an *APIError with Status 404.
+func (c *Client) Message(ctx context.Context, token, roomID, messageID string) (Message, error) {
+	const method = "message"
+	if !ValidID(roomID) || !ValidMessageID(messageID) {
+		return Message{}, fmt.Errorf("%w (%s: invalid room or message)", ErrUnexpected, method)
+	}
+	body, err := c.call(ctx, token, method, "/rooms/"+roomID+"/messages/"+messageID, nil)
+	if err != nil {
+		return Message{}, err
+	}
+	if body == nil {
+		return Message{}, &APIError{Method: method, Status: http.StatusNotFound}
+	}
+	var out messageJSON
+	if err = decode(method, body, &out); err != nil {
+		return Message{}, err
+	}
+	msg, ok := out.message()
+	if !ok {
+		return Message{}, fmt.Errorf("%w (%s)", ErrUnexpected, method)
+	}
+	return msg, nil
 }
 
 // Task is an open task assigned to the user. LimitType is "none", "date"

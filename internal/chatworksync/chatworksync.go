@@ -656,11 +656,9 @@ func parseSourceKey(v string) (sourceKey, bool) {
 }
 
 // messageURL links to a message, and roomURL to a room.
-func messageURL(room, message string) string {
-	return "https://www.chatwork.com/#!rid" + room + "-" + message
-}
+func messageURL(room, message string) string { return chatwork.MessageURL(room, message) }
 
-func roomURL(room string) string { return "https://www.chatwork.com/#!rid" + room }
+func roomURL(room string) string { return chatwork.RoomURL(room) }
 
 // chatworkURL returns v when it is an https URL on www.chatwork.com, for
 // refs and automatic completion evidence.

@@ -67,6 +67,10 @@ type Server struct {
 	tokens *aicred.Tokens
 	// pushTestLimiter limits test notifications per user.
 	pushTestLimiter *loginLimiter
+	// chatworkMCPLimiter limits the Chatwork API calls made by the MCP
+	// tools per user, leaving most of Chatwork's limit (shared with the
+	// synchronization) to the synchronization.
+	chatworkMCPLimiter *loginLimiter
 }
 
 // userResponse is the public representation of the signed-in user.
@@ -134,7 +138,8 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
-		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute)}
+		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute),
+		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute)}
 }
 
 // handler returns the routes wrapped with the common response headers.
