@@ -1,7 +1,8 @@
 import { useId, useSyncExternalStore } from 'react';
 import { Navigate, NavLink, Route, Routes, useLocation } from 'react-router';
-import { auth } from './auth';
+import { auth, logoutAccess } from './auth';
 import type { Role } from './auth';
+import { authConfig } from './authConfig';
 import { UserIcon, UsersIcon } from './icons';
 import Phrased from './Phrased';
 import { accountPageAt, visibleAccountPages } from './settingsPages';
@@ -15,15 +16,22 @@ const pageIcons: Record<AccountPage, () => React.JSX.Element> = {
 
 // Sign-out lives here, one step away from the menu, so that it is not
 // pressed by accident.
+// With Cloudflare Access, a second button also ends the Access session, so
+// that another account can sign in.
 function AccountSettings({ email }: { email: string }) {
   const state = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
+  const config = useSyncExternalStore(authConfig.subscribe, authConfig.getSnapshot).config;
   const headingID = useId();
+  const busy = state.busy === 'logout';
   return <section className="action-panel settings-panel" id="account" aria-labelledby={headingID}>
     <h2 id={headingID}>アカウント</h2>
     <div className="account-row">
       <span className="avatar large" aria-hidden="true">{email.slice(0, 1).toUpperCase()}</span>
       <p className="account-row-email"><span className="sr-only">ログイン中: </span>{email}</p>
-      <button className="button secondary" type="button" disabled={state.busy === 'logout'} onClick={() => { void auth.logout(); }}>{state.busy === 'logout' ? 'ログアウト中…' : 'ログアウト'}</button>
+      <button className="button secondary" type="button" disabled={busy} onClick={() => { void auth.logout(); }}>{busy ? 'ログアウト中…' : 'ログアウト'}</button>
+      {config?.mode === 'cloudflare_access'
+        ? <button className="button secondary" type="button" disabled={busy} onClick={() => { void logoutAccess(config.logoutURL); }}>Cloudflare Access からもログアウト</button>
+        : null}
     </div>
   </section>;
 }

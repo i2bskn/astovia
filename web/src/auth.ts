@@ -155,6 +155,45 @@ async function restore(): Promise<void> {
   }
 }
 
+// accessLoginFlag marks, in sessionStorage, a Cloudflare Access sign-in
+// started from this tab. The page loaded after the sign-in tells the other
+// tabs, as a password login does.
+const accessLoginFlag = 'astovia-access-login';
+
+// announceAccessLogin runs after the first restore of a page load. When the
+// tab started an Access sign-in and is now signed in, the other tabs read
+// the new session. The flag is removed either way.
+function announceAccessLogin(): void {
+  let started = false;
+  try {
+    started = sessionStorage.getItem(accessLoginFlag) !== null;
+    sessionStorage.removeItem(accessLoginFlag);
+  } catch {
+    return;
+  }
+  if (started && state.status === 'authenticated') channel?.postMessage('session-changed');
+}
+
+// accessLoginURL starts the Cloudflare Access sign-in, returning to the
+// screen at pathname and search afterwards.
+export function accessLoginURL(pathname: string, search: string): string {
+  return `/auth/access/login?return_to=${encodeURIComponent(pathname + search)}`;
+}
+
+// startAccessLogin leaves for the Cloudflare Access sign-in. It is only
+// called from a button: an automatic redirect could loop on a failure. A
+// navigation is used instead of a form, which form-action 'self' would stop
+// at the redirect to Cloudflare.
+export function startAccessLogin(pathname: string, search: string): void {
+  try {
+    sessionStorage.setItem(accessLoginFlag, '1');
+  } catch {
+    // Without storage the other tabs notice the session on their next
+    // refresh.
+  }
+  location.assign(accessLoginURL(pathname, search));
+}
+
 channel?.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (event.data !== 'logout' && event.data !== 'session-changed') return;
   generation += 1;
@@ -172,7 +211,7 @@ export const auth = {
   initialize(): void {
     if (initialized) return;
     initialized = true;
-    void restore();
+    void restore().then(announceAccessLogin);
   },
   retry(): void { void restore(); },
   async login(email: string, password: string): Promise<void> {
@@ -236,6 +275,17 @@ export const auth = {
     }
   },
 };
+
+// logoutAccess signs out of Astovia and then of Cloudflare Access at
+// logoutURL. When the Astovia sign-out fails, the screen stays with the
+// error of logout. A screen that is not signed in goes to logoutURL at once.
+export async function logoutAccess(logoutURL: string): Promise<void> {
+  if (state.status !== 'anonymous') {
+    await auth.logout();
+    if (auth.getSnapshot().status !== 'anonymous') return;
+  }
+  location.assign(logoutURL);
+}
 
 // Private API requests retry once after a single-flight refresh. Tokens stay in memory.
 export async function request<T>(path: `/api/v1/${string}`, init?: RequestInit): Promise<T> {

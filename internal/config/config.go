@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -18,7 +19,35 @@ type Config struct {
 	// Google is the OAuth client of the mail integration, or nil when
 	// ASTOVIA_GOOGLE_CLIENT_ID and ASTOVIA_GOOGLE_CLIENT_SECRET are not set.
 	Google *GoogleClient
+	// Access is the Cloudflare Access SaaS application (OIDC) that signs
+	// users in to the web UI instead of passwords, or nil when the
+	// ASTOVIA_ACCESS_* variables are not set (password sign-in).
+	Access *AccessClient
 }
+
+// AccessClient identifies the Cloudflare Access SaaS application (OIDC)
+// whose relying party Astovia is. Issuer and RedirectURI are derived from
+// the team domain, the client ID and the public URL. The secret is never
+// logged or put in an error.
+type AccessClient struct {
+	// TeamDomain is the team origin, https://<team>.cloudflareaccess.com.
+	TeamDomain string
+	// ClientID and Secret are the OIDC client ID and secret.
+	ClientID, Secret string
+	// Issuer is the OIDC issuer of the application; the authorization,
+	// token and JWKS endpoints are under it (no discovery).
+	Issuer string
+	// RedirectURI is the callback registered in the application.
+	RedirectURI string
+}
+
+// AccessCallbackPath is the path of the redirect URI of the Access
+// application.
+const AccessCallbackPath = "/auth/access/callback"
+
+// accessClientIDPattern is the accepted format of an Access client ID. The
+// ID is embedded in URL paths, so only unreserved characters are allowed.
+var accessClientIDPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,256}$`)
 
 // GoogleClient is the OAuth client (a web application) the operator made in
 // Google Cloud for the mail integration. RedirectURI is derived from the
@@ -48,6 +77,9 @@ func Load(requireSecret bool) (Config, error) {
 		return c, err
 	}
 	if c.Google, err = googleClient(c.PublicURL); err != nil {
+		return c, err
+	}
+	if c.Access, err = accessClient(c.PublicURL); err != nil {
 		return c, err
 	}
 	if requireSecret {
@@ -88,6 +120,66 @@ func validGoogleValue(v string) bool {
 	}
 	for i := 0; i < len(v); i++ {
 		if v[i] < 0x20 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// accessClient reads the Cloudflare Access application. All three values
+// empty keep password sign-in; only some of them is an error. As with the
+// Google client, the values are not trimmed: surrounding spaces are
+// rejected.
+func accessClient(publicURL string) (*AccessClient, error) {
+	team, id, secret := os.Getenv("ASTOVIA_ACCESS_TEAM_DOMAIN"), os.Getenv("ASTOVIA_ACCESS_CLIENT_ID"), os.Getenv("ASTOVIA_ACCESS_CLIENT_SECRET")
+	if team == "" && id == "" && secret == "" {
+		return nil, nil
+	}
+	if team == "" || id == "" || secret == "" {
+		return nil, errors.New("ASTOVIA_ACCESS_TEAM_DOMAIN, ASTOVIA_ACCESS_CLIENT_ID and ASTOVIA_ACCESS_CLIENT_SECRET must be set together")
+	}
+	domain, err := accessTeamDomain(team)
+	if err != nil {
+		return nil, err
+	}
+	if !accessClientIDPattern.MatchString(id) {
+		return nil, errors.New("ASTOVIA_ACCESS_CLIENT_ID must be 1-256 characters of A-Z, a-z, 0-9, '.', '_', '~' and '-'")
+	}
+	if !validAccessSecret(secret) {
+		return nil, errors.New("ASTOVIA_ACCESS_CLIENT_SECRET must be 1-1024 printable ASCII characters without spaces")
+	}
+	// The sign-in cookie uses the Secure attribute and the __Host- prefix.
+	if !strings.HasPrefix(publicURL, "https://") {
+		return nil, errors.New("ASTOVIA_PUBLIC_URL must use https with Cloudflare Access")
+	}
+	issuer := domain + "/cdn-cgi/access/sso/oidc/" + id
+	return &AccessClient{TeamDomain: domain, ClientID: id, Secret: secret, Issuer: issuer, RedirectURI: publicURL + AccessCallbackPath}, nil
+}
+
+// accessTeamDomain checks an Access team domain and returns it lower-case,
+// without the one trailing slash it may have.
+func accessTeamDomain(raw string) (string, error) {
+	invalid := errors.New("ASTOVIA_ACCESS_TEAM_DOMAIN must be an origin such as https://<team>.cloudflareaccess.com")
+	u, err := url.Parse(strings.TrimSuffix(raw, "/"))
+	if err != nil || u.Scheme != "https" || u.Opaque != "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") || u.Port() != "" || strings.HasSuffix(u.Host, ":") {
+		return "", invalid
+	}
+	host := strings.ToLower(u.Host)
+	// A trailing dot would not match the iss claim.
+	if strings.HasSuffix(host, ".") || !ValidDNSHost(host) || !strings.HasSuffix(host, ".cloudflareaccess.com") {
+		return "", invalid
+	}
+	return "https://" + host, nil
+}
+
+// validAccessSecret accepts 1-1024 bytes of printable ASCII other than the
+// space.
+func validAccessSecret(v string) bool {
+	if len(v) == 0 || len(v) > 1024 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x21 || v[i] > 0x7e {
 			return false
 		}
 	}

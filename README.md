@@ -314,6 +314,9 @@ Docker起動手順で同じDBとユーザーを作成済みの場合、作成操
 | `ASTOVIA_JWT_SECRET` | なし。`serve`で必須 |
 | `ASTOVIA_GOOGLE_CLIENT_ID` | なし。`ASTOVIA_GOOGLE_CLIENT_SECRET`と両方設定するとメール連携が使える（「メール連携（Gmail・Google Workspace）」を参照） |
 | `ASTOVIA_GOOGLE_CLIENT_SECRET` | なし。`ASTOVIA_GOOGLE_CLIENT_ID`と両方設定する |
+| `ASTOVIA_ACCESS_TEAM_DOMAIN` | なし。`ASTOVIA_ACCESS_CLIENT_ID`、`ASTOVIA_ACCESS_CLIENT_SECRET`と3つとも設定すると、ログインがCloudflare Accessになる（「ログイン方式（パスワード / Cloudflare Access）」を参照） |
+| `ASTOVIA_ACCESS_CLIENT_ID` | なし。Cloudflare AccessのSaaSアプリのClient ID |
+| `ASTOVIA_ACCESS_CLIENT_SECRET` | なし。Cloudflare AccessのSaaSアプリのClient secret。ログに出さない |
 
 `compose.yaml`では、署名鍵とGoogleのOAuthクライアント（メール連携）とUID／GIDだけを外部から展開し、待ち受けアドレス・公開URL・SQLite接続先はファイル内の固定値を使用します。Composeの公開URLは`http://localhost:5173`で、直接起動時の既定値とは異なります。
 
@@ -364,6 +367,7 @@ make user-create USER_EMAIL=alice@example.com
 make user-reset-password USER_EMAIL=alice@example.com
 make user-disable USER_EMAIL=alice@example.com
 make user-enable USER_EMAIL=alice@example.com
+make user-role USER_EMAIL=alice@example.com USER_ROLE=owner
 ```
 
 ネイティブバイナリでは次のように実行します。
@@ -373,13 +377,64 @@ make user-enable USER_EMAIL=alice@example.com
 ./bin/astovia users reset-password --email alice@example.com
 ./bin/astovia users disable --email alice@example.com
 ./bin/astovia users enable --email alice@example.com
+./bin/astovia users role --email alice@example.com --role owner|member
 ```
 
-`users create`はオーナーを作成します。メンバーにするときは`--role member`を指定します（`--role`は`create`だけが受け付けます）。`users enable`は無効化したユーザーを再開し（`--password-stdin`は受け付けません）、無効化で削除したものは戻りません。CLIの`disable`には最後のオーナーの規則を適用しません（運用者の最終手段のため）。CLIで最後のオーナーを無効化すると、画面からユーザー管理ができなくなります。その場合は`users create`で新しいオーナーを作るか、`users enable`で再開して戻してください。
+`users create`はオーナーを作成します。メンバーにするときは`--role member`を指定します（`--role`は`create`と`role`だけが受け付けます）。`users role`は既存のユーザー（無効化中を含む）の権限を`--role`の値に変えます。`--role`は省略できず、パスワードは聞きません（`--password-stdin`は受け付けません）。存在しないメールアドレスはエラー（`user not found`）です。メンバーにすると、画面の「メンバーにする」と同じく、そのユーザーが発行した有効な招待とパスワード再設定リンクを取り消します（セッションとAPIトークンは残します）。最後のオーナーの規則は適用しません。`users enable`は無効化したユーザーを再開し（`--password-stdin`は受け付けません）、無効化で削除したものは戻りません。CLIの`disable`には最後のオーナーの規則を適用しません（運用者の最終手段のため）。CLIで最後のオーナーを無効化すると、画面からユーザー管理ができなくなります。その場合は`users create`で新しいオーナーを作るか、`users enable`で再開して戻してください。
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
 メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです（画面の招待・再設定も同じです）。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）、未送信の通知をすべて削除し、そのユーザーが発行した招待と再設定リンク、そのユーザー宛ての再設定リンクを取り消します。ユーザー無効化はGitHub連携とSlack連携とChatwork連携とメール連携のGoogleアカウントも削除します（パスワード再設定では残します。「GitHub連携と通知」「Slack連携」「Chatwork連携」「メール連携（Gmail・Google Workspace）」を参照）。パスワード再設定とユーザー無効化は、途中のGoogleアカウントの接続の手続きも取り消します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+
+## ログイン方式（パスワード / Cloudflare Access）
+
+管理画面のログインは、起動時の環境変数で「パスワード」（既定）か「Cloudflare Access」のどちらか一方に決まります。両方を同時に有効にすることはできません。
+
+Cloudflare Accessの方式では、AstoviaがCloudflare AccessのSaaSアプリケーション（OIDC）のクライアントになります。ログイン画面の「Cloudflare Access でログイン」からAccessのログインに移り、戻ってきたIDトークン（RS256）をAstoviaが自分で検証して、`email`クレームをユーザーのメールアドレスに対応づけます。ログイン後のセッション（Access JWTとRefresh Cookie）、`/api/v1`、APIトークン、MCP、MCPのOAuthは、パスワードの方式と同じです。
+
+| 環境変数 | 内容 |
+| --- | --- |
+| `ASTOVIA_ACCESS_TEAM_DOMAIN` | Accessのチームドメイン（`https://<チーム名>.cloudflareaccess.com`。末尾の`/`は1つまで取り除きます） |
+| `ASTOVIA_ACCESS_CLIENT_ID` | SaaSアプリのClient ID |
+| `ASTOVIA_ACCESS_CLIENT_SECRET` | SaaSアプリのClient secret。ログに出しません |
+
+- 3つはそろえて設定するか、どれも設定しません。一部だけ、形式の誤り、前後の空白は起動エラーになります（CLIも同じ検証をします）。Accessの方式では`ASTOVIA_PUBLIC_URL`がHTTPSである必要があります（ログイン中の状態を持つCookieに`Secure`と`__Host-`を使うため）。
+- 誰がログインできるかは、Cloudflare側のAccessのポリシーだけで決まります。初めてログインしたメールアドレスは、メンバー（`member`）として自動で作成されます。ポリシーは許可するメールアドレスかAccessグループで書いてください。広くすると、ログインした全員がメンバーとして作成されます。
+- アプリに許可するIdP（ログイン方法）は、メールアドレスの所有を確かめるもの（One-time PIN、Google、GitHubなど）に限ってください。任意のメールアドレスを名乗れるIdPを許可すると、そのメールアドレスのユーザー（オーナーを含む）としてログインされるおそれがあります。
+- メールアドレスは大文字・小文字を区別せずに照合します。AstoviaはIDトークンの`sub`と`email_verified`を見ません。このアプリのIDトークンを発行するのはCloudflare Accessだけで、Accessがログインに使ったメールアドレスを`email`に入れるためです。
+- 無効化したユーザーは、Accessでログインしても有効に戻らず、ログインに失敗します。
+- 人を外すときは、Accessのポリシーやグループから外したうえで、Astoviaでも無効化してください。Accessで止まるのはブラウザの新しいログインだけで、ログイン済みのAstoviaのセッション（最長7日）、APIトークン、MCPの接続（OAuth）はAccessを通らないため、無効化するまで使えます。
+- 方式を切り替えても、既存のセッションはそのまま残ります。切り替えた後も、期限まではログインしたままです。
+- Accessの方式では、パスワードでのログイン、招待、パスワード再設定は使えません（APIは409 `password_auth_disabled`を返し、何も変更しません）。招待とパスワード再設定のリンクの画面は、使えない旨だけを表示します。既存の招待の一覧と取り消し、権限の変更、無効化と再開はそのまま使えます。招待が残っているメールアドレスでAccessからログインした場合、招待の権限は使われずにメンバーとして作成され、招待は使われないまま一覧に残ります。`users reset-password`も使う意味がありません（APIトークン、MCPの接続、AIの設定などが削除されるだけです）。
+- Accessで作成したユーザーには、どのパスワードにも一致しない値をパスワードハッシュとして保存します。パスワードの方式に戻した場合、そのユーザーは`users reset-password`でパスワードを設定するまでログインできません。
+- 「ログアウト」はAstoviaのセッションだけを消します。Accessのセッションは残るため、次のログインではIdPの画面を通らないことがあります。共有の端末や別のアカウントに切り替えるときは、「アカウント」画面の「Cloudflare Access からもログアウト」を使ってください（Astoviaのログアウトに成功してから、Accessのログアウト画面へ移ります）。
+- ログインに失敗すると`/signin-error`に理由を表示します。ログインを始める画面（MCPの同意画面など）のURLが長すぎる場合（クライアントの`state`などが非常に長い場合）は、ログイン後に元の画面へ戻れないため、ログインを始めずにその旨を表示します。
+- MCPのOAuth（AIクライアントの接続）はAccessの方式でも同じ手順で使えます。同意画面でのログインがCloudflare Accessになります。
+- `/auth/access/login`と`/auth/access/callback`にはレート制限を付けません（Caddyなどのリバースプロキシの背後では全員が同じIPになり、正規のログインまで止めてしまうため）。
+
+### 最初のオーナー
+
+Accessの方式で最初にログインする前に、自分をオーナーとして作成してください。パスワードは使われませんが、12文字以上の入力が必要です。
+
+```sh
+docker compose run --rm app users create --email you@example.com
+```
+
+先にAccessでログインしてメンバーとして作成された場合は、権限をオーナーに変えます。
+
+```sh
+docker compose run --rm app users role --email you@example.com --role owner
+```
+
+開発用のComposeでは`make user-create USER_EMAIL=…`と`make user-role USER_EMAIL=… USER_ROLE=owner`でも実行できます。
+
+### Cloudflareの設定（手作業）
+
+1. Zero Trustのチームを作り、IdP（One-time PIN、Google、GitHubなど、メールアドレスの所有を確かめるもの）を追加します（作成済みなら不要）。
+2. Accessのアプリケーション（SaaS、OIDC）を作ります。リダイレクトURLは`https://<ASTOVIA_PUBLIC_URLのホスト>/auth/access/callback`、スコープは`openid`と`email`、PKCEを有効にし、ポリシーでログインを許可するメールアドレスかAccessグループを指定します。Client IDとClient secretを控えます。
+3. `https://<チーム名>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<Client ID>/.well-known/openid-configuration`を開き、`issuer`がこのURLから`/.well-known/openid-configuration`を除いたものであること、`authorization_endpoint`、`token_endpoint`、`jwks_uri`が`<issuer>/authorization`、`<issuer>/token`、`<issuer>/jwks`であること、署名にRS256、トークンエンドポイントの認証に`client_secret_basic`が使えることを確かめます。AstoviaはこのURLを読まず（discoveryは行いません）、これらのURLを決め打ちで使います。
+4. `.env`に`ASTOVIA_ACCESS_TEAM_DOMAIN`、`ASTOVIA_ACCESS_CLIENT_ID`、`ASTOVIA_ACCESS_CLIENT_SECRET`を設定し、「最初のオーナー」の手順を済ませてから、`docker compose up -d`で再起動します。
+5. 確認: `https://<ASTOVIA_DOMAIN>/`を開くと「Cloudflare Access でログイン」が表示され、ログイン後にタスクの一覧が表示されます。
 
 ## 認証と運用上の制約
 
@@ -393,7 +448,7 @@ make user-enable USER_EMAIL=alice@example.com
 - リバースプロキシを使用する場合は、`ASTOVIA_PUBLIC_URL`にHTTPSのOriginを設定します。パス、認証情報、クエリ、フラグメントは指定できません。プロキシでTLSを終端し、バックエンドへの直接接続を制限してください。HTTPの公開URLはループバック開発用途だけに限ります。
 - ホスト名はASCIIのDNS名か明示的なIPアドレスを使用します。国際化ドメイン名はpunycodeで指定してください。数値ホストの省略表記、スコープ付きIPv6、IPv4を埋め込んだIPv6は拒否します。DNS名の大文字・小文字、標準ポート、ポートの数値表記、IPv6の表記は設定読込時に正規化し、Origin検証とJWT issuerで共用します。以前の正規化されていないissuerで発行したトークンは再ログインが必要です。正規化済みの設定には影響しません。
 
-Web画面は`/`（タスク）、`/candidates`（タスク候補）、`/auto`（自動で処理したもの）、`/settings`（設定）、`/account`（アカウント。オーナーには`/account/users`のユーザー管理もあります）、`/tasks/{id}`（タスクの詳細）で開きます。以前の`/settings/account`と`/settings/users`は`/account`と`/account/users`に移ります。招待リンクは`/invite`、パスワード再設定リンクは`/reset-password`で開きます。以前の版の`/admin/`以下のURL（ブックマークや送信待ちの通知を含む）は、対応する新しいURLへリダイレクトします。権限はオーナーとメンバーの2種類だけで、共有Inboxや、通常の画面で他ユーザーの非公開情報を見る権限はありません（オーナーによるパスワード再設定リンクの扱いは「ユーザーを管理する」を参照）。本番での動かし方は「本番で動かす」を参照してください。
+Web画面は`/`（タスク）、`/candidates`（タスク候補）、`/auto`（自動で処理したもの）、`/settings`（設定）、`/account`（アカウント。オーナーには`/account/users`のユーザー管理もあります）、`/tasks/{id}`（タスクの詳細）で開きます。以前の`/settings/account`と`/settings/users`は`/account`と`/account/users`に移ります。招待リンクは`/invite`、パスワード再設定リンクは`/reset-password`で開きます。Cloudflare Accessでのログインに失敗したときは`/signin-error`を表示します。以前の版の`/admin/`以下のURL（ブックマークや送信待ちの通知を含む）は、対応する新しいURLへリダイレクトします。権限はオーナーとメンバーの2種類だけで、共有Inboxや、通常の画面で他ユーザーの非公開情報を見る権限はありません（オーナーによるパスワード再設定リンクの扱いは「ユーザーを管理する」を参照）。本番での動かし方は「本番で動かす」を参照してください。
 
 ## APIトークン
 

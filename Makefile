@@ -2,7 +2,7 @@
 COMPOSE_TEST := docker compose -f compose.test.yaml
 WEB_SOURCES := $(shell find web/src web/public -type f) web/index.html web/package.json web/pnpm-lock.yaml web/tsconfig.json web/vite.config.ts
 
-.PHONY: help env migrate up stop logs user-create user-reset-password user-disable user-enable test-web frontend test-go test check generate postgres build check-user-email
+.PHONY: help env migrate up stop logs user-create user-reset-password user-disable user-enable user-role test-web frontend test-go test check generate postgres build check-user-email check-user-role
 
 help: ## Show this list
 	@awk 'BEGIN { FS = ":.*## " } /^[A-Za-z0-9_.\/-]+:.*## / { printf "  %-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -59,6 +59,17 @@ check-user-email:
 	esac; \
 	if [ "$${#USER_EMAIL}" -lt 3 ] || [ "$${#USER_EMAIL}" -gt 254 ]; then echo 'invalid USER_EMAIL' >&2; exit 1; fi
 
+# USER_ROLE must be given on the make command line as well, for the same
+# reason as USER_EMAIL, and be owner or member.
+check-user-role:
+	@if [ "$(origin USER_ROLE)" != "command line" ] || [ -z "$${USER_ROLE:-}" ]; then \
+		echo 'USER_ROLE is required (e.g. make user-role USER_EMAIL=alice@example.com USER_ROLE=owner)' >&2; exit 1; \
+	fi; \
+	case "$$USER_ROLE" in \
+		owner|member) ;; \
+		*) echo 'USER_ROLE must be owner or member' >&2; exit 1 ;; \
+	esac
+
 user-create: check-user-email ## Create a user from the current source (make user-create USER_EMAIL=alice@example.com)
 	docker compose run --rm app go run ./cmd/astovia users create --email '$(USER_EMAIL)'
 
@@ -70,6 +81,9 @@ user-disable: check-user-email ## Disable a user (make user-disable USER_EMAIL=a
 
 user-enable: check-user-email ## Enable a disabled user again (make user-enable USER_EMAIL=alice@example.com)
 	docker compose run --rm app go run ./cmd/astovia users enable --email '$(USER_EMAIL)'
+
+user-role: check-user-email check-user-role ## Change a user's role (make user-role USER_EMAIL=alice@example.com USER_ROLE=owner)
+	docker compose run --rm app go run ./cmd/astovia users role --email '$(USER_EMAIL)' --role '$(USER_ROLE)'
 
 web/dist/index.html: $(WEB_SOURCES) ## Build the embedded UI only when its sources changed
 	$(COMPOSE_TEST) run --rm node sh -c 'corepack pnpm install --frozen-lockfile && corepack pnpm build'

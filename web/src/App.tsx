@@ -1,8 +1,10 @@
 import { useEffect, useId, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
-import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch, useParams } from 'react-router';
-import { auth } from './auth';
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch, useNavigate, useParams } from 'react-router';
+import { auth, logoutAccess, startAccessLogin } from './auth';
 import type { User } from './auth';
+import { authConfig, isSigninErrorPath, signinErrorMessage, signinReason } from './authConfig';
+import type { AuthConfig } from './authConfig';
 import Account from './Account';
 import AccountLinkPage from './AccountLinkPage';
 import ActionItemList from './ActionItemList';
@@ -78,6 +80,61 @@ function LoginForm() {
     </form>
     <p className="gate-help"><Phrased text="アカウントの作成やパスワードの再設定は、この Astovia のオーナーに連絡してください。" /></p>
   </section>;
+}
+
+// AccessLoginCard replaces the password form when Cloudflare Access signs
+// users in. It never leaves on its own, so that a failing sign-in cannot
+// loop; it returns to the current screen afterwards.
+function AccessLoginCard() {
+  return <section className="gate-card" aria-labelledby="login-heading">
+    <h1 id="login-heading">おかえりなさい</h1>
+    <p className="gate-lead"><Phrased text="Cloudflare Access でログインして、今日のタスクを確認しましょう。" /></p>
+    <button className="button primary block" type="button" onClick={() => startAccessLogin(window.location.pathname, window.location.search)}>Cloudflare Access でログイン</button>
+    <p className="gate-help"><Phrased text="ログインできる人は、この Astovia の運用者が Cloudflare Access で決めています。" /></p>
+  </section>;
+}
+
+// SigninErrorPage explains a failed Cloudflare Access sign-in
+// (/signin-error?reason=…), signed in or not.
+function SigninErrorPage({ config }: { config: AuthConfig }) {
+  const state = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const headingID = useId();
+  const busy = state.busy === 'logout';
+
+  function retry(): void {
+    if (config.mode === 'cloudflare_access') startAccessLogin('/', '');
+    else void navigate('/', { replace: true });
+  }
+
+  return <section className="gate-card status-card" aria-labelledby={headingID}>
+    <h1 id={headingID}>ログインできませんでした</h1>
+    <p className="gate-lead" role="alert"><Phrased text={signinErrorMessage(signinReason(location.search))} /></p>
+    {state.error ? <p className="notice error" role="alert">{state.error}</p> : null}
+    <button className="button primary block" type="button" onClick={retry}>もう一度ログイン</button>
+    {config.mode === 'cloudflare_access'
+      ? <button className="button secondary block" type="button" disabled={busy} onClick={() => { void logoutAccess(config.logoutURL); }}>{busy ? 'ログアウト中…' : 'Cloudflare Access からもログアウト'}</button>
+      : null}
+  </section>;
+}
+
+// AccessLinkNotice replaces the invitation and password reset screens when
+// Cloudflare Access signs users in. It calls no API.
+function AccessLinkNotice() {
+  const navigate = useNavigate();
+  const headingID = useId();
+  return <section className="gate-card status-card" aria-labelledby={headingID}>
+    <h1 id={headingID}>このリンクは使えません</h1>
+    <p className="gate-lead" role="alert"><Phrased text="このサーバーは Cloudflare Access でログインするため、招待・パスワード再設定のリンクは使えません。" /></p>
+    <button className="button secondary block" type="button" onClick={() => { void navigate('/', { replace: true }); }}>ログイン画面へ</button>
+  </section>;
+}
+
+// ConfigErrorCard is shown when the sign-in mode cannot be read. Passwords
+// are not assumed; the page is loaded again.
+function ConfigErrorCard() {
+  return <section className="gate-card status-card" aria-labelledby="config-heading"><h1 id="config-heading">接続を確認してください</h1><p className="gate-lead" role="alert">ログインの方法を確認できませんでした。接続を確認して、ページを再読み込みしてください。</p><button className="button primary block" type="button" onClick={() => window.location.reload()}>再読み込み</button></section>;
 }
 
 // Gate frames the screens shown before the workspace: sign-in, the session
@@ -289,12 +346,26 @@ function Workspace({ user, error }: { user: User; error: string | null }) {
 
 export default function App() {
   const state = useSyncExternalStore(auth.subscribe, auth.getSnapshot);
+  const configState = useSyncExternalStore(authConfig.subscribe, authConfig.getSnapshot);
   const signedIn = state.status === 'authenticated' && state.user !== null;
   // The OAuth consent page replaces the workspace on this path.
   const consentPage = useMatch('/consent') !== null;
+  const pathname = useLocation().pathname;
   // The invitation and password reset links have their own screens, before
   // the login check: they are used signed out.
-  const linkPage = linkPageAt(useLocation().pathname);
+  const linkPage = linkPageAt(pathname);
+  const config = configState.config;
+  const access = config?.mode === 'cloudflare_access';
+
+  // Nothing is shown before the sign-in mode is known.
+  if (configState.status !== 'ready' || !config) {
+    return <Gate>{configState.status === 'failed' ? <ConfigErrorCard /> : <LoadingCard />}</Gate>;
+  }
+
+  // The sign-in error screen is shown signed in or not, like the links.
+  if (isSigninErrorPath(pathname)) return <Gate><SigninErrorPage config={config} /></Gate>;
+
+  if (linkPage && access) return <Gate><AccessLinkNotice /></Gate>;
 
   if (linkPage) {
     return <Gate>
@@ -309,7 +380,7 @@ export default function App() {
   return <Gate>
     {state.status === 'loading' ? <LoadingCard /> : null}
     {state.status === 'unavailable' ? <ConnectionCard error={state.error} /> : null}
-    {state.status === 'anonymous' ? <LoginForm /> : null}
+    {state.status === 'anonymous' ? (access ? <AccessLoginCard /> : <LoginForm />) : null}
     {signedIn && consentPage ? <ConsentPage email={state.user?.email ?? ''} /> : null}
   </Gate>;
 }

@@ -45,7 +45,7 @@ func main() {
 func run(args []string) error {
 	users := len(args) > 0 && args[0] == "users"
 	if !users && len(args) > 0 && (len(args) != 1 || args[0] != "serve") {
-		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable --email ADDRESS [--password-stdin] [--role owner|member]]")
+		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable/role --email ADDRESS [--password-stdin] [--role owner|member]]")
 	}
 	c, e := config.Load(!users)
 	if e != nil {
@@ -165,16 +165,16 @@ func waitWorkers(wg *sync.WaitGroup, deadline time.Time) {
 }
 func account(ctx context.Context, s *store.Store, args []string, in io.Reader) error {
 	if len(args) < 1 {
-		return errors.New("users command requires create, reset-password, disable, or enable")
+		return errors.New("users command requires create, reset-password, disable, enable, or role")
 	}
 	op := args[0]
-	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" {
+	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" && op != "role" {
 		return errors.New("unknown users command")
 	}
 	f := flag.NewFlagSet(op, flag.ContinueOnError)
 	email := f.String("email", "", "email address")
 	stdin := f.Bool("password-stdin", false, "read password from stdin")
-	role := f.String("role", store.RoleOwner, "role of the new user (owner or member)")
+	role := f.String("role", store.RoleOwner, "role of the new user, or the new role (owner or member)")
 	if e := f.Parse(args[1:]); e != nil {
 		return e
 	}
@@ -183,8 +183,12 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 	}
 	roleSet := false
 	f.Visit(func(fl *flag.Flag) { roleSet = roleSet || fl.Name == "role" })
-	if op != "create" && roleSet {
+	if op != "create" && op != "role" && roleSet {
 		return errors.New(op + " does not accept --role")
+	}
+	// role changes the role given; it never falls back to the default.
+	if op == "role" && !roleSet {
+		return errors.New("role requires --role owner or member")
 	}
 	if !store.ValidRole(*role) {
 		return errors.New("role must be owner or member")
@@ -194,7 +198,7 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		return e
 	}
 	hash := ""
-	if op == "disable" || op == "enable" {
+	if op == "disable" || op == "enable" || op == "role" {
 		if *stdin {
 			return errors.New(op + " does not accept --password-stdin")
 		}
@@ -220,6 +224,16 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 				return e
 			}
 			return errors.New("could not create user")
+		}
+	case "role":
+		// The CLI does not apply the last-owner rule either. A demotion
+		// revokes the links the user issued, as in the user management API.
+		e = s.SetRole(ctx, u, *role, time.Now().Unix())
+		if e != nil {
+			if errors.Is(e, store.ErrNotFound) {
+				return e
+			}
+			return errors.New("could not update user")
 		}
 	case "enable":
 		e = s.EnableUser(ctx, u)

@@ -112,3 +112,103 @@ func TestGoogleClient(t *testing.T) {
 		}
 	}
 }
+
+func TestAccessClient(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://Astovia.Example.com:443")
+	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	const secret = "s3cr3t:with+special/chars%~"
+	set := func(team, id, sec string) {
+		t.Setenv("ASTOVIA_ACCESS_TEAM_DOMAIN", team)
+		t.Setenv("ASTOVIA_ACCESS_CLIENT_ID", id)
+		t.Setenv("ASTOVIA_ACCESS_CLIENT_SECRET", sec)
+	}
+
+	// None set: password sign-in.
+	set("", "", "")
+	if c, e := Load(true); e != nil || c.Access != nil {
+		t.Fatal(c.Access, e)
+	}
+
+	// All three set, normalized; the CLI reads them too.
+	for _, requireSecret := range []bool{true, false} {
+		set("https://Example.CloudflareAccess.com/", "0123abc._~-", secret)
+		c, e := Load(requireSecret)
+		want := AccessClient{
+			TeamDomain:  "https://example.cloudflareaccess.com",
+			ClientID:    "0123abc._~-",
+			Secret:      secret,
+			Issuer:      "https://example.cloudflareaccess.com/cdn-cgi/access/sso/oidc/0123abc._~-",
+			RedirectURI: "https://astovia.example.com/auth/access/callback",
+		}
+		if e != nil || c.Access == nil || *c.Access != want {
+			t.Fatalf("%v: %+v %v", requireSecret, c.Access, e)
+		}
+	}
+	set("https://example.cloudflareaccess.com", "id", strings.Repeat("~", 1024))
+	if c, e := Load(false); e != nil || c.Access == nil || c.Access.TeamDomain != "https://example.cloudflareaccess.com" {
+		t.Fatal(c.Access, e)
+	}
+
+	// One or two of them set.
+	const team, id = "https://example.cloudflareaccess.com", "client-id"
+	for _, tc := range []struct{ team, id, secret string }{
+		{team, "", ""}, {"", id, ""}, {"", "", secret},
+		{team, id, ""}, {team, "", secret}, {"", id, secret},
+	} {
+		set(tc.team, tc.id, tc.secret)
+		for _, requireSecret := range []bool{true, false} {
+			if _, e := Load(requireSecret); e == nil || !strings.Contains(e.Error(), "must be set together") {
+				t.Fatalf("%+v: %v", tc, e)
+			}
+		}
+	}
+
+	// Format violations, never echoed in the error.
+	for _, tc := range []struct{ team, id, secret, variable string }{
+		{"http://example.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com/path", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com//", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com?x=1", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com?", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com#x", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com:443", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com:", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://user:pass@example.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com.", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com.evil.test", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://evil.test", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://ex_ample.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"example.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{" https://example.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{"https://example.cloudflareaccess.com ", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
+		{team, "client id", secret, "ASTOVIA_ACCESS_CLIENT_ID"},
+		{team, "client/id", secret, "ASTOVIA_ACCESS_CLIENT_ID"},
+		{team, " client-id", secret, "ASTOVIA_ACCESS_CLIENT_ID"},
+		{team, "clïent", secret, "ASTOVIA_ACCESS_CLIENT_ID"},
+		{team, strings.Repeat("a", 257), secret, "ASTOVIA_ACCESS_CLIENT_ID"},
+		{team, id, "with space", "ASTOVIA_ACCESS_CLIENT_SECRET"},
+		{team, id, " " + secret, "ASTOVIA_ACCESS_CLIENT_SECRET"},
+		{team, id, secret + "\n", "ASTOVIA_ACCESS_CLIENT_SECRET"},
+		{team, id, "sécret", "ASTOVIA_ACCESS_CLIENT_SECRET"},
+		{team, id, strings.Repeat("a", 1025), "ASTOVIA_ACCESS_CLIENT_SECRET"},
+	} {
+		set(tc.team, tc.id, tc.secret)
+		_, e := Load(false)
+		if e == nil || !strings.Contains(e.Error(), tc.variable) {
+			t.Fatalf("%+v: %v", tc, e)
+		}
+		if strings.Contains(e.Error(), strings.TrimSpace(tc.secret)) {
+			t.Fatalf("error contains the secret: %v", e)
+		}
+	}
+
+	// Access needs an https public URL.
+	set(team, id, secret)
+	t.Setenv("ASTOVIA_PUBLIC_URL", "http://localhost:8080")
+	if _, e := Load(false); e == nil || !strings.Contains(e.Error(), "ASTOVIA_PUBLIC_URL") {
+		t.Fatal(e)
+	}
+}

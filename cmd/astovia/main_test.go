@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/store"
@@ -90,7 +91,7 @@ func TestUsersCommand(t *testing.T) {
 				{"disable with password-stdin", []string{"disable", "--email", "alice@example.com", "--password-stdin"}, "disable does not accept --password-stdin"},
 				{"extra arguments", []string{"create", "--email", "alice@example.com", "extra"}, "unexpected arguments"},
 				{"unknown subcommand", []string{"rename", "--email", "alice@example.com"}, "unknown users command"},
-				{"no subcommand", nil, "users command requires create, reset-password, disable, or enable"},
+				{"no subcommand", nil, "users command requires create, reset-password, disable, enable, or role"},
 				{"username flag", []string{"create", "--username", "alice@example.com", "--password-stdin"}, "flag provided but not defined: -username"},
 				{"invalid email on create", []string{"create", "--email", "alice", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
 				{"invalid email on reset-password", []string{"reset-password", "--email", "alice@", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
@@ -102,6 +103,11 @@ func TestUsersCommand(t *testing.T) {
 				{"role on reset-password", []string{"reset-password", "--email", "alice@example.com", "--password-stdin", "--role", "member"}, "reset-password does not accept --role"},
 				{"role on disable", []string{"disable", "--email", "alice@example.com", "--role", "owner"}, "disable does not accept --role"},
 				{"role on enable", []string{"enable", "--email", "alice@example.com", "--role", "owner"}, "enable does not accept --role"},
+				{"role without --role", []string{"role", "--email", "alice@example.com"}, "role requires --role owner or member"},
+				{"role with password-stdin", []string{"role", "--email", "alice@example.com", "--role", "member", "--password-stdin"}, "role does not accept --password-stdin"},
+				{"invalid role on role", []string{"role", "--email", "alice@example.com", "--role", "admin"}, "role must be owner or member"},
+				{"empty role on role", []string{"role", "--email", "alice@example.com", "--role="}, "role must be owner or member"},
+				{"invalid email on role", []string{"role", "--email", "alice", "--role", "member"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
 			} {
 				if err = call("correct-password-123\n", tc.args...); err == nil || err.Error() != tc.want {
 					t.Fatalf("%s: got %v, want %q", tc.name, err, tc.want)
@@ -168,8 +174,99 @@ func TestUsersCommand(t *testing.T) {
 func TestRunUsage(t *testing.T) {
 	for _, args := range [][]string{{"serve", "x"}, {"foo"}} {
 		err := run(args)
-		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable --email ADDRESS [--password-stdin] [--role owner|member]]" {
+		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable/role --email ADDRESS [--password-stdin] [--role owner|member]]" {
 			t.Fatalf("%q: got %v", args, err)
 		}
+	}
+}
+
+func TestUsersRoleCommand(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := testutil.Database(t, driver)
+			call := func(args ...string) error {
+				t.Helper()
+				return account(ctx, s, args, strings.NewReader(""))
+			}
+			role := func(email string) string {
+				t.Helper()
+				u, err := s.UserByEmail(ctx, email)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return u.Role
+			}
+			for _, email := range []string{"alice@example.com", "bob@example.com"} {
+				if err := account(ctx, s, []string{"create", "--email", email, "--password-stdin"}, strings.NewReader("correct-password-123\n")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// bob, an owner, issues an invitation and a reset link for alice.
+			alice, err := s.UserByEmail(ctx, "alice@example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bob, err := s.UserByEmail(ctx, "bob@example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().Unix()
+			if err = s.CreateInvitation(ctx, bob.ID, store.Invitation{ID: "inv-1", TokenHash: "inv-hash", Email: "dave@example.com", Role: store.RoleMember, CreatedAt: now, ExpiresAt: now + store.InvitationLifetime}); err != nil {
+				t.Fatal(err)
+			}
+			if err = s.CreatePasswordReset(ctx, bob.ID, store.PasswordReset{ID: "pwr-1", TokenHash: "pwr-hash", UserID: alice.ID, CreatedAt: now, ExpiresAt: now + store.PasswordResetLifetime}); err != nil {
+				t.Fatal(err)
+			}
+
+			a, err := auth.New(s, make([]byte, 32), "http://localhost:8080")
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := a.Login(ctx, "bob@example.com", "correct-password-123")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err = call("role", "--email", "missing@example.com", "--role", "owner"); !errors.Is(err, store.ErrNotFound) || err.Error() != "user not found" {
+				t.Fatalf("missing user: %v", err)
+			}
+			// Promoting an owner changes nothing.
+			if err = call("role", "--email", "Bob@Example.com", "--role", "owner"); err != nil || role("bob@example.com") != store.RoleOwner {
+				t.Fatalf("owner to owner: %v", err)
+			}
+			if _, err = s.InvitationByToken(ctx, "inv-hash", now); err != nil {
+				t.Fatalf("invitation revoked without a demotion: %v", err)
+			}
+			// Demoting revokes the links bob issued; no last-owner rule.
+			if err = call("role", "--email", "bob@example.com", "--role", "member"); err != nil || role("bob@example.com") != store.RoleMember {
+				t.Fatalf("demote: %v", err)
+			}
+			if _, err = s.InvitationByToken(ctx, "inv-hash", now); !errors.Is(err, store.ErrInvitationInvalid) {
+				t.Fatalf("invitation after the demotion: %v", err)
+			}
+			if _, err = s.PasswordResetUser(ctx, "pwr-hash", now); !errors.Is(err, store.ErrResetInvalid) {
+				t.Fatalf("reset link after the demotion: %v", err)
+			}
+			for _, email := range []string{"alice@example.com", "bob@example.com"} {
+				if err = call("role", "--email", email, "--role", "member"); err != nil || role(email) != store.RoleMember {
+					t.Fatalf("demote %s: %v", email, err)
+				}
+			}
+			// The session of bob survives the demotion.
+			if _, err = a.Refresh(ctx, session.Refresh); err != nil {
+				t.Fatalf("refresh after the demotion: %v", err)
+			}
+			// A disabled user can be promoted, and stays disabled.
+			if err = call("disable", "--email", "alice@example.com"); err != nil {
+				t.Fatal(err)
+			}
+			if err = call("role", "--email", "alice@example.com", "--role", "owner"); err != nil || role("alice@example.com") != store.RoleOwner {
+				t.Fatalf("promote a disabled user: %v", err)
+			}
+			if u, err := s.UserByEmail(ctx, "alice@example.com"); err != nil || u.Disabled == 0 {
+				t.Fatalf("%+v %v", u, err)
+			}
+		})
 	}
 }

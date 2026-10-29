@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/i2bskn/astovia/internal/access"
 	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/auth"
@@ -87,6 +88,9 @@ type Server struct {
 	// from the synchronization's.
 	gmailMCPLimiter *loginLimiter
 	gmailTokens     *gmailTokenCache
+	// accessOIDC is the Cloudflare Access client of cfg.Access; it is set
+	// exactly when cfg.Access is. Tests replace it.
+	accessOIDC accessClient
 }
 
 // userResponse is the public representation of the signed-in user.
@@ -150,7 +154,11 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 	if tokens == nil {
 		tokens = &aicred.Tokens{Store: st, Box: box, OpenAI: openai.New(openai.HostID(c.Secret)), Now: now}
 	}
-	return &Server{cfg: c, auth: a, assets: assets, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
+	var oidc accessClient
+	if c.Access != nil {
+		oidc = access.New(access.ClientConfig{Issuer: c.Access.Issuer, ClientID: c.Access.ClientID, ClientSecret: c.Access.Secret, RedirectURI: c.Access.RedirectURI})
+	}
+	return &Server{cfg: c, auth: a, assets: assets, accessOIDC: oidc, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
@@ -170,15 +178,24 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/healthz", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})))
-	mux.Handle("/auth/login", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogin))))
+	// With Cloudflare Access the password endpoints answer 409 (passwordAuth)
+	// and the Access sign-in routes exist; without it they are JSON 404s.
+	mux.Handle("/auth/config", allow(http.MethodGet, http.HandlerFunc(s.handleAuthConfig)))
+	mux.Handle("/auth/login", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleLogin)))))
+	if s.cfg.Access != nil {
+		// No rate limit: behind a proxy every user shares its address, and
+		// the sign-in itself happens at Cloudflare.
+		mux.Handle("/auth/access/login", allow(http.MethodGet, http.HandlerFunc(s.handleAccessLogin)))
+		mux.Handle("/auth/access/callback", allow(http.MethodGet, http.HandlerFunc(s.handleAccessCallback)))
+	}
 	mux.Handle("/auth/refresh", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleRefresh))))
 	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))
 	// The invitation and password reset links are used before signing in.
 	// They share accountLimiter.
-	mux.Handle("/auth/invitations/inspect", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleInspectInvitation))))
-	mux.Handle("/auth/invitations/accept", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleAcceptInvitation))))
-	mux.Handle("/auth/password-resets/inspect", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleInspectPasswordReset))))
-	mux.Handle("/auth/password-resets/complete", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleCompletePasswordReset))))
+	mux.Handle("/auth/invitations/inspect", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleInspectInvitation)))))
+	mux.Handle("/auth/invitations/accept", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleAcceptInvitation)))))
+	mux.Handle("/auth/password-resets/inspect", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleInspectPasswordReset)))))
+	mux.Handle("/auth/password-resets/complete", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleCompletePasswordReset)))))
 	// Every /api/v1/* route must be wrapped with either requireUser (access
 	// JWT only) or requireUserOrAPIToken (access JWT or API token). Routes that
 	// manage credentials or the account use requireUser. The user management
@@ -187,10 +204,12 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/api/v1/users", allow(http.MethodGet, s.requireOwner(http.HandlerFunc(s.handleListUsers))))
 	mux.Handle("/api/v1/users/{id}", allow(http.MethodPatch, s.requireOwner(requireJSON(http.HandlerFunc(s.handlePatchUser)))))
 	// The password reset link takes no body, so no content type is required.
-	mux.Handle("/api/v1/users/{id}/password-resets", allow(http.MethodPost, s.requireOwner(http.HandlerFunc(s.handleCreatePasswordReset))))
+	// Issuing links is password sign-in only; listing and revoking the
+	// invitations is not, so that old ones can be cleaned up.
+	mux.Handle("/api/v1/users/{id}/password-resets", allow(http.MethodPost, s.requireOwner(s.passwordAuth(http.HandlerFunc(s.handleCreatePasswordReset)))))
 	mux.Handle("/api/v1/invitations", allowMethods(map[string]http.Handler{
 		http.MethodGet:  s.requireOwner(http.HandlerFunc(s.handleListInvitations)),
-		http.MethodPost: s.requireOwner(requireJSON(http.HandlerFunc(s.handleCreateInvitation))),
+		http.MethodPost: s.requireOwner(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleCreateInvitation)))),
 	}))
 	mux.Handle("/api/v1/invitations/{id}", allow(http.MethodDelete, s.requireOwner(http.HandlerFunc(s.handleDeleteInvitation))))
 	mux.Handle("/api/v1/action-items", allowMethods(map[string]http.Handler{
@@ -515,8 +534,13 @@ func refreshCookie(r *http.Request) string {
 }
 func (s *Server) writeAuthResult(w http.ResponseWriter, r *http.Request, result auth.Result) {
 	user := s.toUserResponse(r.Context(), result.User)
-	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: result.Refresh, Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(result.ExpiresAt, 0), MaxAge: result.MaxAge})
+	s.setRefreshCookie(w, result)
 	writeJSON(w, 200, authResponse{AccessToken: result.AccessToken, ExpiresIn: result.ExpiresIn, User: user})
+}
+
+// setRefreshCookie sets the refresh cookie of a login or refresh result.
+func (s *Server) setRefreshCookie(w http.ResponseWriter, result auth.Result) {
+	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: result.Refresh, Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(result.ExpiresAt, 0), MaxAge: result.MaxAge})
 }
 func (s *Server) clearCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(0, 0), MaxAge: -1})
@@ -581,7 +605,7 @@ func readOnly(w http.ResponseWriter, r *http.Request) bool {
 
 // screenPath reports whether p is a screen of the web UI: /, /candidates,
 // /auto, /settings, /settings/<page>, /tasks/<id>, /consent, /invite,
-// /reset-password or the Google callback, optionally with a trailing
+// /reset-password, /signin-error or the Google callback, optionally with a trailing
 // slash. The tokens of /invite and /reset-password are in the URL fragment,
 // which never reaches here. The query of the Google callback (the code and
 // the state) does reach here; it is never logged, and the page removes it
@@ -592,7 +616,7 @@ func screenPath(p string) bool {
 	}
 	p = strings.TrimSuffix(p, "/")
 	switch p {
-	case "/candidates", "/auto", "/settings", "/account", "/consent", "/invite", "/reset-password", config.GoogleCallbackPath:
+	case "/candidates", "/auto", "/settings", "/account", "/consent", "/invite", "/reset-password", signinErrorPath, config.GoogleCallbackPath:
 		return true
 	}
 	if id, ok := strings.CutPrefix(p, "/tasks/"); ok {

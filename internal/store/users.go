@@ -277,6 +277,40 @@ func (s *Store) EnableUser(ctx context.Context, email string) error {
 	})
 }
 
+// SetRole changes the role of the user with email, enabled or disabled,
+// for the operator's CLI. As in UpdateUser, demoting revokes the links the
+// user issued and keeps the sessions and API tokens; a change to the
+// current role does nothing. The last-owner rule is not applied: the CLI
+// is the operator's last resort.
+func (s *Store) SetRole(ctx context.Context, email, role string, now int64) error {
+	if !ValidRole(role) {
+		return ErrInvalidRole
+	}
+	u, err := s.q.userByEmail(ctx, email)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	return s.transaction(ctx, func(q queries) error {
+		locked, e := q.lockUser(ctx, u.ID)
+		if e != nil {
+			return e
+		}
+		if locked.Role == role {
+			return nil
+		}
+		if e = q.setUserRole(ctx, u.ID, role); e != nil {
+			return e
+		}
+		if role == RoleMember {
+			return revokeIssued(ctx, q, u.ID, now)
+		}
+		return nil
+	})
+}
+
 // CreateInvitation stores inv, issued by operatorID, after revoking the
 // active invitations to the same email. It fails with ErrConflict when a
 // user with the email exists, enabled or not. The operator's row lock
