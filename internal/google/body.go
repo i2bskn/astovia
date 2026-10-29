@@ -56,6 +56,10 @@ func cleanLine(v string) string {
 	return strings.TrimFunc(v, unicode.IsSpace)
 }
 
+// CleanLine removes control and format characters and surrounding spaces,
+// for a header value shown on one line.
+func CleanLine(v string) string { return cleanLine(v) }
+
 func truncate(v string, n int) string {
 	if utf8.RuneCountInString(v) <= n {
 		return v

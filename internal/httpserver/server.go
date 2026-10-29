@@ -80,6 +80,13 @@ type Server struct {
 	slackConversationsLimiter *loginLimiter
 	slackHistoryLimiter       *loginLimiter
 	slackUsersLimiter         *loginLimiter
+	// gmailMCPLimiter limits the Gmail API quota units used by the MCP tools
+	// per Google account, so that twice its limit (at the edge of a window)
+	// and the synchronization's budget stay within Gmail's limit per
+	// account. gmailTokens keeps the access tokens of the MCP tools apart
+	// from the synchronization's.
+	gmailMCPLimiter *loginLimiter
+	gmailTokens     *gmailTokenCache
 }
 
 // userResponse is the public representation of the signed-in user.
@@ -149,7 +156,8 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 		},
 		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute),
 		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute), slackSearchLimiter: newKeyLimiter(5, time.Minute), slackConversationsLimiter: newKeyLimiter(10, time.Minute),
-		slackHistoryLimiter: newKeyLimiter(4, time.Minute), slackUsersLimiter: newKeyLimiter(30, time.Minute)}
+		slackHistoryLimiter: newKeyLimiter(4, time.Minute), slackUsersLimiter: newKeyLimiter(30, time.Minute),
+		gmailMCPLimiter: newKeyLimiter(gmailMCPUnits, time.Minute), gmailTokens: &gmailTokenCache{}}
 }
 
 // handler returns the routes wrapped with the common response headers.

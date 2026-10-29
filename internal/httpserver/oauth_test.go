@@ -831,7 +831,7 @@ func testOAuthFlow(t *testing.T, driver string) {
 	t.Cleanup(srv.Close)
 	c := connectMCP(t, srv, issued.AccessToken, nil)
 	tools, err := c.session.ListTools(context.Background(), nil)
-	if err != nil || len(tools.Tools) != 12 {
+	if err != nil || len(tools.Tools) != 15 {
 		t.Fatalf("tools/list: %v %v", tools, err)
 	}
 	var item actionItemResponse

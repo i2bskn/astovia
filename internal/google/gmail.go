@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -249,11 +250,23 @@ func (p part) header(name string) (string, bool) {
 // Thread returns a thread with the full messages. An invalid thread ID is
 // not requested.
 func (c *Client) Thread(ctx context.Context, accessToken, threadID string) (Thread, error) {
+	return c.thread(ctx, accessToken, threadID, url.Values{"format": {"full"}}, true)
+}
+
+// ThreadMetadata returns a thread with the From, To, Cc and Subject
+// headers of its messages and no text. An invalid thread ID is not
+// requested.
+func (c *Client) ThreadMetadata(ctx context.Context, accessToken, threadID string) (Thread, error) {
+	return c.thread(ctx, accessToken, threadID, url.Values{"format": {"metadata"}, "metadataHeaders": {"From", "To", "Cc", "Subject"}}, false)
+}
+
+// thread reads a thread with query; withText reads the bodies as well.
+func (c *Client) thread(ctx context.Context, accessToken, threadID string, query url.Values, withText bool) (Thread, error) {
 	const method = "threads.get"
 	if !ValidID(threadID) {
 		return Thread{}, &APIError{Method: method, Status: http.StatusBadRequest}
 	}
-	body, err := c.get(ctx, accessToken, method, "/threads/"+threadID, url.Values{"format": {"full"}})
+	body, err := c.get(ctx, accessToken, method, "/threads/"+threadID, query)
 	if err != nil {
 		return Thread{}, err
 	}
@@ -290,8 +303,68 @@ func (c *Client) Thread(ctx context.Context, accessToken, threadID string) (Thre
 		msg.FromName, msg.FromEmail = parseFrom(msg.From)
 		msg.ToList, msg.ToParsed = parseAddresses(msg.To)
 		msg.CcList, msg.CcParsed = parseAddresses(msg.Cc)
-		msg.Text = bodyText(p)
+		if withText {
+			msg.Text = bodyText(p)
+		}
 		t.Messages = append(t.Messages, msg)
 	}
 	return t, nil
+}
+
+// snippetLimit bounds the snippet of a thread in a list.
+const snippetLimit = 200
+
+// ThreadRef is a thread of a list: its ID and Gmail's snippet, with the
+// HTML entities decoded, without control characters and cut at
+// snippetLimit characters.
+type ThreadRef struct {
+	ID      string
+	Snippet string
+}
+
+// ThreadList is one page of threads.list, newest first. Threads with an
+// invalid ID are left out. NextPageToken is empty on the last page, and
+// ResultSizeEstimate is Gmail's estimate of the total.
+type ThreadList struct {
+	Threads            []ThreadRef
+	NextPageToken      string
+	ResultSizeEstimate int
+}
+
+// ListThreads returns one page (up to maxResults) of the threads matching
+// the Gmail search query.
+func (c *Client) ListThreads(ctx context.Context, accessToken, query, pageToken string, maxResults int) (ThreadList, error) {
+	const method = "threads.list"
+	q := url.Values{"q": {query}, "maxResults": {strconv.Itoa(maxResults)}}
+	if pageToken != "" {
+		q.Set("pageToken", pageToken)
+	}
+	body, err := c.get(ctx, accessToken, method, "/threads", q)
+	if err != nil {
+		return ThreadList{}, err
+	}
+	var out struct {
+		Threads []struct {
+			ID      string `json:"id"`
+			Snippet string `json:"snippet"`
+		} `json:"threads"`
+		NextPageToken      string `json:"nextPageToken"`
+		ResultSizeEstimate int    `json:"resultSizeEstimate"`
+	}
+	if err = decode(method, body, &out); err != nil {
+		return ThreadList{}, err
+	}
+	list := ThreadList{Threads: make([]ThreadRef, 0, len(out.Threads)), NextPageToken: out.NextPageToken, ResultSizeEstimate: out.ResultSizeEstimate}
+	for _, t := range out.Threads {
+		if ValidID(t.ID) {
+			list.Threads = append(list.Threads, ThreadRef{ID: t.ID, Snippet: truncate(cleanLine(html.UnescapeString(t.Snippet)), snippetLimit)})
+		}
+	}
+	return list, nil
+}
+
+// ThreadURL links to a thread in Gmail, in the mailbox of the account
+// email.
+func ThreadURL(email, thread string) string {
+	return "https://mail.google.com/mail/?authuser=" + url.QueryEscape(email) + "#all/" + thread
 }

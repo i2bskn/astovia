@@ -65,7 +65,15 @@ func (l *loginLimiter) allow(remoteAddr string) bool {
 
 // allowKey records an attempt for key, such as a user ID, and reports
 // whether it is within the limit.
-func (l *loginLimiter) allowKey(key string) bool {
+func (l *loginLimiter) allowKey(key string) bool { return l.allowKeyN(key, 1) }
+
+// allowKeyN records n units for key and reports whether they are within the
+// limit. Units over the limit are not recorded; n <= 0 records nothing and
+// is allowed.
+func (l *loginLimiter) allowKeyN(key string, n int) bool {
+	if n <= 0 {
+		return true
+	}
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -81,10 +89,10 @@ func (l *loginLimiter) allowKey(key string) bool {
 		}
 		b = bucket{start: now}
 	}
-	if b.count >= l.limit {
+	if b.count+n > l.limit {
 		return false
 	}
-	b.count++
+	b.count += n
 	l.entries[key] = b
 	return true
 }

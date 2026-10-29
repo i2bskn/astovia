@@ -734,9 +734,7 @@ func parseSourceKey(v string) (sourceKey, bool) {
 }
 
 // threadURL links to a thread in Gmail, in the account's mailbox.
-func threadURL(email, thread string) string {
-	return "https://mail.google.com/mail/?authuser=" + url.QueryEscape(email) + "#all/" + thread
-}
+func threadURL(email, thread string) string { return google.ThreadURL(email, thread) }
 
 // gmailURL returns v when it is an https URL on mail.google.com, for refs
 // and automatic completion evidence.

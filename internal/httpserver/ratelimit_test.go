@@ -170,3 +170,30 @@ func TestLoginRateLimitIgnoresForwardedFor(t *testing.T) {
 
 // IPv6 /64 grouping is covered by TestLoginLimiterGroupsIPv6By64 and eviction
 // of the oldest entry by TestLoginLimiterEvictsWhenFull.
+
+// allowKeyN counts units: exactly the limit passes, units over it are
+// refused without being counted, and n <= 0 is allowed without counting.
+func TestKeyLimiterUnits(t *testing.T) {
+	l := newKeyLimiter(100, time.Minute)
+	now := time.Date(2026, time.October, 23, 0, 0, 0, 0, time.UTC)
+	l.now = func() time.Time { return now }
+	if !l.allowKeyN("a", 0) || !l.allowKeyN("a", -5) || len(l.entries) != 0 {
+		t.Fatalf("n <= 0: %+v", l.entries)
+	}
+	if !l.allowKeyN("a", 60) || !l.allowKeyN("a", 40) || l.entries["a"].count != 100 {
+		t.Fatalf("up to the limit: %+v", l.entries)
+	}
+	if l.allowKeyN("a", 1) || l.allowKey("a") || l.entries["a"].count != 100 {
+		t.Fatalf("over the limit: %+v", l.entries)
+	}
+	if !l.allowKeyN("b", 90) || l.allowKeyN("b", 11) || l.entries["b"].count != 90 || !l.allowKeyN("b", 10) {
+		t.Fatalf("over the limit is not counted: %+v", l.entries)
+	}
+	if l.allowKeyN("c", 101) || len(l.entries) != 2 {
+		t.Fatalf("more than the limit at once: %+v", l.entries)
+	}
+	now = now.Add(time.Minute)
+	if !l.allowKeyN("a", 100) {
+		t.Fatal("rejected in the next window")
+	}
+}

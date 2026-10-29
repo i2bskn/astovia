@@ -304,3 +304,87 @@ func TestHiddenStyle(t *testing.T) {
 		}
 	}
 }
+
+func TestListThreads(t *testing.T) {
+	f := &fakeEndpoint{}
+	c := newTestClient(t, f)
+	ctx := context.Background()
+	f.set(200, `{"threads":[{"id":"18a0","snippet":"Hello &amp; &lt;team&gt;\u0007 &#39;x&#39;","historyId":"1"},{"id":"XYZ","snippet":"bad"},{"id":"18b0","snippet":"`+strings.Repeat("あ", 250)+`"}],"nextPageToken":"0123","resultSizeEstimate":42}`)
+	list, err := c.ListThreads(ctx, testAccess, "from:bob is:unread", "p1", 7)
+	r := f.last(t)
+	if err != nil || r.method != "GET" || r.path != "/gmail/v1/users/me/threads" || r.auth != "Bearer "+testAccess || r.rawQuery != "maxResults=7&pageToken=p1&q=from%3Abob+is%3Aunread" {
+		t.Fatalf("list threads: %v %+v", err, r)
+	}
+	if len(list.Threads) != 2 || list.Threads[0] != (ThreadRef{ID: "18a0", Snippet: "Hello & <team> 'x'"}) || list.Threads[1].ID != "18b0" || list.Threads[1].Snippet != strings.Repeat("あ", 200) ||
+		list.NextPageToken != "0123" || list.ResultSizeEstimate != 42 {
+		t.Fatalf("thread list: %+v", list)
+	}
+	f.set(200, `{"resultSizeEstimate":0}`)
+	if list, err = c.ListThreads(ctx, testAccess, "q", "", 10); err != nil || list.Threads == nil || len(list.Threads) != 0 || list.NextPageToken != "" || strings.Contains(f.last(t).rawQuery, "pageToken") {
+		t.Fatalf("empty thread list: %+v %v", list, err)
+	}
+	// Errors go through get.
+	for _, tc := range []struct {
+		status int
+		body   string
+		check  func(error) bool
+	}{
+		{401, `{}`, func(e error) bool { return errors.Is(e, ErrUnauthorized) }},
+		{429, `{}`, func(e error) bool { return errors.Is(e, ErrRateLimited) }},
+		{403, `{"error":{"errors":[{"reason":"insufficientPermissions"}]}}`, func(e error) bool { return errors.Is(e, ErrInsufficientScope) }},
+		{400, `{}`, func(e error) bool {
+			var api *APIError
+			return errors.As(e, &api) && api.Status == 400 && api.Method == "threads.list"
+		}},
+	} {
+		f.set(tc.status, tc.body)
+		_, err := c.ListThreads(ctx, testAccess, "q", "", 10)
+		if !tc.check(err) {
+			t.Fatalf("list threads %d: %v", tc.status, err)
+		}
+		noSecrets(t, err)
+	}
+}
+
+func TestThreadMetadata(t *testing.T) {
+	f := &fakeEndpoint{}
+	c := newTestClient(t, f)
+	ctx := context.Background()
+	f.set(200, `{"id":"18a0","messages":[
+		{"id":"18a1","threadId":"18a0","labelIds":["INBOX","UNREAD"],"internalDate":"1792800000123","payload":{"mimeType":"text/plain","headers":[{"name":"From","value":"Bob <Bob@Example.com>"},{"name":"To","value":"alice@example.com"},{"name":"Cc","value":"<<"},{"name":"Subject","value":"=?UTF-8?B?5Lu25ZCN?="}],"body":{"data":"`+b64("body")+`"}}},
+		{"id":"zz","internalDate":"1"}]}`)
+	th, err := c.ThreadMetadata(ctx, testAccess, "18a0")
+	r := f.last(t)
+	if err != nil || r.path != "/gmail/v1/users/me/threads/18a0" || r.rawQuery != "format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject" {
+		t.Fatalf("metadata: %v %+v", err, r)
+	}
+	if th.ID != "18a0" || len(th.Messages) != 1 {
+		t.Fatalf("metadata thread: %+v", th)
+	}
+	m := th.Messages[0]
+	if m.ID != "18a1" || !m.Internal.Equal(time.UnixMilli(1792800000123)) || !m.HasLabel("UNREAD") || m.Subject != "件名" || m.FromName != "Bob" || m.FromEmail != "bob@example.com" ||
+		!m.ToParsed || !reflect.DeepEqual(m.ToList, []Address{{Email: "alice@example.com"}}) || m.CcParsed || m.Cc != "<<" || m.Text != "" {
+		t.Fatalf("metadata message: %+v", m)
+	}
+	// An invalid thread ID is not requested.
+	n := f.count()
+	_, err = c.ThreadMetadata(ctx, testAccess, "../x")
+	var api *APIError
+	if !errors.As(err, &api) || api.Status != 400 || f.count() != n {
+		t.Fatalf("invalid thread ID: %v", err)
+	}
+	f.set(404, `{}`)
+	if _, err = c.ThreadMetadata(ctx, testAccess, "18a0"); !errors.As(err, &api) || api.Status != 404 {
+		t.Fatalf("404: %v", err)
+	}
+	f.set(401, `{}`)
+	if _, err = c.ThreadMetadata(ctx, testAccess, "18a0"); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("401: %v", err)
+	}
+}
+
+func TestThreadURL(t *testing.T) {
+	if v := ThreadURL("a+b@example.com", "18a0"); v != "https://mail.google.com/mail/?authuser=a%2Bb%40example.com#all/18a0" {
+		t.Fatalf("thread URL: %s", v)
+	}
+}

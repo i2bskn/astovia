@@ -61,7 +61,7 @@ export default function ConsentPage({ email }: { email: string }) {
       <h2 className="consent-subheading">許可される内容</h2>
       <ul className="consent-scopes">
         <li>タスクの閲覧・作成・更新</li>
-        <li>連携中の Chatwork・Slack の会話の閲覧</li>
+        <li>連携中の Chatwork・Slack の会話と Gmail のメールの閲覧</li>
         <li>{offline ? '再ログインなしで接続を維持（使うたびに最長90日延長）' : '7日後に再接続が必要'}</li>
       </ul>
       <p className="consent-account"><span className="user-email">{email}</span> としてログイン中</p>
