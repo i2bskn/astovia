@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/i2bskn/astovia/internal/ai"
+	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/github"
 	"github.com/i2bskn/astovia/internal/secretbox"
@@ -87,6 +88,9 @@ type Syncer struct {
 	GitHub *github.Client
 	AI     *ai.Client
 	Box    *secretbox.Box
+	// Tokens manages the access tokens of the ChatGPT plan; it is shared
+	// with the HTTP server.
+	Tokens *aicred.Tokens
 	Now    func() time.Time
 
 	// mentionDone remembers threads whose mentions were all handled, so

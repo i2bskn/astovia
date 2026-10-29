@@ -45,7 +45,7 @@ func newTokenAPI(t *testing.T, driver string) *tokenAPI {
 	}
 	now := time.Date(2026, 10, 23, 1, 2, 3, 0, time.UTC)
 	a.Now = func() time.Time { return now }
-	api := &tokenAPI{t: t, store: s, now: &now, handler: New(config.Config{PublicURL: "https://astovia.test", Secure: true}, a, fstest.MapFS{})}
+	api := &tokenAPI{t: t, store: s, now: &now, handler: New(config.Config{PublicURL: "https://astovia.test", Secure: true}, a, fstest.MapFS{}, nil)}
 	api.alice = api.login("alice")
 	api.bob = api.login("bob")
 	return api

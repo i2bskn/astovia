@@ -59,7 +59,7 @@ func testHTTP(t *testing.T, driver string) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	handler := New(config.Config{PublicURL: "https://astovia.test", Secure: true}, a, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}, "assets/app.js": {Data: []byte("void 0")}})
+	handler := New(config.Config{PublicURL: "https://astovia.test", Secure: true}, a, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}, "assets/app.js": {Data: []byte("void 0")}}, nil)
 	request := func(method, path, body, origin, ct, cookie, bearer string) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -209,7 +209,7 @@ func TestBucketBound(t *testing.T) {
 // Non-clean paths are redirected to the clean path by ServeMux (307 with the
 // pinned Go toolchain) and escaped slashes never match a route.
 func TestServeMuxPathHandling(t *testing.T) {
-	handler := New(config.Config{PublicURL: "https://astovia.test"}, nil, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}})
+	handler := New(config.Config{PublicURL: "https://astovia.test"}, nil, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}}, nil)
 	for _, tc := range []struct {
 		method, path string
 		status       int
@@ -244,7 +244,7 @@ func TestRejectedLoginDoesNotConsumeRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := New(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{})
+	handler := New(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{}, nil)
 	request := func(origin, ct string) int {
 		r := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"email":"alice@example.com","password":"wrong-password-1"}`))
 		r.Header.Set("Origin", origin)
@@ -290,7 +290,7 @@ func TestCanonicalPublicURLAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := New(cfg, a, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}})
+	handler := New(cfg, a, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}}, nil)
 	request := func(method, path, body, origin string, cookie *http.Cookie, token string) *httptest.ResponseRecorder {
 		t.Helper()
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -421,7 +421,7 @@ func TestAuthEndpointInputs(t *testing.T) {
 		for _, c := range list {
 			t.Run(path+"/"+c.name, func(t *testing.T) {
 				// A new handler per case keeps rate limiting state separate.
-				h := New(config.Config{PublicURL: origin, Secure: true}, a, fstest.MapFS{})
+				h := New(config.Config{PublicURL: origin, Secure: true}, a, fstest.MapFS{}, nil)
 				r := httptest.NewRequest(c.method, path, strings.NewReader(c.body))
 				r.Header.Set("Origin", c.origin)
 				r.Header.Set("Content-Type", c.ct)
@@ -446,7 +446,7 @@ func TestRedirectsAndBearer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := New(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}})
+	h := New(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}}, nil)
 	if w := serve(t, h, httptest.NewRequest("GET", "/admin", nil)); w.Code != http.StatusPermanentRedirect || w.Header().Get("Location") != "/" {
 		t.Fatalf("/admin: %d Location=%q", w.Code, w.Header().Get("Location"))
 	}
@@ -464,7 +464,7 @@ func TestRedirectsAndBearer(t *testing.T) {
 
 func TestStaticAssets(t *testing.T) {
 	assets := fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}, "assets/app.js": {Data: []byte("void 0")}, "favicon.svg": {Data: []byte("<svg/>")}, ".env.js": {Data: []byte("secret")}, "LICENSE": {Data: []byte("text")}}
-	h := New(config.Config{PublicURL: "https://astovia.test"}, nil, assets)
+	h := New(config.Config{PublicURL: "https://astovia.test"}, nil, assets, nil)
 	w := serve(t, h, httptest.NewRequest("GET", "/assets/app.js", nil))
 	if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Type"), "javascript") || !strings.Contains(w.Header().Get("Cache-Control"), "immutable") || w.Body.String() != "void 0" {
 		t.Fatalf("app.js: %d %v", w.Code, w.Header())
@@ -496,7 +496,7 @@ func TestStaticAssets(t *testing.T) {
 			t.Fatalf("POST %s: %d %v %s", path, w.Code, w.Header(), w.Body.String())
 		}
 	}
-	h = New(config.Config{PublicURL: "https://astovia.test"}, nil, fstest.MapFS{"assets/app.js": {Data: []byte("void 0")}})
+	h = New(config.Config{PublicURL: "https://astovia.test"}, nil, fstest.MapFS{"assets/app.js": {Data: []byte("void 0")}}, nil)
 	w = serve(t, h, httptest.NewRequest("GET", "/", nil))
 	if w.Code != 404 || errorCode(t, w) != "not_found" {
 		t.Fatalf("missing index.html: %d %s", w.Code, w.Body.String())
@@ -507,7 +507,7 @@ func TestStaticAssets(t *testing.T) {
 // only to fixed or validated same-origin paths; anything else goes to /.
 func TestLegacyAdminRedirects(t *testing.T) {
 	assets := fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}, "assets/app.js": {Data: []byte("void 0")}, "favicon.svg": {Data: []byte("<svg/>")}, "sw.js": {Data: []byte("self")}}
-	h := New(config.Config{PublicURL: "https://astovia.test"}, nil, assets)
+	h := New(config.Config{PublicURL: "https://astovia.test"}, nil, assets, nil)
 	for path, want := range map[string]string{
 		"/admin":                        "/",
 		"/admin/":                       "/",

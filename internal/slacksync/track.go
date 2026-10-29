@@ -164,7 +164,7 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, originMsg *slack.
 	case r.trackCalls >= trackAICalls || r.deadlineNear():
 		return passEnd, nil
 	}
-	cur, apiKey, gate, err := r.reloadAI()
+	cur, cred, gate, err := r.reloadAI()
 	switch {
 	case err != nil:
 		return passAbort, err
@@ -200,7 +200,7 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, originMsg *slack.
 		in.Posts = append(in.Posts, p)
 	}
 	r.trackCalls++
-	res, err := r.s.AI.JudgeReply(r.ctx, apiKey, cur.Model, in)
+	res, err := r.s.AI.JudgeReply(r.ctx, cred, cur.Model, in)
 	class, err := r.classifyAI(cur, err)
 	if err != nil {
 		return passAbort, err
@@ -219,6 +219,8 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, originMsg *slack.
 		return passNext, r.touch(item, passStart)
 	case aiFailed:
 		return passAbort, nil
+	case aiStaled:
+		return passNext, nil
 	}
 	// A temporary failure: the item is checked again by the next pass.
 	return passNext, nil

@@ -20,20 +20,20 @@ var MailReplySystemPrompt = replyPrompt("メール")
 // target messages of a mail thread. The input is that of a Slack judgment:
 // ConversationType is MailThread, ChannelName the subject, Workspace the
 // address of the account and Me.ID that address.
-func (c *Client) JudgeMail(ctx context.Context, key, model string, in SlackInput) (MentionResult, error) {
+func (c *Client) JudgeMail(ctx context.Context, cred Credential, model string, in SlackInput) (MentionResult, error) {
 	user, err := judgmentUserMessage(in, "次の JSON はメールのスレッドです。あなたは JSON の me の代わりに判断します。\n")
 	if err != nil {
 		return MentionResult{}, err
 	}
-	return c.judgeConversation(ctx, key, model, MailSystemPrompt, user, in)
+	return c.judgeConversation(ctx, cred, model, MailSystemPrompt, user, in)
 }
 
 // JudgeMailReply asks the AI whether the user's later messages in a mail
 // thread completed the task.
-func (c *Client) JudgeMailReply(ctx context.Context, key, model string, in ReplyInput) (ReplyResult, error) {
+func (c *Client) JudgeMailReply(ctx context.Context, cred Credential, model string, in ReplyInput) (ReplyResult, error) {
 	user, err := replyUserMessage(in, "次の JSON はメールのタスクと、その後のスレッドです。あなたは JSON の me の代わりに判断します。\n")
 	if err != nil {
 		return ReplyResult{}, err
 	}
-	return c.judgeReply(ctx, key, model, MailReplySystemPrompt, user)
+	return c.judgeReply(ctx, cred, model, MailReplySystemPrompt, user)
 }

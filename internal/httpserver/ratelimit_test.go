@@ -146,7 +146,7 @@ func TestLoginRateLimitIgnoresForwardedFor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newServer(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{})
+	srv := newServer(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{}, nil)
 	now := time.Date(2026, time.October, 23, 0, 0, 0, 0, time.UTC)
 	srv.limiter.now = func() time.Time { return now }
 	h := srv.handler()

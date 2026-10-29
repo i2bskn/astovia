@@ -254,6 +254,7 @@ type queries interface {
 	createAISettings(ctx context.Context, a AISettings) (int64, error)
 	replaceAISettings(ctx context.Context, a AISettings, currentGeneration int64) (int64, error)
 	updateAISettingsStatus(ctx context.Context, userID string, generation int64, status string, lastError sql.NullString, now int64) (int64, error)
+	updateAISecret(ctx context.Context, userID string, generation int64, oldSealed, newSealed string) (int64, error)
 	deleteAISettings(ctx context.Context, userID string) error
 	createPushSubscription(ctx context.Context, p PushSubscription) error
 	lockPushSubscriptionByEndpoint(ctx context.Context, endpoint string) (PushSubscription, error)

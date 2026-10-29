@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import type { FormEvent } from 'react';
-import { ANTHROPIC_KEYS_URL, DEFAULT_AI_MODEL, aiErrorMessage, aiHasProblem, aiModels, aiStatusMessage, createAIClient, modelName, providerName } from './ai';
-import type { AIState } from './ai';
+import { ANTHROPIC_KEYS_URL, DEFAULT_AI_MODEL, MANAGE_USAGE_URL, aiErrorMessage, aiHasProblem, aiModels, aiStatusMessage, createAIClient, modelName, providerName } from './ai';
+import type { AIProvider, AISettings as SavedAISettings, AIState, OpenAIModel } from './ai';
 import { APIError, request } from './auth';
 import Phrased from './Phrased';
 
 const client = createAIClient(request);
+
+function errorCode(failure: unknown): string | null {
+  return failure instanceof APIError ? failure.code : null;
+}
 
 function ModelSelect({ id, value, disabled, onChange }: { id: string; value: string; disabled: boolean; onChange: (model: string) => void }) {
   return <select id={id} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
@@ -58,16 +62,165 @@ function KeyForm({ submitLabel, initialModel, busy, error, onSubmit, onCancel }:
   </form>;
 }
 
-// AISettings registers the Anthropic API key and model that judge the
-// user's mentions. The key is sent once and never shown again; only its
-// last four characters are.
+// ChatGPTConnect connects the user's ChatGPT plan. OpenAI sends the browser
+// back to 127.0.0.1, which Astovia cannot receive: the user pastes the
+// address of that page instead.
+function ChatGPTConnect({ busy, setBusy, onConnected, onConflict, onCancel }: {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
+  onConnected: (state: SavedAISettings) => void;
+  onConflict: () => Promise<void>;
+  onCancel?: () => void;
+}) {
+  const [callbackURL, setCallbackURL] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  // fallbackURL is the sign-in address when no tab could be opened.
+  const [fallbackURL, setFallbackURL] = useState<string | null>(null);
+  const [started, setStarted] = useState(false);
+  const inputID = useId();
+  const errorID = useId();
+
+  async function start(): Promise<void> {
+    if (busy) return;
+    // The tab is opened before the request so that it is not blocked as a
+    // popup; it gets the address once the server answers.
+    const tab = window.open('about:blank', '_blank');
+    if (tab) tab.opener = null;
+    setBusy(true);
+    setError(null);
+    setFallbackURL(null);
+    try {
+      const { url } = await client.authorizeOpenAI();
+      if (tab) {
+        tab.location.href = url;
+      } else {
+        setFallbackURL(url);
+      }
+      setStarted(true);
+    } catch (failure) {
+      tab?.close();
+      setError(aiErrorMessage(errorCode(failure), 'openai'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function complete(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (busy) return;
+    const value = callbackURL.trim();
+    if (!value) {
+      setError('ブラウザのアドレスバーの URL を貼り付けてください。');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setCallbackURL('');
+    try {
+      const next = await client.completeOpenAI(value);
+      setFallbackURL(null);
+      setStarted(false);
+      onConnected(next);
+    } catch (failure) {
+      const code = errorCode(failure);
+      setError(aiErrorMessage(code, 'openai'));
+      if (code === 'ai_conflict') await onConflict();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <div className="chatgpt-connect">
+    <ol className="steps">
+      <li>「ChatGPT で続ける」を押します。新しいタブで ChatGPT のサインイン画面が開きます。</li>
+      <li>サインインして許可すると、「このサイトにアクセスできません」などと表示されます。それで正常です。</li>
+      <li>そのタブのアドレスバーの URL（<span className="inline-code">http://127.0.0.1:1455/auth/callback?…</span>）をすべてコピーし、下の欄に貼って「接続」を押します。</li>
+    </ol>
+    <div className="form-actions">
+      {onCancel ? <button className="button secondary" type="button" disabled={busy} onClick={onCancel}>やめる</button> : null}
+      <button className="button primary" type="button" disabled={busy} onClick={() => { void start(); }}>ChatGPT で続ける</button>
+    </div>
+    {fallbackURL ? <p className="notice" role="status">新しいタブを開けませんでした。<a href={fallbackURL} rel="noopener noreferrer" target="_blank">ChatGPT のサインイン画面</a>を開いてください。</p> : null}
+    <form className="action-form" onSubmit={(e) => { void complete(e); }} aria-busy={busy}>
+      <div className="field">
+        <label htmlFor={inputID}>アドレスバーの URL</label>
+        <textarea id={inputID} className="callback-input" name="callback_url" rows={3} autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={8192} value={callbackURL} onChange={(e) => { setCallbackURL(e.target.value); setError(null); }} disabled={busy} placeholder="http://127.0.0.1:1455/auth/callback?code=…" aria-describedby={error ? errorID : undefined} />
+      </div>
+      <p className="field-hint"><Phrased text={started ? '「ChatGPT で続ける」を押してから 10 分以内に貼り付けてください。' : 'URL は「ChatGPT で続ける」を押してから 10 分以内に貼り付けてください。'} /></p>
+      {error ? <p id={errorID} className="notice error" role="alert">{error}</p> : null}
+      <div className="form-actions">
+        <button className="button primary add-button" type="submit" disabled={busy}>{busy ? '確認中…' : '接続'}</button>
+      </div>
+    </form>
+  </div>;
+}
+
+// PlanNotice tells that judgments use the ChatGPT plan, with the link to
+// manage its usage.
+function PlanNotice() {
+  return <p className="notice">
+    <Phrased text="ChatGPT のプランを使っています。判断のたびに、ChatGPT のプランの利用枠を使います。" />{' '}
+    <a href={MANAGE_USAGE_URL} rel="noopener noreferrer" target="_blank">使用量を管理</a>
+  </p>;
+}
+
+// OpenAIModelForm changes the model of the ChatGPT plan, chosen from the
+// plan's list. The saved model stays selectable when the list lacks it.
+function OpenAIModelForm({ saved, busy, onSave }: { saved: string; busy: boolean; onSave: (model: string) => void }) {
+  const [models, setModels] = useState<OpenAIModel[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [model, setModel] = useState(saved);
+  const modelID = useId();
+
+  useEffect(() => {
+    let active = true;
+    setModels(null);
+    setLoadError(null);
+    client.openAIModels().then((list) => { if (active) setModels(list); }, (failure: unknown) => {
+      if (active) setLoadError(`モデルの一覧を読み込めませんでした。${aiErrorMessage(errorCode(failure), 'openai')}`);
+    });
+    return () => { active = false; };
+  }, [saved]);
+
+  useEffect(() => { setModel(saved); }, [saved]);
+
+  const options = models ?? [];
+  const list = options.some((m) => m.id === saved) ? options : [{ id: saved, name: saved }, ...options];
+
+  function submit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+    if (busy) return;
+    onSave(model);
+  }
+
+  return <form className="action-form" onSubmit={submit} aria-busy={busy}>
+    <div className="field">
+      <label htmlFor={modelID}>モデル</label>
+      <select id={modelID} value={model} disabled={busy || models === null} onChange={(e) => setModel(e.target.value)}>
+        {list.map((m) => <option key={m.id} value={m.id}>{m.name === m.id ? m.id : `${m.name}（${m.id}）`}</option>)}
+      </select>
+    </div>
+    {models === null && !loadError ? <p className="action-loading" aria-live="polite">モデルの一覧を読み込んでいます…</p> : null}
+    {loadError ? <p className="notice error" role="alert">{loadError}</p> : null}
+    <div className="form-actions">
+      <button className="button primary" type="submit" disabled={busy || models === null || model === saved}>{busy ? '確認中…' : 'モデルを保存'}</button>
+    </div>
+  </form>;
+}
+
+// AISettings chooses the AI that judges the user's mentions: an Anthropic
+// API key and model, or the user's ChatGPT plan. The key and the tokens are
+// never shown again; only the key's last four characters and the ChatGPT
+// account's address are.
 export default function AISettings() {
   const [state, setState] = useState<AIState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [replacing, setReplacing] = useState(false);
+  const [choice, setChoice] = useState<AIProvider>('anthropic');
   const [model, setModel] = useState(DEFAULT_AI_MODEL);
   const headingID = useId();
   const modelID = useId();
@@ -78,7 +231,7 @@ export default function AISettings() {
     try {
       const next = await client.getAI();
       setState(next);
-      if (next.configured) setModel(next.model);
+      if (next.configured && next.provider === 'anthropic') setModel(next.model);
     } catch {
       setError('AI の設定を読み込めませんでした。接続を確認して、もう一度お試しください。');
     } finally {
@@ -89,19 +242,20 @@ export default function AISettings() {
   useEffect(() => { void load(); }, [load]);
 
   // save stores the settings; a conflict reloads them after the message.
-  async function save(nextModel: string, key: string | undefined, onError: (message: string) => void): Promise<void> {
+  async function save(nextModel: string, key: string | undefined, provider: AIProvider, onError: (message: string) => void): Promise<void> {
     setBusy(true);
     setFormError(null);
     setError(null);
+    setNotice(null);
     try {
-      const next = await client.saveAI(nextModel, key);
+      const next = await client.saveAI(nextModel, key, provider === 'openai' ? 'openai' : undefined);
       setState(next);
-      if (next.configured) setModel(next.model);
+      if (next.configured && next.provider === 'anthropic') setModel(next.model);
       setReplacing(false);
     } catch (failure) {
-      const code = failure instanceof APIError ? failure.code : null;
-      onError(aiErrorMessage(code));
-      if (code === 'ai_conflict') await load();
+      const code = errorCode(failure);
+      onError(aiErrorMessage(code, provider));
+      if (code === 'ai_conflict' || code === 'ai_provider_mismatch') await load();
     } finally {
       setBusy(false);
     }
@@ -110,11 +264,13 @@ export default function AISettings() {
   async function remove(): Promise<void> {
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
-      await client.deleteAI();
+      const { revokeFailed } = await client.deleteAI();
       setState({ configured: false });
       setModel(DEFAULT_AI_MODEL);
       setReplacing(false);
+      if (revokeFailed) setNotice('ChatGPT 側の接続を解除できませんでした。ChatGPT の設定から Astovia の接続を解除してください。');
     } catch {
       setError('AI の設定を削除できませんでした。接続を確認して、もう一度お試しください。');
     } finally {
@@ -122,33 +278,51 @@ export default function AISettings() {
     }
   }
 
+  function connected(next: SavedAISettings): void {
+    setState(next);
+    setReplacing(false);
+    setError(null);
+    setNotice(null);
+  }
+
   function changeModel(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     if (busy) return;
-    void save(model, undefined, setError);
+    void save(model, undefined, 'anthropic', setError);
   }
 
   return <section className="action-panel settings-panel" id="ai" aria-labelledby={headingID}>
     <h2 id={headingID}>AI</h2>
-    <p className="intro"><Phrased text="GitHub のメンションなどを読んで、あなたがやることがあるかを AI が判断します。判断のため、コメントの本文が Anthropic に送られます。費用は登録したキーの組織に請求されます。" /></p>
+    <p className="intro"><Phrased text="GitHub のメンションなどを読んで、あなたがやることがあるかを AI が判断します。判断のため、本文が選んだ提供元（Anthropic または OpenAI）に送られます。" /></p>
     <p className="notice"><Phrased text="送られる内容: リポジトリ名（非公開のものを含む）、Issue と Pull Request のタイトルと本文、コメントの本文、投稿者の GitHub ユーザー名と日時。" /></p>
+    {notice ? <p className="notice error" role="alert">{notice}</p> : null}
     {error ? <p className="notice error" role="alert">{error}</p> : null}
     {loading ? <p className="action-loading" aria-live="polite">読み込んでいます…</p> : null}
     {!loading && state && !state.configured ? <>
-      <ol className="steps">
-        <li><a href={ANTHROPIC_KEYS_URL} rel="noopener noreferrer" target="_blank">Anthropic Console の API キーのページ</a>を開き、API キーを作ります。</li>
-        <li>作ったキーを下に貼り付け、モデルを選んで「保存」を押します。</li>
-      </ol>
-      <KeyForm submitLabel="保存" initialModel={model} busy={busy} error={formError} onSubmit={(key, m) => { void save(m, key, setFormError); }} />
+      <div className="segmented" role="group" aria-label="AI の提供元">
+        <button type="button" className="segment" aria-pressed={choice === 'anthropic'} disabled={busy} onClick={() => { setChoice('anthropic'); setFormError(null); }}>Anthropic の API キー</button>
+        <button type="button" className="segment" aria-pressed={choice === 'openai'} disabled={busy} onClick={() => { setChoice('openai'); setFormError(null); }}>ChatGPT のプラン</button>
+      </div>
+      {choice === 'anthropic' ? <>
+        <p className="field-hint"><Phrased text="費用は登録したキーの組織に請求されます。" /></p>
+        <ol className="steps">
+          <li><a href={ANTHROPIC_KEYS_URL} rel="noopener noreferrer" target="_blank">Anthropic Console の API キーのページ</a>を開き、API キーを作ります。</li>
+          <li>作ったキーを下に貼り付け、モデルを選んで「保存」を押します。</li>
+        </ol>
+        <KeyForm submitLabel="保存" initialModel={model} busy={busy} error={formError} onSubmit={(key, m) => { void save(m, key, 'anthropic', setFormError); }} />
+      </> : <>
+        <p className="field-hint"><Phrased text="ChatGPT の Plus や Pro などのプランで判断します。判断のたびに、そのプランの利用枠を使います。" /></p>
+        <ChatGPTConnect busy={busy} setBusy={setBusy} onConnected={connected} onConflict={load} />
+      </>}
     </> : null}
-    {!loading && state?.configured ? <>
+    {!loading && state?.configured && state.provider === 'anthropic' ? <>
       <dl className="settings-facts">
         <div><dt>提供元</dt><dd>{providerName(state.provider)}</dd></div>
         <div><dt>モデル</dt><dd>{modelName(state.model)}</dd></div>
         <div><dt>API キー</dt><dd>{state.key_last4 ? `…${state.key_last4}` : '登録済み'}</dd></div>
-        <div><dt>状態</dt><dd className={aiHasProblem(state) ? 'status-error' : undefined}>{aiStatusMessage(state.status, state.last_error)}</dd></div>
+        <div><dt>状態</dt><dd className={aiHasProblem(state) ? 'status-error' : undefined}>{aiStatusMessage(state.status, state.last_error, state.provider)}</dd></div>
       </dl>
-      {replacing ? <KeyForm submitLabel="キーを更新" initialModel={state.model} busy={busy} error={formError} onSubmit={(key, m) => { void save(m, key, setFormError); }} onCancel={() => { setReplacing(false); setFormError(null); }} /> : <>
+      {replacing ? <KeyForm submitLabel="キーを更新" initialModel={state.model} busy={busy} error={formError} onSubmit={(key, m) => { void save(m, key, 'anthropic', setFormError); }} onCancel={() => { setReplacing(false); setFormError(null); }} /> : <>
         <form className="action-form" onSubmit={changeModel} aria-busy={busy}>
           <div className="field">
             <label htmlFor={modelID}>モデル</label>
@@ -160,6 +334,25 @@ export default function AISettings() {
         </form>
         <div className="form-actions">
           <button className="button secondary" type="button" disabled={busy} onClick={() => setReplacing(true)}>キーを更新</button>
+          <button className="button secondary danger" type="button" disabled={busy} onClick={() => { void remove(); }}>AI の設定を削除</button>
+        </div>
+      </>}
+    </> : null}
+    {!loading && state?.configured && state.provider === 'openai' ? <>
+      <PlanNotice />
+      <dl className="settings-facts">
+        <div><dt>提供元</dt><dd>{providerName(state.provider)}</dd></div>
+        <div><dt>アカウント</dt><dd>{state.account ?? '不明'}</dd></div>
+        <div><dt>モデル</dt><dd>{modelName(state.model, state.provider)}</dd></div>
+        <div><dt>状態</dt><dd className={aiHasProblem(state) ? 'status-error' : undefined}>
+          {aiStatusMessage(state.status, state.last_error, state.provider)}
+          {state.last_error === 'usage_limit' ? <span className="usage-action"><a className="button primary small" href={MANAGE_USAGE_URL} rel="noopener noreferrer" target="_blank">使用量を管理</a></span> : null}
+        </dd></div>
+      </dl>
+      {replacing ? <ChatGPTConnect busy={busy} setBusy={setBusy} onConnected={connected} onConflict={load} onCancel={() => setReplacing(false)} /> : <>
+        <OpenAIModelForm saved={state.model} busy={busy} onSave={(m) => { void save(m, undefined, 'openai', setError); }} />
+        <div className="form-actions">
+          <button className="button secondary" type="button" disabled={busy} onClick={() => setReplacing(true)}>つなぎ直す</button>
           <button className="button secondary danger" type="button" disabled={busy} onClick={() => { void remove(); }}>AI の設定を削除</button>
         </div>
       </>}

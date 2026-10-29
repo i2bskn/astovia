@@ -93,6 +93,9 @@ func modelInfo(w http.ResponseWriter, _ *http.Request) {
 
 const testKey = "sk-ant-user-key-0123456789"
 
+// testCred is the Anthropic credential of testKey.
+var testCred = Credential{Provider: ProviderAnthropic, Key: testKey}
+
 func testInput() MentionInput {
 	at := time.Date(2026, 10, 24, 1, 2, 3, 0, time.UTC)
 	return MentionInput{Me: "octocat", Repository: "o/r", Number: 12, Kind: "issue", State: "open", Title: "Bug", Target: 1,
@@ -127,7 +130,7 @@ func TestEnvironmentIsIgnored(t *testing.T) {
 				t.Fatalf("request: %s %s", r.method, r.path)
 			}
 			f.set(message("end_turn", `{"decision":"none","task":"","summary":"x","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`))
-			if _, err := c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); err != nil {
+			if _, err := c.JudgeMention(context.Background(), testCred, "claude-haiku-5-5", testInput()); err != nil {
 				t.Fatal(err)
 			}
 			for _, r := range f.all() {
@@ -179,7 +182,7 @@ func TestErrorClasses(t *testing.T) {
 		{529, "overloaded_error", "x", ErrTemporary},
 	} {
 		f, c := newFake(t, status(tc.code, tc.errType, tc.message))
-		_, err := c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput())
+		_, err := c.JudgeMention(context.Background(), testCred, "claude-haiku-5-5", testInput())
 		if !errors.Is(err, tc.want) {
 			t.Fatalf("%d %s: %v", tc.code, tc.message, err)
 		}
@@ -195,7 +198,7 @@ func TestErrorClasses(t *testing.T) {
 
 func TestJudgeMention(t *testing.T) {
 	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"  設計方針について回答する​ ","summary":"bob さんが質問","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`))
-	res, err := c.JudgeMention(context.Background(), testKey, "claude-sonnet-5-5", testInput())
+	res, err := c.JudgeMention(context.Background(), testCred, "claude-sonnet-5-5", testInput())
 	if err != nil || res.Decision != DecisionTask || res.Event != nil || res.Task != "設計方針について回答する" || res.Summary != "bob さんが質問" {
 		t.Fatalf("result: %+v %v", res, err)
 	}
@@ -241,7 +244,7 @@ func TestJudgeMention(t *testing.T) {
 
 	long := strings.Repeat("あ", 300)
 	f.set(message("end_turn", `{"decision":"none","task":"ignored","summary":"`+long+`","event_title":"MTG","event_start":"2026-10-29T12:30","event_end":"","topic":"話題","same_as":"t1"}`))
-	if res, err = c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); err != nil || res.Decision != DecisionNone || res.Event != nil || res.Task != "" || res.Summary != strings.Repeat("あ", 200) || res.Topic != "" || res.SameAs != "" {
+	if res, err = c.JudgeMention(context.Background(), testCred, "claude-haiku-5-5", testInput()); err != nil || res.Decision != DecisionNone || res.Event != nil || res.Task != "" || res.Summary != strings.Repeat("あ", 200) || res.Topic != "" || res.SameAs != "" {
 		t.Fatalf("no action: %+v %v", res, err)
 	}
 
@@ -259,7 +262,7 @@ func TestJudgeMention(t *testing.T) {
 		"empty candidate":  message("end_turn", `{"decision":"candidate","task":"","summary":"y"`+noEvent+`}`),
 	} {
 		f.set(reply)
-		if _, err = c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); !errors.Is(err, ErrUnusable) {
+		if _, err = c.JudgeMention(context.Background(), testCred, "claude-haiku-5-5", testInput()); !errors.Is(err, ErrUnusable) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
@@ -374,7 +377,7 @@ func TestTimeouts(t *testing.T) {
 		}
 	})
 	c.RequestTimeout, c.ModelTimeout = 50*time.Millisecond, 50*time.Millisecond
-	if _, err := c.JudgeMention(context.Background(), testKey, "claude-haiku-5-5", testInput()); !errors.Is(err, ErrTemporary) || errors.Is(err, context.DeadlineExceeded) {
+	if _, err := c.JudgeMention(context.Background(), testCred, "claude-haiku-5-5", testInput()); !errors.Is(err, ErrTemporary) || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout: %v", err)
 	}
 	if err := c.CheckModel(context.Background(), testKey, "claude-haiku-5-5"); !errors.Is(err, ErrTemporary) {
@@ -383,7 +386,7 @@ func TestTimeouts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	c.RequestTimeout = time.Minute
-	if _, err := c.JudgeMention(ctx, testKey, "claude-haiku-5-5", testInput()); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTemporary) {
+	if _, err := c.JudgeMention(ctx, testCred, "claude-haiku-5-5", testInput()); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTemporary) {
 		t.Fatalf("caller deadline: %v", err)
 	}
 }

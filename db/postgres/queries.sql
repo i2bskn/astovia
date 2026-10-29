@@ -378,6 +378,9 @@ WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(current_generation);
 -- name: UpdateAISettingsStatus :execrows
 UPDATE ai_settings SET status = sqlc.arg(status), last_error = sqlc.arg(last_error), updated_at = sqlc.arg(updated_at)
 WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation);
+-- name: UpdateAISecret :execrows
+UPDATE ai_settings SET api_key_sealed = sqlc.arg(new_sealed)
+WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation) AND provider = 'openai' AND api_key_sealed = sqlc.arg(old_sealed);
 -- name: DeleteAISettings :exec
 DELETE FROM ai_settings WHERE user_id = sqlc.arg(user_id);
 -- name: CreatePushSubscription :exec

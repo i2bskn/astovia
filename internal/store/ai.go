@@ -105,6 +105,46 @@ func (s *Store) DeleteAISettings(ctx context.Context, userID, sessionID string, 
 	})
 }
 
+// DeleteAISettingsReturning removes the user's settings like
+// DeleteAISettings and returns the row that was removed, read in the same
+// transaction. found is false when there were no settings.
+func (s *Store) DeleteAISettingsReturning(ctx context.Context, userID, sessionID string, now int64) (AISettings, bool, error) {
+	var removed AISettings
+	found := false
+	err := s.transaction(ctx, func(q queries) error {
+		if e := lockActiveUser(ctx, q, userID, sessionID, now); e != nil {
+			return e
+		}
+		existing, e := q.lockAISettings(ctx, userID)
+		if errors.Is(e, sql.ErrNoRows) {
+			return nil
+		}
+		if e != nil {
+			return e
+		}
+		if e = q.deleteAISettings(ctx, userID); e != nil {
+			return e
+		}
+		removed, found = existing, true
+		return nil
+	})
+	if err != nil {
+		return AISettings{}, false, err
+	}
+	return removed, found, nil
+}
+
+// UpdateAISecret replaces the sealed secret of the user's OpenAI settings
+// of the given generation, when it is still oldSealed. The generation,
+// updated_at, the status and the activation time are kept, so that a
+// synchronization does not take a refreshed token for new settings. The
+// user's state is not checked, like SetAIStatus. The result reports whether
+// a row was updated.
+func (s *Store) UpdateAISecret(ctx context.Context, userID string, generation int64, oldSealed, newSealed string) (bool, error) {
+	n, err := s.q.updateAISecret(ctx, userID, generation, oldSealed, newSealed)
+	return n == 1, err
+}
+
 // SetAIStatus records the outcome of using the settings of the given
 // generation. Nothing is written when the settings were saved again or
 // deleted in the meantime; the result reports whether a row was updated.

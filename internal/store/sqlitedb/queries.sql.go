@@ -4580,6 +4580,31 @@ func (q *Queries) UntrackSourceActionItems(ctx context.Context, arg UntrackSourc
 	return err
 }
 
+const updateAISecret = `-- name: UpdateAISecret :execrows
+UPDATE ai_settings SET api_key_sealed = ?1
+WHERE user_id = ?2 AND generation = ?3 AND provider = 'openai' AND api_key_sealed = ?4
+`
+
+type UpdateAISecretParams struct {
+	NewSealed  string
+	UserID     string
+	Generation int64
+	OldSealed  string
+}
+
+func (q *Queries) UpdateAISecret(ctx context.Context, arg UpdateAISecretParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateAISecret,
+		arg.NewSealed,
+		arg.UserID,
+		arg.Generation,
+		arg.OldSealed,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateAISettingsStatus = `-- name: UpdateAISettingsStatus :execrows
 UPDATE ai_settings SET status = ?1, last_error = ?2, updated_at = ?3
 WHERE user_id = ?4 AND generation = ?5

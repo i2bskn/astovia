@@ -76,7 +76,7 @@ func (a *oauthAPI) newServer(s *store.Store, origin string) *Server {
 		a.t.Fatal(err)
 	}
 	svc.Now = func() time.Time { return *a.now }
-	srv := newServer(config.Config{PublicURL: origin, Secure: true, Secret: testSecret}, svc, fstest.MapFS{})
+	srv := newServer(config.Config{PublicURL: origin, Secure: true, Secret: testSecret}, svc, fstest.MapFS{}, nil)
 	srv.registerLimiter.now = func() time.Time { return *a.now }
 	srv.cimdLimiter.now = func() time.Time { return *a.now }
 	srv.fetchCIMD = func(_ context.Context, clientID string) (oauth.Document, error) {
@@ -269,7 +269,7 @@ func expectMCPOK(t *testing.T, h http.Handler, token string) {
 }
 
 func TestOAuthMetadata(t *testing.T) {
-	h := New(config.Config{PublicURL: testOrigin}, nil, fstest.MapFS{})
+	h := New(config.Config{PublicURL: testOrigin}, nil, fstest.MapFS{}, nil)
 	prm := `{"resource":"https://astovia.test/mcp","authorization_servers":["https://astovia.test"],"scopes_supported":["mcp"],"bearer_methods_supported":["header"],"resource_name":"Astovia"}`
 	asm := `{"issuer":"https://astovia.test","authorization_endpoint":"https://astovia.test/oauth/authorize","token_endpoint":"https://astovia.test/oauth/token","registration_endpoint":"https://astovia.test/oauth/register","scopes_supported":["mcp","offline_access"],"response_types_supported":["code"],"response_modes_supported":["query"],"grant_types_supported":["authorization_code","refresh_token"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],"client_id_metadata_document_supported":true,"authorization_response_iss_parameter_supported":true}`
 	// No store is configured: metadata never touches the database.

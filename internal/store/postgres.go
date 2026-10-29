@@ -551,6 +551,9 @@ func (q postgresQueries) replaceAISettings(ctx context.Context, a AISettings, cu
 func (q postgresQueries) updateAISettingsStatus(ctx context.Context, userID string, generation int64, status string, lastError sql.NullString, now int64) (int64, error) {
 	return q.q.UpdateAISettingsStatus(ctx, db.UpdateAISettingsStatusParams{Status: status, LastError: lastError, UpdatedAt: now, UserID: userID, Generation: generation})
 }
+func (q postgresQueries) updateAISecret(ctx context.Context, userID string, generation int64, oldSealed, newSealed string) (int64, error) {
+	return q.q.UpdateAISecret(ctx, db.UpdateAISecretParams{NewSealed: newSealed, UserID: userID, Generation: generation, OldSealed: oldSealed})
+}
 func (q postgresQueries) deleteAISettings(ctx context.Context, userID string) error {
 	return q.q.DeleteAISettings(ctx, userID)
 }

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/i2bskn/astovia/internal/ai"
+	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/chatwork"
 	"github.com/i2bskn/astovia/internal/chatworksync"
@@ -16,6 +17,7 @@ import (
 	"github.com/i2bskn/astovia/internal/google"
 	"github.com/i2bskn/astovia/internal/httpserver"
 	"github.com/i2bskn/astovia/internal/notify"
+	"github.com/i2bskn/astovia/internal/openai"
 	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/slack"
 	"github.com/i2bskn/astovia/internal/slacksync"
@@ -69,12 +71,16 @@ func run(args []string) error {
 	if e != nil {
 		return errors.New("cannot initialize authentication")
 	}
-	srv := &http.Server{Addr: c.Addr, Handler: httpserver.New(c, a, assets), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	// One token manager is shared by the HTTP server and the
+	// synchronizations, so that the refreshes of a user's ChatGPT tokens are
+	// serialized in the process.
+	tokens := &aicred.Tokens{Store: s, Box: secretbox.New(c.Secret), OpenAI: openai.New(openai.HostID(c.Secret)), Now: func() time.Time { return a.Now() }}
+	srv := &http.Server{Addr: c.Addr, Handler: httpserver.New(c, a, assets, tokens), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	signals, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	background, cancelBackground := context.WithCancel(ctx)
 	defer cancelBackground()
-	workers := startWorkers(background, s, c, a)
+	workers := startWorkers(background, s, c, a, tokens)
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()
 	log.Printf("Astovia listening on %s", c.Addr)
@@ -105,16 +111,17 @@ func run(args []string) error {
 // mail does nothing without the Google OAuth client), the notification
 // engine, the dispatcher, the cleanup of sent notifications and the sweep
 // of task candidates and passed events. They share the
-// authentication service's clock. They stop when ctx is canceled; the returned group
+// authentication service's clock, and the synchronizations share tokens
+// with the HTTP server. They stop when ctx is canceled; the returned group
 // finishes when they have returned.
-func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.Service) *sync.WaitGroup {
+func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.Service, tokens *aicred.Tokens) *sync.WaitGroup {
 	now := func() time.Time { return a.Now() }
 	box := secretbox.New(c.Secret)
 	aiClient := ai.New()
-	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: aiClient, Box: box, Now: now}
-	slackSyncer := &slacksync.Syncer{Store: s, Slack: slack.New(now), AI: aiClient, Box: box, Now: now}
-	chatworkSyncer := &chatworksync.Syncer{Store: s, Chatwork: chatwork.New(now), AI: aiClient, Box: box, Now: now}
-	gmailSyncer := &gmailsync.Syncer{Store: s, Google: google.New(now), Client: c.Google, AI: aiClient, Box: box, Now: now}
+	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: aiClient, Box: box, Tokens: tokens, Now: now}
+	slackSyncer := &slacksync.Syncer{Store: s, Slack: slack.New(now), AI: aiClient, Box: box, Tokens: tokens, Now: now}
+	chatworkSyncer := &chatworksync.Syncer{Store: s, Chatwork: chatwork.New(now), AI: aiClient, Box: box, Tokens: tokens, Now: now}
+	gmailSyncer := &gmailsync.Syncer{Store: s, Google: google.New(now), Client: c.Google, AI: aiClient, Box: box, Tokens: tokens, Now: now}
 	engine := &notify.Engine{Store: s, Now: now}
 	sweeper := &notify.Sweeper{Store: s, Now: now}
 	vapid := &notify.VAPID{Store: s, Box: box, Now: now}

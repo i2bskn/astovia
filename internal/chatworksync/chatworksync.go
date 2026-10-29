@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/i2bskn/astovia/internal/ai"
+	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/chatwork"
 	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/store"
@@ -70,6 +71,9 @@ const (
 	AIErrorBilling          = "billing"
 	AIErrorModelUnavailable = "model_unavailable"
 	AIErrorRequestRejected  = "request_rejected"
+	// AIErrorUsageLimit is the usage limit of the ChatGPT plan; the status
+	// stays active.
+	AIErrorUsageLimit = aicred.UsageLimit
 )
 
 // TokenPurpose is the secretbox purpose of a user's Chatwork API token.
@@ -104,7 +108,10 @@ type Syncer struct {
 	Chatwork *chatwork.Client
 	AI       *ai.Client
 	Box      *secretbox.Box
-	Now      func() time.Time
+	// Tokens manages the access tokens of the ChatGPT plan; it is shared
+	// with the HTTP server.
+	Tokens *aicred.Tokens
+	Now    func() time.Time
 
 	mu sync.Mutex
 	// read maps a user to the rooms read to the end, with the
@@ -489,31 +496,36 @@ const (
 )
 
 // reloadAI reads the settings again right before an AI call, so that
-// nothing is sent after they were deleted or replaced, and opens the key.
-func (r *run) reloadAI() (store.AISettings, string, aiGate, error) {
+// nothing is sent after they were deleted or replaced, and opens the
+// credential. While the usage limit of the ChatGPT plan is cooling down the
+// settings are handled as replaced: the AI is not called.
+func (r *run) reloadAI() (store.AISettings, ai.Credential, aiGate, error) {
 	cur, err := r.s.Store.AISettings(r.parent, r.conn.UserID)
 	switch {
 	case errors.Is(err, store.ErrAISettingsNotFound):
 		r.aiStopped = true
-		return store.AISettings{}, "", gateStopped, nil
+		return store.AISettings{}, ai.Credential{}, gateStopped, nil
 	case err != nil:
-		return store.AISettings{}, "", gateStopped, err
+		return store.AISettings{}, ai.Credential{}, gateStopped, err
 	case cur.Generation != r.ai.Generation:
 		r.aiStale = true
-		return store.AISettings{}, "", gateStale, nil
+		return store.AISettings{}, ai.Credential{}, gateStale, nil
 	case cur.Status != store.AIActive:
 		r.aiFallbackOnly = true
-		return store.AISettings{}, "", gateInactive, nil
+		return store.AISettings{}, ai.Credential{}, gateInactive, nil
+	case aicred.CoolingDown(cur, r.s.Now()):
+		r.aiStale = true
+		return store.AISettings{}, ai.Credential{}, gateStale, nil
 	}
 	r.ai = &cur
-	apiKey, err := r.s.Box.Open(ai.KeyPurpose(r.conn.UserID), cur.APIKeySealed)
+	cred, err := aicred.Open(r.s.Box, r.s.Tokens, cur)
 	if err != nil {
 		log.Printf("chatwork sync: user=%s: ai %s", r.conn.UserID, AIErrorKeyUndecryptable)
 		r.setAIStatus(store.AIError, AIErrorKeyUndecryptable)
 		r.aiStopped = true
-		return store.AISettings{}, "", gateStopped, nil
+		return store.AISettings{}, ai.Credential{}, gateStopped, nil
 	}
-	return cur, apiKey, gateOK, nil
+	return cur, cred, gateOK, nil
 }
 
 // aiClass is the class of an AI call's result.
@@ -524,6 +536,7 @@ const (
 	aiFailed            // key, billing or model: the AI stops for the user
 	aiUnusable          // the request or the answer was rejected
 	aiTemporary         // try again later
+	aiStaled            // the settings changed while getting a token
 )
 
 // classifyAI records the outcome of an AI call on the settings and returns
@@ -531,6 +544,12 @@ const (
 func (r *run) classifyAI(cur store.AISettings, err error) (aiClass, error) {
 	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		return aiTemporary, err
+	}
+	// Settings replaced or removed while the token was obtained are
+	// handled like settings replaced before the call.
+	if errors.Is(err, aicred.ErrStale) {
+		r.aiStale = true
+		return aiStaled, nil
 	}
 	if err != nil {
 		log.Printf("chatwork sync: user=%s: ai %v", r.conn.UserID, err)
@@ -553,6 +572,10 @@ func (r *run) classifyAI(cur store.AISettings, err error) (aiClass, error) {
 	case errors.Is(err, ai.ErrUnusable):
 		r.setAIStatus(store.AIActive, AIErrorRequestRejected)
 		return aiUnusable, nil
+	case errors.Is(err, ai.ErrUsageLimit):
+		// Recorded so that the next calls wait (aicred.CoolingDown); this
+		// one is handled like a temporary failure.
+		r.setAIStatus(store.AIActive, AIErrorUsageLimit)
 	}
 	return aiTemporary, nil
 }

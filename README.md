@@ -1,6 +1,6 @@
 # Astovia
 
-Astoviaは、「忘れてた！」を防ぐためのセルフホストのタスク管理です。Web画面でタスクを管理し、スマホなどへWeb Pushで通知します。GitHub連携では、レビュー依頼と割り当てを取り込んで、PR／Issueの状態から自動で完了にします。自分へのメンションは、AI（Anthropic）が読んでやることがあるものをタスクにし、自分宛てか判断しきれないものは「タスク候補」にします。AIクライアントや外部プログラムからは、REST APIとMCP（OAuthで接続）で操作できます。Slack連携では、自分へのメンションとDM（設定でグループDMも）をAIが読んで同じようにタスクとタスク候補にし、自分の返信で用件が済んだとAIが判断したら自動で完了にします。Chatwork連携では、自分宛てのTO・返信・TO ALLとダイレクトチャットを同じようにAIが読んでタスクにし、自分に割り当てられたChatworkのタスクも取り込みます。メール連携（Gmail・Google Workspace）では、受信トレイに届いたメールをスレッドごとにAIが読んで同じようにタスクにし、自分の返信で用件が済んだら自動で完了にします。会議などの日時が決まった投稿は、Googleカレンダーに登録するタスク（予定タスク）にします。保存先はSQLiteかPostgreSQLです。GitHub・Slack・Chatwork・メール（Gmail）以外の外部サービス連携は**まだ実装していません**。
+Astoviaは、「忘れてた！」を防ぐためのセルフホストのタスク管理です。Web画面でタスクを管理し、スマホなどへWeb Pushで通知します。GitHub連携では、レビュー依頼と割り当てを取り込んで、PR／Issueの状態から自動で完了にします。自分へのメンションは、AI（AnthropicのAPIキーか、自分のChatGPTのプラン）が読んでやることがあるものをタスクにし、自分宛てか判断しきれないものは「タスク候補」にします。AIクライアントや外部プログラムからは、REST APIとMCP（OAuthで接続）で操作できます。Slack連携では、自分へのメンションとDM（設定でグループDMも）をAIが読んで同じようにタスクとタスク候補にし、自分の返信で用件が済んだとAIが判断したら自動で完了にします。Chatwork連携では、自分宛てのTO・返信・TO ALLとダイレクトチャットを同じようにAIが読んでタスクにし、自分に割り当てられたChatworkのタスクも取り込みます。メール連携（Gmail・Google Workspace）では、受信トレイに届いたメールをスレッドごとにAIが読んで同じようにタスクにし、自分の返信で用件が済んだら自動で完了にします。会議などの日時が決まった投稿は、Googleカレンダーに登録するタスク（予定タスク）にします。保存先はSQLiteかPostgreSQLです。GitHub・Slack・Chatwork・メール（Gmail）以外の外部サービス連携は**まだ実装していません**。
 
 使ってみる場合は「本番で動かす」を、開発する場合は「Dockerでローカル開発する」を読んでください。
 
@@ -20,7 +20,7 @@ GitHub Container Registryで次の2つのイメージを公開しています。
 ### 共通の前提
 
 - HTTPSで公開してください。Web PushとCookieの`Secure`属性にHTTPSが必要です。`ASTOVIA_PUBLIC_URL`には利用者がブラウザで開くHTTPSのOrigin（例: `https://astovia.example.com`）を設定します。
-- 同じDBに対して動かすプロセスは1つだけにしてください（「運用上の注意」を参照）。オートスケールや、デプロイ時に新旧のコンテナが並行して動く構成では、通知が重複する場合があります。
+- 同じDBに対して動かすプロセスは1つだけにしてください（「運用上の注意」を参照）。オートスケールや、デプロイ時に新旧のコンテナが並行して動く構成では、通知が重複する場合があります。AIにChatGPTのプランを使う場合は、トークンの更新が重なって接続が切れることもあります（「AIの設定」を参照）。
 - `ASTOVIA_JWT_SECRET`は`openssl rand -base64 32`で一度だけ生成し、保管してください。変更すると、保存したGitHubトークン、AIのAPIキー、VAPIDの秘密鍵を復号できなくなります（「運用上の注意」を参照）。
 - アプリは起動時にスキーマを更新しません。初回と、バージョンを更新するたびに、migrateイメージでスキーマを適用してください。適用前にアプリを起動すると「database schema is not initialized or incompatible」と表示して終了します。
 - `.env`の値に`$`を含む場合は、値全体をシングルクォートで囲んでください（Composeはシングルクォートの中を展開しません）。接続文字列のパスワードに`@`、`:`、`/`、`?`、`#`、`%`等を含む場合はURLエンコードしてください。`.env`は`chmod 600`にしてください。
@@ -701,15 +701,37 @@ GitHubのメンションとSlackの発言から、AIは「タスク」「タス�
 
 ## AIの設定
 
-GitHubのメンションとSlackの発言を読んで、自分がやることがあるか（Slackでは返信で用件が済んだかも）を判断するAIを、ユーザーごとに設定します。今の接続先はAnthropicだけです。
+GitHubのメンションとSlack・Chatwork・メールの発言を読んで、自分がやることがあるか（返信で用件が済んだかも）を判断するAIを、ユーザーごとに設定します。提供元は「AnthropicのAPIキー」か「ChatGPTのプラン（OpenAI）」のどちらか1つです。別の提供元に切り替えるときは、今のAIの設定を削除してから設定し直します。
+
+### AnthropicのAPIキー
 
 1. [Anthropic ConsoleのAPIキーのページ](https://platform.claude.com/settings/keys)でAPIキーを作ります。
-2. 管理画面の「設定」→「AI」にキーを貼り付け、モデル（Claude Haiku 5.5（既定）、Claude Sonnet 5.5、Claude Opus 5.5）を選んで「保存」を押します。
+2. 管理画面の「設定」→「AI」で「Anthropic の API キー」を選び、キーを貼り付け、モデル（Claude Haiku 5.5（既定）、Claude Sonnet 5.5、Claude Opus 5.5）を選んで「保存」を押します。
 
 - 保存時に、そのキーで選んだモデルを使えるかをAnthropicのModels API（トークンを消費しません）で確かめます。キーは`ASTOVIA_JWT_SECRET`から派生した鍵で暗号化して保存し、画面・APIには末尾4文字だけを表示します。`ASTOVIA_JWT_SECRET`を変えるとキーを復号できなくなるため、登録し直してください。サーバーの環境変数（`ANTHROPIC_API_KEY`等）は使いません。
-- 判断のため、メンションのあったIssue／PRについて、リポジトリ名（非公開のものを含む）、タイトルと本文、コメントの本文、投稿者のGitHubユーザー名と日時がAnthropicに送られます。Slack連携では、判断する発言と前後の発言の本文、投稿者の表示名、ワークスペース名とチャンネル名も送られます（「Slack連携」を参照）。Chatwork連携では、判断する発言と前後の発言の本文、投稿者の名前とアカウントID、組織名とルーム名が送られます（「Chatwork連携」を参照）。メール連携では、判断するメールと前後のメールの本文、件名、差出人の名前とアドレス、宛先とCCの名前とアドレス、接続したGoogleアカウントのアドレスが送られます（「メール連携（Gmail・Google Workspace）」を参照）。費用は登録したキーの組織に請求されます。利用量の集計や上限はありません。
+- 費用は登録したキーの組織に請求されます。利用量の集計や上限はありません。
+
+### ChatGPTのプラン（OpenAI）
+
+自分のChatGPTのプラン（Plus・Proなど）の利用枠で判断します。OpenAIの「Sign in with ChatGPT」（オープンソースのクライアント向けのChatGPT plan usage）を使います。OpenAIはサインイン後の戻り先として`http://127.0.0.1:1455/auth/callback`しか認めないため、戻り先のページのURLを手で貼り付けて接続します。
+
+1. 管理画面の「設定」→「AI」で「ChatGPT のプラン」を選び、「ChatGPT で続ける」を押します。新しいタブでChatGPTのサインイン画面が開きます。
+2. サインインして許可すると、そのタブに「このサイトにアクセスできません」などと表示されます。それで正常です。
+3. そのタブのアドレスバーのURL（`http://127.0.0.1:1455/auth/callback?…`）をすべてコピーし、Astoviaの画面の欄に貼って「接続」を押します。「ChatGPT で続ける」を押してから10分以内に貼ってください。
+
+- 接続時に、OpenAIのIDトークン（署名・発行者・対象・期限・nonce）と、プランを使う許可（`chatgpt.tokens.use.direct`）を確かめます。続けて、プランで使えるモデルの一覧を読み、選んだモデルに小さな確認の要求を1回送り、Astoviaが使う形式（JSON Schemaの構造化出力）で答えられることを確かめてから保存します。新しく接続したときは、一覧にある軽いモデル（名前にLunaを含むもの）を選び、無ければ一覧の最初のモデルを選びます。つなぎ直しでは、それまでのモデルが一覧にあればそのまま使います。選んだモデルで使えなければ、一覧の次のモデルを1回だけ試します。モデルは後から一覧の中で変えられます。
+- 判断のたびに、ChatGPTのプランの利用枠を使います。使用量は[ChatGPTの設定](https://chatgpt.com/settings/usage)で確認・管理できます。利用上限に達すると、その旨を表示して15分はAIを呼びません（その間の発言は読み直しを待ち、6時間以上続けば確認用の対応事項にします）。プランで使えない（無料プランなど）場合は接続できません。
+- 保存するのは、OpenAIが発行したクライアントID、アカウントの識別子とメールアドレス（画面の表示用）、リフレッシュトークンとアクセストークンで、`ASTOVIA_JWT_SECRET`から派生した鍵で暗号化します。トークンは画面・APIに返しません。リフレッシュトークンは更新のたびに入れ替わり、同じ利用者の更新はAstovia内で1つずつ行います。ChatGPT側で接続を解除した場合などは「ChatGPT との接続が切れました」と表示するため、「つなぎ直す」から接続し直してください。
+- AIの設定を削除すると、OpenAIでリフレッシュトークンを取り消します。取り消しに失敗したときは画面に表示するため、ChatGPTの設定からAstoviaの接続を解除してください。つなぎ直し・接続の失敗・パスワード再設定とユーザー無効化では取り消しません（使わなくなったトークンは30日で失効します）。
+- **ChatGPTのプランを使う場合、Astoviaのアプリ（プロセス）は1つだけ動かしてください。**トークンの更新を1つずつ行うための排他はプロセスの中だけで行うため、複数のコンテナやプロセスで同じDBを使うと、リフレッシュトークンの再使用として接続が切れることがあります。
+- OpenAIのAPIキー（従量課金）での接続には対応していません。
+
+### 共通
+
+- 判断のため、メンションのあったIssue／PRについて、リポジトリ名（非公開のものを含む）、タイトルと本文、コメントの本文、投稿者のGitHubユーザー名と日時が選んだ提供元（AnthropicまたはOpenAI）に送られます。Slack連携では、判断する発言と前後の発言の本文、投稿者の表示名、ワークスペース名とチャンネル名も送られます（「Slack連携」を参照）。Chatwork連携では、判断する発言と前後の発言の本文、投稿者の名前とアカウントID、組織名とルーム名が送られます（「Chatwork連携」を参照）。メール連携では、判断するメールと前後のメールの本文、件名、差出人の名前とアドレス、宛先とCCの名前とアドレス、接続したGoogleアカウントのアドレスが送られます（「メール連携（Gmail・Google Workspace）」を参照）。OpenAIには、保存しない指定（`store: false`）で送ります。
 - AIが書いたタスク文と要約は外部の文章をもとにしています。画面ではテキストとして表示し、MCPでは他の対応事項と同じく`content`として返します。第三者がコメントに「対応不要」などと書くと、AIが対応不要と判断する場合があります。その結果は「自動で処理したもの」に残り、未完了に戻せます。
-- パスワード再設定とユーザー無効化では、AIの設定を削除します（乗っ取られていた間に登録されたキーで、本文が他人の組織へ送られ続けないようにするためです）。
+- パスワード再設定とユーザー無効化では、AIの設定を削除します（乗っ取られていた間に登録されたキーや接続で、本文が他人の組織やアカウントへ送られ続けないようにするためです）。
+- `ASTOVIA_JWT_SECRET`を変えると、保存したAPIキーもChatGPTの接続も復号できなくなるため、登録し直してください（ChatGPTの接続に使うホストの識別子も変わります）。
 
 ## URLと応答
 
@@ -761,9 +783,12 @@ GitHubのメンションとSlackの発言を読んで、自分がやることが
 | `POST /api/v1/integrations/gmail/complete` | 本文`{state, code}`か`{state, error}`でGoogleの認可を完了し、アカウントを返す。形式が正しくなければ400`invalid_request`、手続きが無効・期限切れ・使用済み・他のユーザーのものなら400`gmail_state_invalid`、拒否されたら400`gmail_denied`、`gmail.readonly`がなければ400`gmail_scope_missing`、管理者が許可していなければ403`gmail_policy_blocked`、Gmail APIが無効なら502`gmail_api_disabled`、Googleとのやりとりの失敗は502`gmail_exchange_failed`、別のユーザーが接続済みのアドレスは409`gmail_in_use`、10件に達していれば409`gmail_too_many`。Access JWTが必要 |
 | `PATCH /api/v1/integrations/gmail/accounts/{id}` | 本文`{immediate_notify}`で設定を変える。他のユーザーのアカウントと存在しないアカウントは404。Access JWTが必要 |
 | `DELETE /api/v1/integrations/gmail/accounts/{id}` | アカウントの接続を解除し、Googleでトークンを失効させて204を返す（失効に失敗しても204）。他のユーザーのアカウントと存在しないアカウントは404。Access JWTが必要 |
-| `GET /api/v1/ai` | AIの設定。未設定は`{configured: false}`、設定済みは`{configured, provider, model, key_last4, status, last_error, updated_at}`。キー本体は返さない。Access JWTが必要 |
-| `PUT /api/v1/ai` | 本文`{api_key?, model}`（16KiB以内）でAPIキーとモデルを登録・変更する。`api_key`を省くと保存済みのキーでモデルだけを変える。保存前にAnthropicで確かめ、無効なキーは400`ai_key_invalid`、モデルを使えなければ400`ai_model_unavailable`、残高・支払いの問題は400`ai_billing`、Anthropicに届かなければ503`ai_unavailable`、別の要求で設定が変わっていれば409`ai_conflict`。Access JWTが必要 |
-| `DELETE /api/v1/ai` | AIの設定を削除し204を返す。未設定でも204。Access JWTが必要 |
+| `GET /api/v1/ai` | AIの設定。未設定は`{configured: false}`、設定済みは`{configured, provider, model, key_last4, account, status, last_error, updated_at}`。`provider`は`"anthropic"`か`"openai"`（ChatGPTのプラン）。`key_last4`はAnthropicのキーの末尾4文字（OpenAIでは`""`）、`account`はChatGPTのアカウントのメールアドレス（Anthropicと不明な場合は`null`）。キー・トークンは返さない。Access JWTが必要 |
+| `PUT /api/v1/ai` | 本文`{api_key?, model, provider?}`（16KiB以内）でAPIキーとモデルを登録・変更する。`provider`は`"anthropic"`（省略時）か`"openai"`で、今の設定と違えば409`ai_provider_mismatch`（削除してから設定し直す）。Anthropicでは`api_key`を省くと保存済みのキーでモデルだけを変える。保存前にAnthropicで確かめ、無効なキーは400`ai_key_invalid`、モデルを使えなければ400`ai_model_unavailable`、残高・支払いの問題は400`ai_billing`、Anthropicに届かなければ503`ai_unavailable`、別の要求で設定が変わっていれば409`ai_conflict`。`"openai"`はモデルの変更だけで（接続は`/api/v1/ai/openai/*`）、`api_key`は付けられない。モデルがプランの一覧に無ければ400`ai_model_unavailable`、確認の要求が通らなければ、接続が無効なら400`ai_key_invalid`、プランで使えなければ400`ai_billing`、利用上限なら400`ai_usage_limit`、要求の形式を受け付けなければ400`ai_unsupported`、届かなければ503`ai_unavailable`。Access JWTが必要 |
+| `DELETE /api/v1/ai` | AIの設定を削除し204を返す。未設定でも204。ChatGPTのプランではOpenAIでリフレッシュトークンを取り消し、取り消しに失敗したら（削除はしたうえで）200`{revoke_failed: true}`を返す。Access JWTが必要 |
+| `POST /api/v1/ai/openai/authorize` | 本文`{}`でChatGPTのサインインを始め、`{url, redirect_uri}`を返す。Anthropicの設定があれば409`ai_provider_mismatch`。接続済みならそのクライアントIDで、未接続なら新しいクライアントの登録として始める。手続きは10分で無効になる。Access JWTが必要 |
+| `POST /api/v1/ai/openai/complete` | 本文`{callback_url}`（ブラウザが戻された`http://127.0.0.1:1455/auth/callback?…`のURL。HTTPS-Onlyモードで`https://`になったものも可）で接続を完了し、`GET /api/v1/ai`と同じ形を返す。URLを読み取れなければ400`openai_callback_invalid`（手続きは使われない）、手続きが無効・期限切れ・使用済み・他のユーザーのもの、またはOpenAIがコードを受け付けなければ400`openai_state_invalid`、拒否されたら400`openai_denied`、プランを使う許可がなければ400`openai_scope_missing`、OpenAIとのやりとりやIDトークンの検証に失敗したら502`openai_unavailable`、Anthropicの設定があれば409`ai_provider_mismatch`。モデルの確認の失敗は`PUT`と同じコード。Access JWTが必要 |
+| `GET /api/v1/ai/openai/models` | ChatGPTのプランで使えるモデルの一覧`{models: [{id, name}]}`。ChatGPTのプランを設定していなければ404。エラーは`PUT`と同じコード。Access JWTが必要 |
 | `GET /api/v1/push/public-key` | VAPIDの公開鍵`{public_key}`。Access JWTが必要 |
 | `GET /api/v1/push/subscriptions` | 通知を受け取る端末の一覧`{subscriptions: [{id, label, created_at, last_used_at}]}`。Access JWTが必要 |
 | `POST /api/v1/push/subscriptions` | 本文`{endpoint, keys: {p256dh, auth}, label?, timezone?}`で端末を登録する。新規は201、登録済みの端末は200。20台に達していると409`too_many_subscriptions`。Access JWTが必要 |

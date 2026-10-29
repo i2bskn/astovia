@@ -1,7 +1,9 @@
-// Package ai calls the AI provider (Anthropic) with the user's own API key.
-// Clients are built without any environment default: neither the API key
-// nor the base URL can come from ANTHROPIC_* variables or profile files, so
-// a request only ever carries the key it was given and goes to BaseURL.
+// Package ai calls the AI provider with the user's own credential: an
+// Anthropic API key, or the access token of the user's ChatGPT plan
+// (OpenAI). Anthropic clients are built without any environment default:
+// neither the API key nor the base URL can come from ANTHROPIC_* variables
+// or profile files, so a request only ever carries the key it was given and
+// goes to BaseURL.
 package ai
 
 import (
@@ -17,19 +19,41 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/i2bskn/astovia/internal/openai"
 )
 
 // DefaultBaseURL is the Anthropic API.
 const DefaultBaseURL = "https://api.anthropic.com/"
 
-// ProviderAnthropic is the only provider for now.
-const ProviderAnthropic = "anthropic"
+// Providers of the AI settings.
+const (
+	// ProviderAnthropic is an Anthropic API key.
+	ProviderAnthropic = "anthropic"
+	// ProviderOpenAI is the user's ChatGPT plan, used through OpenAI's Sign
+	// in with ChatGPT.
+	ProviderOpenAI = "openai"
+)
+
+// Credential is what a judgment authenticates with.
+type Credential struct {
+	// Provider is ProviderAnthropic or ProviderOpenAI.
+	Provider string
+	// Key is the Anthropic API key.
+	Key string
+	// Token returns an OpenAI access token. failed is the token that a
+	// request just rejected with 401, or "" for the current one. Its
+	// errors wrap one of the error classes, or are the context's.
+	Token func(ctx context.Context, failed string) (string, error)
+}
 
 const (
 	// requestTimeout bounds one judgment and modelTimeout one model check.
 	requestTimeout = 15 * time.Second
 	modelTimeout   = 10 * time.Second
 	maxTokens      = 4096
+	// openAITimeout bounds one judgment with the ChatGPT plan, including
+	// getting the access token and the retry after a 401.
+	openAITimeout = 20 * time.Second
 	// resultLimit is the longest task or summary kept, in characters.
 	resultLimit = 200
 	// topicLimit is the longest topic kept, in characters.
@@ -68,20 +92,27 @@ var (
 	// ErrTemporary is a 408, 429, 5xx (529 included), a connection error or
 	// this package's own timeout.
 	ErrTemporary = errors.New("ai: temporary")
+	// ErrUsageLimit is the usage limit of the user's ChatGPT plan.
+	ErrUsageLimit = errors.New("ai: usage limit")
 )
 
-// Client calls the Anthropic API. BaseURL, HTTP and the timeouts are
-// replaced by tests.
+// Client calls the Anthropic API and, for the ChatGPT plan, OpenAI.
+// BaseURL, HTTP, OpenAI and the timeouts are replaced by tests.
 type Client struct {
 	BaseURL        string
 	HTTP           *http.Client
 	RequestTimeout time.Duration
 	ModelTimeout   time.Duration
+	// OpenAI calls the Responses and Models APIs; it needs no host ID.
+	OpenAI *openai.Client
+	// OpenAITimeout bounds one judgment with the ChatGPT plan.
+	OpenAITimeout time.Duration
 }
 
-// New returns a client of the Anthropic API that does not follow redirects.
+// New returns a client of the Anthropic API and OpenAI that does not follow
+// redirects.
 func New() *Client {
-	return &Client{BaseURL: DefaultBaseURL, RequestTimeout: requestTimeout, ModelTimeout: modelTimeout, HTTP: &http.Client{
+	return &Client{BaseURL: DefaultBaseURL, RequestTimeout: requestTimeout, ModelTimeout: modelTimeout, OpenAI: openai.New(""), OpenAITimeout: openAITimeout, HTTP: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -250,22 +281,41 @@ var outputSchema = map[string]any{
 }
 
 // JudgeMention asks the AI whether the mentioned user has something to do.
-func (c *Client) JudgeMention(ctx context.Context, key, model string, in MentionInput) (MentionResult, error) {
+func (c *Client) JudgeMention(ctx context.Context, cred Credential, model string, in MentionInput) (MentionResult, error) {
 	user, err := UserMessage(in)
 	if err != nil {
 		return MentionResult{}, err
 	}
-	text, err := c.structured(ctx, key, model, SystemPrompt, user, outputSchema)
+	text, err := c.structured(ctx, cred, model, SystemPrompt, user, judgmentSchemaName, outputSchema)
 	if err != nil {
 		return MentionResult{}, err
 	}
 	return parseResult(text, location(in.Location), in.RelatedTasks)
 }
 
+// Names of the JSON schemas sent to OpenAI.
+const (
+	judgmentSchemaName = "judgment"
+	replySchemaName    = "reply"
+	checkSchemaName    = "check"
+)
+
 // structured sends one judgment with a fixed system prompt and a JSON
-// schema for the answer, and returns the answer's text. Errors are
-// classified like those of JudgeMention.
-func (c *Client) structured(ctx context.Context, key, model, system, user string, schema map[string]any) (string, error) {
+// schema for the answer to the provider of cred, and returns the answer's
+// text. Errors are classified like those of JudgeMention. An unknown
+// provider is ErrKeyInvalid.
+func (c *Client) structured(ctx context.Context, cred Credential, model, system, user, schemaName string, schema map[string]any) (string, error) {
+	switch cred.Provider {
+	case ProviderAnthropic:
+		return c.structuredAnthropic(ctx, cred.Key, model, system, user, schema)
+	case ProviderOpenAI:
+		return c.structuredOpenAI(ctx, cred, model, system, user, schemaName, schema)
+	}
+	return "", fmt.Errorf("%w (provider)", ErrKeyInvalid)
+}
+
+// structuredAnthropic is structured with an Anthropic API key.
+func (c *Client) structuredAnthropic(ctx context.Context, key, model, system, user string, schema map[string]any) (string, error) {
 	rctx, cancel := context.WithTimeout(ctx, c.RequestTimeout)
 	defer cancel()
 	client := c.sdk(key)

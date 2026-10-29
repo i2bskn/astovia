@@ -48,7 +48,7 @@ func userText(t *testing.T, raw []byte) (string, string, map[string]any) {
 
 func TestJudgeSlack(t *testing.T) {
 	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"返事する","summary":"bob さんが依頼","event_title":"","event_start":"","event_end":"","topic":"資料の件","same_as":"t2"}`))
-	res, err := c.JudgeSlack(context.Background(), testKey, "claude-haiku-5-5", slackInput())
+	res, err := c.JudgeSlack(context.Background(), testCred, "claude-haiku-5-5", slackInput())
 	if err != nil || res.Decision != DecisionTask || res.Task != "返事する" || res.Topic != "資料の件" || res.SameAs != "t2" {
 		t.Fatalf("result: %+v %v", res, err)
 	}
@@ -93,7 +93,7 @@ func TestJudgeSlack(t *testing.T) {
 	}
 	// A symbol the input did not give is dropped.
 	f.set(message("end_turn", `{"decision":"task","task":"返事する","summary":"s","event_title":"","event_start":"","event_end":"","topic":"資料の件","same_as":"t9"}`))
-	if res, err = c.JudgeSlack(context.Background(), testKey, "claude-haiku-5-5", slackInput()); err != nil || res.SameAs != "" || res.Topic != "資料の件" {
+	if res, err = c.JudgeSlack(context.Background(), testCred, "claude-haiku-5-5", slackInput()); err != nil || res.SameAs != "" || res.Topic != "資料の件" {
 		t.Fatalf("unknown symbol: %+v %v", res, err)
 	}
 	p := in.Posts
@@ -112,7 +112,7 @@ func TestJudgeSlack(t *testing.T) {
 	for i := range in2.Posts {
 		in2.Posts[i].Target = false
 	}
-	if _, err = c.JudgeSlack(context.Background(), testKey, "claude-haiku-5-5", in2); err == nil {
+	if _, err = c.JudgeSlack(context.Background(), testCred, "claude-haiku-5-5", in2); err == nil {
 		t.Fatal("no target accepted")
 	}
 }
@@ -120,7 +120,7 @@ func TestJudgeSlack(t *testing.T) {
 func TestJudgeReply(t *testing.T) {
 	f, c := newFake(t, message("end_turn", `{"resolved":true,"reason":"回答した"}`))
 	in := ReplyInput{Me: SlackPerson{ID: "U1", Name: "alice"}, Task: "資料を送る", Posts: slackInput().Posts}
-	res, err := c.JudgeReply(context.Background(), testKey, "claude-haiku-5-5", in)
+	res, err := c.JudgeReply(context.Background(), testCred, "claude-haiku-5-5", in)
 	if err != nil || !res.Resolved {
 		t.Fatalf("result: %+v %v", res, err)
 	}
@@ -132,7 +132,7 @@ func TestJudgeReply(t *testing.T) {
 		t.Fatalf("message: %s", text)
 	}
 	f.set(message("end_turn", `{"resolved":false,"reason":"x"}`))
-	if res, err = c.JudgeReply(context.Background(), testKey, "claude-haiku-5-5", in); err != nil || res.Resolved {
+	if res, err = c.JudgeReply(context.Background(), testCred, "claude-haiku-5-5", in); err != nil || res.Resolved {
 		t.Fatalf("not resolved: %+v %v", res, err)
 	}
 	for name, reply := range map[string]func(http.ResponseWriter, *http.Request){
@@ -142,12 +142,12 @@ func TestJudgeReply(t *testing.T) {
 		"invalid JSON":  message("end_turn", `{"resolved":`),
 	} {
 		f.set(reply)
-		if _, err = c.JudgeReply(context.Background(), testKey, "claude-haiku-5-5", in); !errors.Is(err, ErrUnusable) {
+		if _, err = c.JudgeReply(context.Background(), testCred, "claude-haiku-5-5", in); !errors.Is(err, ErrUnusable) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
 	f.set(status(401, "authentication_error", "bad key"))
-	if _, err = c.JudgeReply(context.Background(), testKey, "claude-haiku-5-5", in); !errors.Is(err, ErrKeyInvalid) {
+	if _, err = c.JudgeReply(context.Background(), testCred, "claude-haiku-5-5", in); !errors.Is(err, ErrKeyInvalid) {
 		t.Fatalf("401: %v", err)
 	}
 }

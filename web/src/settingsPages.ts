@@ -8,7 +8,7 @@ export type SettingsPage = 'integrations' | 'ai' | 'notifications' | 'ai-clients
 // summary describes the page in the phone list until its status is loaded.
 export const settingsPages: readonly { value: SettingsPage; label: string; path: string; summary: string }[] = [
   { value: 'integrations', label: '連携', path: 'integrations', summary: 'GitHub・Slack・Chatwork・メールからタスクを見つける' },
-  { value: 'ai', label: 'AI', path: 'ai', summary: 'タスクを判断する AI のキーとモデル' },
+  { value: 'ai', label: 'AI', path: 'ai', summary: 'タスクを判断する AI の提供元とモデル' },
   { value: 'notifications', label: '通知', path: 'notifications', summary: '受け取る端末と通知のタイミング' },
   { value: 'ai-clients', label: 'AI クライアント', path: 'ai-clients', summary: '接続のしかたと API トークン' },
 ];

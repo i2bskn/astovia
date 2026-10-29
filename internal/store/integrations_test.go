@@ -657,3 +657,78 @@ func TestChangeUserAISettings(t *testing.T) {
 		})
 	}
 }
+
+// UpdateAISecret replaces only the sealed secret of the OpenAI settings of
+// the generation and secret that were read.
+func TestUpdateAISecret(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := apiTokenFixture(t, driver)
+			a, err := s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: "openai", Model: "gpt-x", APIKeySealed: "sealed-1"}, 0, true, "alice-session", tokenTestNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := s.SetAIStatus(ctx, "alice-id", 1, store.AIActive, sql.NullString{String: "usage_limit", Valid: true}, tokenTestNow+5); err != nil || !ok {
+				t.Fatalf("status: %v %v", ok, err)
+			}
+			for _, c := range []struct {
+				name       string
+				generation int64
+				old        string
+			}{{"wrong generation", 2, "sealed-1"}, {"wrong secret", 1, "sealed-0"}} {
+				if ok, err := s.UpdateAISecret(ctx, "alice-id", c.generation, c.old, "sealed-x"); err != nil || ok {
+					t.Fatalf("%s: %v %v", c.name, ok, err)
+				}
+			}
+			if ok, err := s.UpdateAISecret(ctx, "alice-id", 1, "sealed-1", "sealed-2"); err != nil || !ok {
+				t.Fatalf("update: %v %v", ok, err)
+			}
+			got, err := s.AISettings(ctx, "alice-id")
+			want := a
+			want.APIKeySealed, want.LastError, want.UpdatedAt = "sealed-2", sql.NullString{String: "usage_limit", Valid: true}, tokenTestNow+5
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("after update: %+v %v", got, err)
+			}
+			// Anthropic settings are never rewritten.
+			if _, err = s.SaveAISettings(ctx, store.AISettings{UserID: "bob-id", Provider: "anthropic", Model: "claude-haiku-5-5", APIKeySealed: "sealed-b"}, 0, true, "bob-session", tokenTestNow); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := s.UpdateAISecret(ctx, "bob-id", 1, "sealed-b", "sealed-x"); err != nil || ok {
+				t.Fatalf("anthropic: %v %v", ok, err)
+			}
+			if ok, err := s.UpdateAISecret(ctx, "carol-id", 1, "sealed-1", "sealed-x"); err != nil || ok {
+				t.Fatalf("missing: %v %v", ok, err)
+			}
+		})
+	}
+}
+
+// DeleteAISettingsReturning returns the removed row and needs an active
+// session.
+func TestDeleteAISettingsReturning(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := apiTokenFixture(t, driver)
+			a, err := s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: "openai", Model: "gpt-x", APIKeySealed: "sealed-1"}, 0, true, "alice-session", tokenTestNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err = s.DeleteAISettingsReturning(ctx, "alice-id", "bob-session", tokenTestNow); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("another session: %v", err)
+			}
+			got, found, err := s.DeleteAISettingsReturning(ctx, "alice-id", "alice-session", tokenTestNow)
+			if err != nil || !found || !reflect.DeepEqual(got, a) {
+				t.Fatalf("delete: %+v %v %v", got, found, err)
+			}
+			if _, err = s.AISettings(ctx, "alice-id"); !errors.Is(err, store.ErrAISettingsNotFound) {
+				t.Fatalf("after delete: %v", err)
+			}
+			got, found, err = s.DeleteAISettingsReturning(ctx, "alice-id", "alice-session", tokenTestNow)
+			if err != nil || found || got != (store.AISettings{}) {
+				t.Fatalf("delete twice: %+v %v %v", got, found, err)
+			}
+		})
+	}
+}

@@ -361,6 +361,10 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 .settings-facts div { display: grid; grid-template-columns: 7em minmax(0, 1fr); gap: 4px 12px; }
 .settings-facts dt { color: var(--ink-2); }
 .settings-facts dd { margin: 0; overflow-wrap: anywhere; font-weight: 500; }
+.usage-action { display: block; margin-top: 8px; }
+.chatgpt-connect .steps { margin-bottom: 12px; }
+.chatgpt-connect > .form-actions { justify-content: flex-start; margin-bottom: 16px; }
+.callback-input { font-family: var(--mono); font-size: 14px; overflow-wrap: anywhere; word-break: break-all; }
 .toggle-field { display: flex; align-items: center; gap: 10px; margin: 16px 0; }
 .toggle-field input { width: 20px; height: 20px; min-height: 0; padding: 0; flex-shrink: 0; accent-color: var(--accent); }
 .settings-form { margin-top: 0; }

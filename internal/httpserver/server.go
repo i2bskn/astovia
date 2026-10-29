@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/i2bskn/astovia/internal/ai"
+	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/chatwork"
 	"github.com/i2bskn/astovia/internal/config"
@@ -13,6 +14,7 @@ import (
 	"github.com/i2bskn/astovia/internal/google"
 	"github.com/i2bskn/astovia/internal/notify"
 	"github.com/i2bskn/astovia/internal/oauth"
+	"github.com/i2bskn/astovia/internal/openai"
 	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/slack"
 	"github.com/i2bskn/astovia/internal/store"
@@ -59,6 +61,10 @@ type Server struct {
 	// pair; both are the ones the background loops use as well.
 	box   *secretbox.Box
 	vapid *notify.VAPID
+	// tokens manages the access tokens of the ChatGPT plan and holds the
+	// OpenAI client (with the host ID) for its authorizations; it is the
+	// one the synchronizations use, so that refreshes are serialized.
+	tokens *aicred.Tokens
 	// pushTestLimiter limits test notifications per user.
 	pushTestLimiter *loginLimiter
 }
@@ -102,14 +108,16 @@ func (s *Server) toUserResponse(ctx context.Context, u store.User) userResponse 
 	return out
 }
 
-// New returns the application handler.
-func New(c config.Config, a *auth.Service, assets fs.FS) http.Handler {
-	return newServer(c, a, assets).handler()
+// New returns the application handler. tokens is shared with the
+// synchronizations; nil makes one for the server alone.
+func New(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.Tokens) http.Handler {
+	return newServer(c, a, assets, tokens).handler()
 }
 
 // newServer builds a Server without wrapping it, so tests in this package can
-// adjust the limiters and the CIMD fetcher before calling handler.
-func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
+// adjust the limiters and the CIMD fetcher before calling handler. A nil
+// tokens is made from the server's store, box and clock.
+func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.Tokens) *Server {
 	cimd := oauth.NewCIMDClient()
 	// The clock is read through a so that tests can replace a.Now later.
 	now := time.Now
@@ -119,11 +127,14 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS) *Server {
 		st = a.Store
 	}
 	box := secretbox.New(c.Secret)
+	if tokens == nil {
+		tokens = &aicred.Tokens{Store: st, Box: box, OpenAI: openai.New(openai.HostID(c.Secret)), Now: now}
+	}
 	return &Server{cfg: c, auth: a, assets: assets, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
-		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, pushTestLimiter: newKeyLimiter(3, time.Minute)}
+		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute)}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -206,6 +217,9 @@ func (s *Server) handler() http.Handler {
 		http.MethodPut:    s.requireUser(requireJSON(http.HandlerFunc(s.handlePutAI))),
 		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteAI)),
 	}))
+	mux.Handle("/api/v1/ai/openai/authorize", allow(http.MethodPost, s.requireUser(requireJSON(http.HandlerFunc(s.handleAuthorizeOpenAI)))))
+	mux.Handle("/api/v1/ai/openai/complete", allow(http.MethodPost, s.requireUser(requireJSON(http.HandlerFunc(s.handleCompleteOpenAI)))))
+	mux.Handle("/api/v1/ai/openai/models", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleOpenAIModels))))
 	mux.Handle("/api/v1/push/public-key", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handlePushPublicKey))))
 	mux.Handle("/api/v1/push/subscriptions", allowMethods(map[string]http.Handler{
 		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleListPushSubscriptions)),

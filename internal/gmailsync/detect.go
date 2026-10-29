@@ -434,7 +434,7 @@ func (r *run) judge(u *unit) (bool, error) {
 	case r.aiStale || r.detectCalls >= aiCallsPerRun || r.deadlineNear():
 		return r.postpone(u)
 	}
-	cur, apiKey, gate, err := r.reloadAI()
+	cur, cred, gate, err := r.reloadAI()
 	switch {
 	case err != nil:
 		return false, err
@@ -451,7 +451,7 @@ func (r *run) judge(u *unit) (bool, error) {
 		return false, err
 	}
 	r.detectCalls++
-	res, err := r.s.AI.JudgeMail(r.ctx, apiKey, cur.Model, in)
+	res, err := r.s.AI.JudgeMail(r.ctx, cred, cur.Model, in)
 	class, err := r.classifyAI(cur, err)
 	if err != nil {
 		return false, err
@@ -467,6 +467,8 @@ func (r *run) judge(u *unit) (bool, error) {
 		return r.create(u, outcomeNoAction, res)
 	case aiFailed, aiUnusable:
 		return r.create(u, outcomeFallback, ai.MentionResult{})
+	case aiStaled:
+		return r.postpone(u)
 	}
 	// A temporary failure: an old message becomes a confirmation task, a
 	// recent one waits for the next synchronization.

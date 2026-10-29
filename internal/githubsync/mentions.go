@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/i2bskn/astovia/internal/ai"
+	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/github"
 	"github.com/i2bskn/astovia/internal/store"
@@ -66,6 +67,9 @@ const (
 	AIErrorBilling          = "billing"
 	AIErrorModelUnavailable = "model_unavailable"
 	AIErrorRequestRejected  = "request_rejected"
+	// AIErrorUsageLimit is the usage limit of the ChatGPT plan; the status
+	// stays active.
+	AIErrorUsageLimit = aicred.UsageLimit
 )
 
 // mentionThread is a notification thread with reason "mention", collected
@@ -315,7 +319,8 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 	}
 
 	// The settings are read again right before the call, so that nothing
-	// is sent after they were deleted or replaced.
+	// is sent after they were deleted or replaced. While the usage limit of
+	// the ChatGPT plan is cooling down they are handled as replaced.
 	cur, err := r.s.Store.AISettings(r.parent, r.conn.UserID)
 	switch {
 	case errors.Is(err, store.ErrAISettingsNotFound):
@@ -329,9 +334,12 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 	case cur.Status != store.AIActive:
 		r.aiFallbackOnly = true
 		return create(mentionFallback, ai.MentionResult{})
+	case aicred.CoolingDown(cur, r.s.Now()):
+		r.aiStale = true
+		return r.postpone(create)
 	}
 	r.ai = &cur
-	apiKey, err := r.s.Box.Open(ai.KeyPurpose(r.conn.UserID), cur.APIKeySealed)
+	cred, err := aicred.Open(r.s.Box, r.s.Tokens, cur)
 	if err != nil {
 		log.Printf("github sync: user=%s: mention ai %s", r.conn.UserID, AIErrorKeyUndecryptable)
 		r.setAIStatus(store.AIError, AIErrorKeyUndecryptable)
@@ -368,9 +376,15 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: id, Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
 	}
 	r.aiCalls++
-	res, err := r.s.AI.JudgeMention(r.ctx, apiKey, cur.Model, in)
+	res, err := r.s.AI.JudgeMention(r.ctx, cred, cur.Model, in)
 	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		return false, err
+	}
+	// Settings replaced or removed while the token was obtained are
+	// handled like settings replaced before the call.
+	if errors.Is(err, aicred.ErrStale) {
+		r.aiStale = true
+		return r.postpone(create)
 	}
 	if err != nil {
 		log.Printf("github sync: user=%s: mention %v", r.conn.UserID, err)
@@ -396,6 +410,10 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 	case errors.Is(err, ai.ErrUnusable):
 		r.setAIStatus(store.AIActive, AIErrorRequestRejected)
 		return create(mentionFallback, ai.MentionResult{})
+	case errors.Is(err, ai.ErrUsageLimit):
+		// Recorded so that the next calls wait (aicred.CoolingDown); this
+		// one is handled like a temporary failure.
+		r.setAIStatus(store.AIActive, AIErrorUsageLimit)
 	}
 	// A temporary failure: an old mention becomes a confirmation task,
 	// a recent one waits for the next synchronization.

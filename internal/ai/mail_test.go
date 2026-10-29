@@ -37,7 +37,7 @@ func TestJudgeMail(t *testing.T) {
 	in := slackInput()
 	tokyo := time.FixedZone("JST", 9*3600)
 	in.ConversationType, in.ChannelName, in.Workspace, in.Me, in.Location = MailThread, "見積もりの件", "alice@example.com", SlackPerson{ID: "alice@example.com", Name: "Alice"}, tokyo
-	res, err := c.JudgeMail(context.Background(), testKey, "claude-haiku-5-5", in)
+	res, err := c.JudgeMail(context.Background(), testCred, "claude-haiku-5-5", in)
 	// parseResult: an unknown same_as is dropped and the event start is
 	// read in the user's time zone.
 	if err != nil || res.Decision != DecisionTask || res.Task != "見積もりに返事する" || res.SameAs != "" || res.Event == nil || !res.Event.Start.Equal(time.Date(2026, 10, 29, 12, 30, 0, 0, tokyo)) {
@@ -65,13 +65,13 @@ func TestJudgeMail(t *testing.T) {
 	}
 	// An unusable answer is ErrUnusable from parseResult.
 	_, c = newFake(t, message("end_turn", `{"decision":"maybe","task":"","summary":"","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`))
-	if _, err = c.JudgeMail(context.Background(), testKey, "claude-haiku-5-5", in); !errors.Is(err, ErrUnusable) {
+	if _, err = c.JudgeMail(context.Background(), testCred, "claude-haiku-5-5", in); !errors.Is(err, ErrUnusable) {
 		t.Fatalf("invalid decision: %v", err)
 	}
 	for i := range in.Posts {
 		in.Posts[i].Target = false
 	}
-	if _, err = c.JudgeMail(context.Background(), testKey, "claude-haiku-5-5", in); err == nil {
+	if _, err = c.JudgeMail(context.Background(), testCred, "claude-haiku-5-5", in); err == nil {
 		t.Fatal("no target accepted")
 	}
 }
@@ -79,7 +79,7 @@ func TestJudgeMail(t *testing.T) {
 func TestJudgeMailReply(t *testing.T) {
 	f, c := newFake(t, message("end_turn", `{"resolved":true,"reason":"回答した"}`))
 	in := ReplyInput{Me: SlackPerson{ID: "alice@example.com", Name: "Alice"}, Task: "見積もりに返事する", Posts: slackInput().Posts}
-	res, err := c.JudgeMailReply(context.Background(), testKey, "claude-haiku-5-5", in)
+	res, err := c.JudgeMailReply(context.Background(), testCred, "claude-haiku-5-5", in)
 	if err != nil || !res.Resolved {
 		t.Fatalf("result: %+v %v", res, err)
 	}
@@ -87,7 +87,7 @@ func TestJudgeMailReply(t *testing.T) {
 	if system != MailReplySystemPrompt || !strings.HasPrefix(text, "次の JSON はメールのタスクと、その後のスレッドです。あなたは JSON の me の代わりに判断します。\n") || !strings.Contains(text, `"task":"見積もりに返事する"`) {
 		t.Fatalf("request: %s %s", system, text)
 	}
-	if _, err = c.JudgeMailReply(context.Background(), testKey, "claude-haiku-5-5", ReplyInput{Task: "x"}); err == nil {
+	if _, err = c.JudgeMailReply(context.Background(), testCred, "claude-haiku-5-5", ReplyInput{Task: "x"}); err == nil {
 		t.Fatal("no posts accepted")
 	}
 }

@@ -251,18 +251,18 @@ func replyUserMessage(in ReplyInput, head string) (string, error) {
 
 // JudgeSlack asks the AI whether the user has something to do about the
 // target posts of a Slack conversation.
-func (c *Client) JudgeSlack(ctx context.Context, key, model string, in SlackInput) (MentionResult, error) {
+func (c *Client) JudgeSlack(ctx context.Context, cred Credential, model string, in SlackInput) (MentionResult, error) {
 	user, err := SlackUserMessage(in)
 	if err != nil {
 		return MentionResult{}, err
 	}
-	return c.judgeConversation(ctx, key, model, SlackSystemPrompt, user, in)
+	return c.judgeConversation(ctx, cred, model, SlackSystemPrompt, user, in)
 }
 
 // judgeConversation sends a judgment with the system prompt and the user
 // message built from in, and parses the result.
-func (c *Client) judgeConversation(ctx context.Context, key, model, system, user string, in SlackInput) (MentionResult, error) {
-	text, err := c.structured(ctx, key, model, system, user, outputSchema)
+func (c *Client) judgeConversation(ctx context.Context, cred Credential, model, system, user string, in SlackInput) (MentionResult, error) {
+	text, err := c.structured(ctx, cred, model, system, user, judgmentSchemaName, outputSchema)
 	if err != nil {
 		return MentionResult{}, err
 	}
@@ -270,18 +270,18 @@ func (c *Client) judgeConversation(ctx context.Context, key, model, system, user
 }
 
 // JudgeReply asks the AI whether the user's replies completed the task.
-func (c *Client) JudgeReply(ctx context.Context, key, model string, in ReplyInput) (ReplyResult, error) {
+func (c *Client) JudgeReply(ctx context.Context, cred Credential, model string, in ReplyInput) (ReplyResult, error) {
 	user, err := ReplyUserMessage(in)
 	if err != nil {
 		return ReplyResult{}, err
 	}
-	return c.judgeReply(ctx, key, model, ReplySystemPrompt, user)
+	return c.judgeReply(ctx, cred, model, ReplySystemPrompt, user)
 }
 
 // judgeReply sends a reply judgment with the system prompt and the user
 // message, and parses the result.
-func (c *Client) judgeReply(ctx context.Context, key, model, system, user string) (ReplyResult, error) {
-	text, err := c.structured(ctx, key, model, system, user, replySchema)
+func (c *Client) judgeReply(ctx context.Context, cred Credential, model, system, user string) (ReplyResult, error) {
+	text, err := c.structured(ctx, cred, model, system, user, replySchemaName, replySchema)
 	if err != nil {
 		return ReplyResult{}, err
 	}

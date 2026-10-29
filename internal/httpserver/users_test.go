@@ -52,7 +52,7 @@ func newUsersAPI(t *testing.T, driver string) *usersAPI {
 	}
 	now := time.Date(2026, 10, 23, 1, 2, 3, 0, time.UTC)
 	a.Now = func() time.Time { return now }
-	srv := newServer(config.Config{PublicURL: usersOrigin, Secure: true}, a, fstest.MapFS{})
+	srv := newServer(config.Config{PublicURL: usersOrigin, Secure: true}, a, fstest.MapFS{}, nil)
 	// The rate limit has its own test.
 	srv.accountLimiter = newKeyLimiter(10000, time.Minute)
 	return &usersAPI{t: t, store: s, dsn: dsn, srv: srv, handler: srv.handler(), now: &now}

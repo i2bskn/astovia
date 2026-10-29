@@ -101,7 +101,7 @@ func newIntegrationAPI(t *testing.T, driver string) *integrationAPI {
 	gh := &fakeUser{login: "octocat", scopes: scopes("notifications, repo")}
 	srv := httptest.NewServer(gh)
 	t.Cleanup(srv.Close)
-	server := newServer(config.Config{PublicURL: "https://astovia.test", Secure: true, Secret: make([]byte, 32)}, a, fstest.MapFS{"sw.js": {Data: []byte("self")}, "manifest.webmanifest": {Data: []byte("{}")}, "icon-192.png": {Data: []byte("png")}, "index.html": {Data: []byte("<html>")}})
+	server := newServer(config.Config{PublicURL: "https://astovia.test", Secure: true, Secret: make([]byte, 32)}, a, fstest.MapFS{"sw.js": {Data: []byte("self")}, "manifest.webmanifest": {Data: []byte("{}")}, "icon-192.png": {Data: []byte("png")}, "index.html": {Data: []byte("<html>")}}, nil)
 	server.github.BaseURL = srv.URL
 	sl := &fakeSlackAuth{team: "T1", user: "U1", scopes: strings.Join(slacksync.RequiredScopes, ",")}
 	slackSrv := httptest.NewServer(sl)

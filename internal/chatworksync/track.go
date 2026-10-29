@@ -120,7 +120,7 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, c *roomCache, ori
 	case r.trackCalls >= trackAICalls || r.deadlineNear():
 		return passEnd, nil
 	}
-	cur, apiKey, gate, err := r.reloadAI()
+	cur, cred, gate, err := r.reloadAI()
 	switch {
 	case err != nil:
 		return passAbort, err
@@ -153,7 +153,7 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, c *roomCache, ori
 		in.Posts = append(in.Posts, r.post(m, false, names))
 	}
 	r.trackCalls++
-	res, err := r.s.AI.JudgeChatworkReply(r.ctx, apiKey, cur.Model, in)
+	res, err := r.s.AI.JudgeChatworkReply(r.ctx, cred, cur.Model, in)
 	class, err := r.classifyAI(cur, err)
 	if err != nil {
 		return passAbort, err
@@ -168,6 +168,8 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, c *roomCache, ori
 		return passNext, r.touch(item, passStart)
 	case aiFailed:
 		return passAbort, nil
+	case aiStaled:
+		return passNext, nil
 	}
 	// A temporary failure: the item is checked again by the next pass.
 	return passNext, nil

@@ -44,7 +44,7 @@ func newActionItemAPI(t *testing.T, driver string, now *time.Time) *actionItemAP
 		t.Fatal(err)
 	}
 	a.Now = func() time.Time { return *now }
-	api := &actionItemAPI{t: t, handler: New(config.Config{PublicURL: "https://astovia.test", Secure: true}, a, fstest.MapFS{})}
+	api := &actionItemAPI{t: t, handler: New(config.Config{PublicURL: "https://astovia.test", Secure: true}, a, fstest.MapFS{}, nil)}
 	for _, u := range []struct {
 		name  string
 		token *string

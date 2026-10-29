@@ -92,7 +92,7 @@ func TestJudgeChatwork(t *testing.T) {
 	f, c := newFake(t, message("end_turn", `{"decision":"candidate","task":"返事する","summary":"bob さんが依頼","event_title":"","event_start":"","event_end":"","topic":"資料の件","same_as":"t1"}`))
 	in := slackInput()
 	in.ConversationType, in.ChannelName = SlackChannel, "開発チーム"
-	res, err := c.JudgeChatwork(context.Background(), testKey, "claude-haiku-5-5", in)
+	res, err := c.JudgeChatwork(context.Background(), testCred, "claude-haiku-5-5", in)
 	if err != nil || res.Decision != DecisionCandidate || res.Task != "返事する" || res.SameAs != "t1" {
 		t.Fatalf("result: %+v %v", res, err)
 	}
@@ -118,7 +118,7 @@ func TestJudgeChatwork(t *testing.T) {
 	for i := range in.Posts {
 		in.Posts[i].Target = false
 	}
-	if _, err = c.JudgeChatwork(context.Background(), testKey, "claude-haiku-5-5", in); err == nil {
+	if _, err = c.JudgeChatwork(context.Background(), testCred, "claude-haiku-5-5", in); err == nil {
 		t.Fatal("no target accepted")
 	}
 }
@@ -126,7 +126,7 @@ func TestJudgeChatwork(t *testing.T) {
 func TestJudgeChatworkReply(t *testing.T) {
 	f, c := newFake(t, message("end_turn", `{"resolved":true,"reason":"回答した"}`))
 	in := ReplyInput{Me: SlackPerson{ID: "1", Name: "alice"}, Task: "資料を送る", Posts: slackInput().Posts}
-	res, err := c.JudgeChatworkReply(context.Background(), testKey, "claude-haiku-5-5", in)
+	res, err := c.JudgeChatworkReply(context.Background(), testCred, "claude-haiku-5-5", in)
 	if err != nil || !res.Resolved {
 		t.Fatalf("result: %+v %v", res, err)
 	}
@@ -134,7 +134,7 @@ func TestJudgeChatworkReply(t *testing.T) {
 	if system != ChatworkReplySystemPrompt || !strings.HasPrefix(text, "次の JSON は Chatwork のタスクと、その後の会話です。あなたは JSON の me の代わりに判断します。\n") || !strings.Contains(text, `"task":"資料を送る"`) {
 		t.Fatalf("request: %s %s", system, text)
 	}
-	if _, err = c.JudgeChatworkReply(context.Background(), testKey, "claude-haiku-5-5", ReplyInput{Task: "x"}); err == nil {
+	if _, err = c.JudgeChatworkReply(context.Background(), testCred, "claude-haiku-5-5", ReplyInput{Task: "x"}); err == nil {
 		t.Fatal("no posts accepted")
 	}
 }
