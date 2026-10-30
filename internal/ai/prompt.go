@@ -92,6 +92,9 @@ type MentionInput struct {
 	// RelatedTasks are the user's tasks from the same issue or pull
 	// request; see RelatedTask.
 	RelatedTasks []RelatedTask
+	// Instructions are appended to the system prompt; they are not part
+	// of the input JSON.
+	Instructions Instructions `json:"-"`
 }
 
 type postJSON struct {

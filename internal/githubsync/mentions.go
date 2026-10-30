@@ -139,7 +139,12 @@ func (r *run) collectMention(t github.Thread, ref github.Ref) error {
 		case err != nil:
 			return err
 		case a.Status == store.AIActive:
+			m, err := r.s.Store.AIInstructions(r.parent, r.conn.UserID)
+			if err != nil {
+				return err
+			}
 			r.ai = &a
+			r.instructions = ai.Instructions{Common: m[store.InstructionCommon], Process: m[store.InstructionGitHubDetect]}
 		}
 		r.aiChecked = true
 	}
@@ -284,6 +289,56 @@ func mentionPosts(issue github.Issue, comments []github.Comment, reviews []githu
 	return out
 }
 
+// aiPosts returns the posts as sent to the AI.
+func aiPosts(posts []mentionPost) []ai.Post {
+	out := make([]ai.Post, 0, len(posts))
+	for _, p := range posts {
+		out = append(out, p.Post)
+	}
+	return out
+}
+
+// mentionInput builds the AI input of a judgment of the mention in
+// posts[target] of the issue or pull request. The related tasks are given to
+// the AI as t1, t2, ... (see relatedSymbols).
+func mentionInput(login string, loc *time.Location, gref github.Ref, issue github.Issue, posts []ai.Post, target int, related []store.RelatedTask, instructions ai.Instructions) ai.MentionInput {
+	in := ai.MentionInput{Me: login, Location: loc, Repository: gref.Owner + "/" + gref.Repo, Number: gref.Number, Kind: "issue", State: issue.State, Title: issue.Title, Target: target, Instructions: instructions}
+	if issue.IsPull {
+		in.Kind = "pull_request"
+	}
+	if issue.Merged {
+		in.State = "merged"
+	}
+	in.Posts = append(in.Posts, posts...)
+	in.RelatedTasks = []ai.RelatedTask{}
+	for n, t := range related {
+		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: relatedSymbol(n), Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
+	}
+	return in
+}
+
+// relatedSymbol is the symbol given to the AI for the n-th related task.
+func relatedSymbol(n int) string { return "t" + strconv.Itoa(n+1) }
+
+// relatedSymbols maps the symbols given to the AI to the related tasks.
+func relatedSymbols(tasks []store.RelatedTask) map[string]store.RelatedTask {
+	out := map[string]store.RelatedTask{}
+	for n, t := range tasks {
+		out[relatedSymbol(n)] = t
+	}
+	return out
+}
+
+// relatedScope selects the related tasks of an issue or pull request: its
+// mentions and the groups made for it.
+func relatedScope(gref github.Ref, now time.Time) store.RelatedScope {
+	group := SourceKey(kindGroup, gref) + ":"
+	return store.RelatedScope{
+		Source: store.SourceGitHub, Prefixes: []string{SourceKey(kindMention, gref) + ":", group}, GroupPrefixes: []string{group},
+		ClosedSince: now.Add(-groupWindow).Unix(), FetchLimit: relatedFetch, Limit: relatedLimit, SubtaskLimit: subtaskLimit,
+	}
+}
+
 // mentionOutcome is the item to create for a mention.
 type mentionOutcome int
 
@@ -353,31 +408,12 @@ func (r *run) mention(gref github.Ref, issue github.Issue, posts []mentionPost, 
 	if err != nil {
 		return false, err
 	}
-	in := ai.MentionInput{Me: r.conn.Login, Location: loc, Repository: gref.Owner + "/" + gref.Repo, Number: gref.Number, Kind: "issue", State: issue.State, Title: issue.Title, Target: i}
-	if issue.IsPull {
-		in.Kind = "pull_request"
-	}
-	if issue.Merged {
-		in.State = "merged"
-	}
-	for _, p := range posts {
-		in.Posts = append(in.Posts, p.Post)
-	}
-	group := SourceKey(kindGroup, gref) + ":"
-	tasks, err := r.s.Store.RelatedTasks(r.parent, r.conn.UserID, store.RelatedScope{
-		Source: store.SourceGitHub, Prefixes: []string{SourceKey(kindMention, gref) + ":", group}, GroupPrefixes: []string{group},
-		ClosedSince: r.s.Now().Add(-groupWindow).Unix(), FetchLimit: relatedFetch, Limit: relatedLimit, SubtaskLimit: subtaskLimit,
-	})
+	tasks, err := r.s.Store.RelatedTasks(r.parent, r.conn.UserID, relatedScope(gref, r.s.Now()))
 	if err != nil {
 		return false, err
 	}
-	related = map[string]store.RelatedTask{}
-	in.RelatedTasks = []ai.RelatedTask{}
-	for n, t := range tasks {
-		id := "t" + strconv.Itoa(n+1)
-		related[id] = t
-		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: id, Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
-	}
+	in := mentionInput(r.conn.Login, loc, gref, issue, aiPosts(posts), i, tasks, r.instructions)
+	related = relatedSymbols(tasks)
 	r.aiCalls++
 	res, err := r.s.AI.JudgeMention(r.ctx, cred, cur.Model, in)
 	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {

@@ -290,8 +290,10 @@ type run struct {
 	// count the AI calls. aiFallbackOnly is set after the AI failed in a way
 	// that stops it for the user; aiStale when the settings were replaced
 	// during the synchronization; aiStopped when they were deleted or the
-	// key cannot be opened.
+	// key cannot be opened. instructions are the user's AI instructions,
+	// read with the settings at the start of the steps.
 	ai             *store.AISettings
+	instructions   map[string]string
 	detectCalls    int
 	trackCalls     int
 	aiFallbackOnly bool
@@ -422,6 +424,9 @@ func (r *run) steps() error {
 		return err
 	case a.Status != store.AIActive:
 		return nil
+	}
+	if r.instructions, err = r.s.Store.AIInstructions(r.parent, r.acct.UserID); err != nil {
+		return err
 	}
 	r.ai = &a
 	if due(r.state.LastTrackedAt, r.start.Unix(), trackInterval) {

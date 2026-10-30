@@ -270,6 +270,9 @@ type queries interface {
 	deleteUserGoogleAuthStates(ctx context.Context, userID string) error
 	stopTrackingSourcePrefixItems(ctx context.Context, userID, source, prefix string, now int64) error
 	listTrackedSourcePrefixItems(ctx context.Context, userID, source, prefix string, limit int) ([]ActionItem, error)
+	listAIDetectSamples(ctx context.Context, userID, source, prefix, fallback string, limit int) ([]ActionItem, error)
+	listAIResolvedSamples(ctx context.Context, userID, source, prefix, reason string, limit int) ([]ActionItem, error)
+	listAITrackedSamples(ctx context.Context, userID, source, prefix string, limit int) ([]ActionItem, error)
 	deleteUserPendingNotificationsBySourcePrefix(ctx context.Context, userID, kind, source, prefix string) error
 	aiSettings(ctx context.Context, userID string) (AISettings, error)
 	lockAISettings(ctx context.Context, userID string) (AISettings, error)
@@ -278,6 +281,10 @@ type queries interface {
 	updateAISettingsStatus(ctx context.Context, userID string, generation int64, status string, lastError sql.NullString, now int64) (int64, error)
 	updateAISecret(ctx context.Context, userID string, generation int64, oldSealed, newSealed string) (int64, error)
 	deleteAISettings(ctx context.Context, userID string) error
+	listAIInstructions(ctx context.Context, userID string) ([]AIInstruction, error)
+	upsertAIInstruction(ctx context.Context, in AIInstruction) error
+	deleteAIInstruction(ctx context.Context, userID, scope string) error
+	deleteUserAIInstructions(ctx context.Context, userID string) error
 	createPushSubscription(ctx context.Context, p PushSubscription) error
 	lockPushSubscriptionByEndpoint(ctx context.Context, endpoint string) (PushSubscription, error)
 	updatePushSubscriptionKeys(ctx context.Context, p PushSubscription) error
@@ -362,7 +369,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM gmail_accounts LIMIT 0", "SELECT state_hash,user_id,verifier_sealed,expires_at,created_at FROM google_auth_states LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM gmail_accounts LIMIT 0", "SELECT state_hash,user_id,verifier_sealed,expires_at,created_at FROM google_auth_states LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT user_id,scope,body,updated_at FROM ai_instructions LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -457,7 +464,7 @@ func revokeAccount(ctx context.Context, q queries, userID, passwordHash string, 
 	}
 	// Integrations and notifications follow, in the lock order of their
 	// tables (github_connections, slack_connections, chatwork_connections,
-	// gmail_accounts, google_auth_states, ai_settings,
+	// gmail_accounts, google_auth_states, ai_settings, ai_instructions,
 	// web_push_subscriptions, notifications). A push subscription
 	// registered during a takeover would keep receiving item titles, so it
 	// goes with a password reset as well. The GitHub, Slack and Chatwork
@@ -467,7 +474,9 @@ func revokeAccount(ctx context.Context, q queries, userID, passwordHash string, 
 	// authorizations in progress go with a password reset too: one started
 	// during a takeover must not be completed afterwards. The AI settings go
 	// with a password reset too: a key registered during a takeover would
-	// keep sending conversation text to the attacker's organization.
+	// keep sending conversation text to the attacker's organization. The AI
+	// instructions go with them: instructions written during a takeover
+	// could keep the detection quietly turned off.
 	if disable {
 		if e = q.deleteGitHubConnection(ctx, userID); e != nil {
 			return e
@@ -486,6 +495,9 @@ func revokeAccount(ctx context.Context, q queries, userID, passwordHash string, 
 		return e
 	}
 	if e = q.deleteAISettings(ctx, userID); e != nil {
+		return e
+	}
+	if e = q.deleteUserAIInstructions(ctx, userID); e != nil {
 		return e
 	}
 	if e = q.deleteUserPushSubscriptions(ctx, userID); e != nil {

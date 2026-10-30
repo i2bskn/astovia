@@ -375,7 +375,7 @@ func (r *run) detectThread(thread string, msgs []google.Message) error {
 			continue
 		}
 		i, j := indexID(msgs, run[0].ID), indexID(msgs, last.ID)
-		u := &unit{key: key, subject: subjectOf(last, msgs), me: myName(msgs, email), posts: msgs[max(0, i-ai.PostsBefore):min(len(msgs), j+1+ai.PostsAfter)],
+		u := &unit{key: key, subject: subjectOf(last, msgs), me: myName(msgs, email), posts: contextPosts(msgs, i, j),
 			targets: map[string]bool{}, last: last}
 		u.title = "メール"
 		if s := truncate(u.subject, titleSubject); s != "" {
@@ -610,6 +610,11 @@ func postBody(m google.Message, email string, target bool) string {
 
 // post converts a message for the AI.
 func (r *run) post(m google.Message, target bool) ai.SlackPost {
+	return toPost(m, target, r.acct.Email)
+}
+
+// toPost converts a message of the account's mailbox for the AI.
+func toPost(m google.Message, target bool, email string) ai.SlackPost {
 	author := cleanText(oneLine(m.FromName))
 	if author == "" {
 		author = m.FromEmail
@@ -617,7 +622,14 @@ func (r *run) post(m google.Message, target bool) ai.SlackPost {
 	if author == "" {
 		author = "unknown"
 	}
-	return ai.SlackPost{ID: m.ID, Author: author, AuthorID: strings.ToLower(m.FromEmail), IsMe: m.HasLabel(labelSent), At: m.Internal, Target: target, Body: postBody(m, r.acct.Email, target)}
+	return ai.SlackPost{ID: m.ID, Author: author, AuthorID: strings.ToLower(m.FromEmail), IsMe: m.HasLabel(labelSent), At: m.Internal, Target: target, Body: postBody(m, email, target)}
+}
+
+// contextPosts returns the posts sent with a judgment of the messages
+// list[i] to list[j]: them and up to ai.PostsBefore messages before and
+// ai.PostsAfter after.
+func contextPosts(list []google.Message, i, j int) []google.Message {
+	return list[max(0, i-ai.PostsBefore):min(len(list), j+1+ai.PostsAfter)]
 }
 
 // input builds the AI input of a unit.
@@ -626,33 +638,52 @@ func (r *run) input(u *unit) (ai.SlackInput, error) {
 	if err != nil {
 		return ai.SlackInput{}, err
 	}
-	in := ai.SlackInput{Me: ai.SlackPerson{ID: r.acct.Email, Name: u.me}, Location: loc, Workspace: r.acct.Email, ConversationType: ai.MailThread,
-		ChannelName: truncate(u.subject, subjectLimit), RelatedTasks: []ai.RelatedTask{}}
-	for _, m := range u.posts {
-		in.Posts = append(in.Posts, r.post(m, u.targets[m.ID]))
-	}
-	tasks, err := r.s.Store.RelatedTasks(r.parent, r.acct.UserID, r.relatedScope(u))
+	tasks, err := r.s.Store.RelatedTasks(r.parent, r.acct.UserID, relatedScope(r.acct.Email, u.key.Thread, r.s.Now()))
 	if err != nil {
 		return ai.SlackInput{}, err
 	}
-	u.related = map[string]store.RelatedTask{}
-	for i, t := range tasks {
-		id := "t" + strconv.Itoa(i+1)
-		u.related[id] = t
-		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: id, Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
-	}
+	instructions := ai.Instructions{Common: r.instructions[store.InstructionCommon], Process: r.instructions[store.InstructionGmailDetect]}
+	in := detectInput(r.acct.Email, loc, u.me, u.subject, u.posts, u.targets, tasks, instructions)
+	u.related = relatedSymbols(tasks)
 	return in, nil
 }
 
-// relatedScope selects the related tasks of a unit's thread: its runs and
-// the groups made for it. The thread narrows them enough, so they are not
-// limited by age.
-func (r *run) relatedScope(u *unit) store.RelatedScope {
-	now := r.s.Now()
-	group := threadPrefix(r.acct.Email, kindGroup, u.key.Thread)
+// detectInput builds the AI input of a judgment of the target messages (by
+// ID) of posts, the context in thread order, in a thread of the account.
+// me is the user's name and subject the thread's subject. The related tasks
+// are given to the AI as t1, t2, ... (see relatedSymbols).
+func detectInput(email string, loc *time.Location, me, subject string, posts []google.Message, targets map[string]bool, related []store.RelatedTask, instructions ai.Instructions) ai.SlackInput {
+	in := ai.SlackInput{Me: ai.SlackPerson{ID: email, Name: me}, Location: loc, Workspace: email, ConversationType: ai.MailThread,
+		ChannelName: truncate(subject, subjectLimit), RelatedTasks: []ai.RelatedTask{}, Instructions: instructions}
+	for _, m := range posts {
+		in.Posts = append(in.Posts, toPost(m, targets[m.ID], email))
+	}
+	for i, t := range related {
+		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: relatedSymbol(i), Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
+	}
+	return in
+}
+
+// relatedSymbol is the symbol given to the AI for the i-th related task.
+func relatedSymbol(i int) string { return "t" + strconv.Itoa(i+1) }
+
+// relatedSymbols maps the symbols given to the AI to the related tasks.
+func relatedSymbols(tasks []store.RelatedTask) map[string]store.RelatedTask {
+	out := map[string]store.RelatedTask{}
+	for i, t := range tasks {
+		out[relatedSymbol(i)] = t
+	}
+	return out
+}
+
+// relatedScope selects the related tasks of a thread of the account: its
+// runs and the groups made for it. The thread narrows them enough, so they
+// are not limited by age.
+func relatedScope(email, thread string, now time.Time) store.RelatedScope {
+	group := threadPrefix(email, kindGroup, thread)
 	return store.RelatedScope{
 		Source:        store.SourceGmail,
-		Prefixes:      []string{threadPrefix(r.acct.Email, kindRun, u.key.Thread), group},
+		Prefixes:      []string{threadPrefix(email, kindRun, thread), group},
 		GroupPrefixes: []string{group},
 		ClosedSince:   now.Add(-groupWindow).Unix(),
 		FetchLimit:    relatedFetch,

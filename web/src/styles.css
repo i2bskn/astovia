@@ -353,6 +353,30 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 .intro { margin-top: 4px; margin-bottom: 20px; color: var(--ink-2); font-size: 14px; }
 .settings-subheading { margin: 28px 0 10px; padding-top: 20px; border-top: 1px solid var(--line); font-size: 15px; font-weight: 700; }
 .settings-subheading.first { margin-top: 4px; padding-top: 0; border-top: 0; }
+/* The length of an AI instruction under its field. */
+.instruction-count { justify-self: end; color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.instruction-count.over { color: var(--danger); font-weight: 600; }
+/* Trying an AI instruction: the items to judge again and the two results
+   side by side, one above the other on phones. */
+.try-actions { display: flex; justify-content: flex-start; }
+.try-panel { min-width: 0; margin-top: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.try-panel .field-hint { margin: 0 0 10px; }
+.try-panel .notice:last-child { margin-bottom: 0; }
+.try-samples { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; }
+.try-sample { display: grid; gap: 2px; width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); text-align: left; font: inherit; cursor: pointer; }
+.try-sample:hover:not(:disabled) { border-color: var(--line-strong); }
+.try-sample[aria-pressed="true"] { border-color: var(--accent-fill); }
+.try-sample:disabled { cursor: default; opacity: .7; }
+.try-sample-content { font-size: 14px; overflow-wrap: anywhere; }
+.try-sample-meta { color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
+.try-result { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.try-column { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.try-column h4 { margin: 0 0 6px; font-size: 13px; color: var(--ink-2); }
+.try-column dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; font-size: 14px; }
+.try-column dt { color: var(--ink-2); }
+.try-column dd { margin: 0; overflow-wrap: anywhere; }
+.try-value.changed { font-weight: 700; background: var(--warn-soft); border-radius: 4px; padding: 0 4px; }
+@media (max-width: 767px) { .try-result { grid-template-columns: minmax(0, 1fr); } }
 .copy-stack + .settings-subheading { margin-top: 28px; }
 .action-form { margin-top: 4px; display: grid; }
 .action-form .field { margin-bottom: 16px; }

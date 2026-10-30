@@ -218,8 +218,10 @@ type run struct {
 	// count the AI calls. aiFallbackOnly is set after the AI failed in a way
 	// that stops it for the user; aiStale when the settings were replaced
 	// during the synchronization; aiStopped when they were deleted or the
-	// key cannot be opened.
+	// key cannot be opened. instructions are the user's AI instructions,
+	// read with the settings at the start of the steps.
 	ai             *store.AISettings
+	instructions   map[string]string
 	detectCalls    int
 	trackCalls     int
 	aiFallbackOnly bool
@@ -336,6 +338,9 @@ func (r *run) steps() error {
 	case a.Status != store.AIActive:
 		return nil
 	}
+	if r.instructions, err = r.s.Store.AIInstructions(r.parent, r.conn.UserID); err != nil {
+		return err
+	}
 	r.ai = &a
 	if due(r.state.LastTrackedAt, r.start.Unix(), trackInterval) {
 		if err = r.track(); err != nil {
@@ -411,12 +416,8 @@ func (r *run) roomMessages(room string) (*roomCache, error) {
 		}
 		return nil, err
 	}
-	c := &roomCache{messages: sortMessages(page.Messages), names: map[string]string{}, raw: page.Raw}
-	for _, m := range c.messages {
-		if name := cleanText(m.AccountName); m.AccountID != "" && name != "" {
-			c.names[m.AccountID] = name
-		}
-	}
+	c := &roomCache{messages: sortMessages(page.Messages), raw: page.Raw}
+	c.names = senderNames(c.messages)
 	r.rooms[room] = c
 	return c, nil
 }
@@ -448,14 +449,33 @@ func indexID(list []chatwork.Message, id string) int {
 
 // names returns the names known in a room: its senders and the user.
 func (r *run) names(c *roomCache) map[string]string {
-	out := map[string]string{}
+	var senders map[string]string
 	if c != nil {
-		for k, v := range c.names {
-			out[k] = v
+		senders = c.names
+	}
+	return roomNames(senders, r.conn)
+}
+
+// senderNames returns the names of the senders of messages by account ID.
+func senderNames(messages []chatwork.Message) map[string]string {
+	out := map[string]string{}
+	for _, m := range messages {
+		if name := cleanText(m.AccountName); m.AccountID != "" && name != "" {
+			out[m.AccountID] = name
 		}
 	}
-	if name := cleanText(r.conn.AccountName); name != "" {
-		out[r.conn.AccountID] = name
+	return out
+}
+
+// roomNames returns the names known in a room: its senders and the user of
+// the connection.
+func roomNames(senders map[string]string, conn store.ChatworkConnection) map[string]string {
+	out := map[string]string{}
+	for k, v := range senders {
+		out[k] = v
+	}
+	if name := cleanText(conn.AccountName); name != "" {
+		out[conn.AccountID] = name
 	}
 	return out
 }

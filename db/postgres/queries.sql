@@ -342,6 +342,18 @@ WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND substr(sourc
 SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND substr(source_key, 1, length(sqlc.arg(prefix)::text)) = sqlc.arg(prefix)::text AND tracking = 1 AND status IN ('open','candidate')
 ORDER BY COALESCE(tracked_at, 0), id LIMIT sqlc.arg(page_size);
+-- name: ListAIDetectSamples :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND substr(source_key, 1, length(sqlc.arg(prefix)::text)) = sqlc.arg(prefix)::text AND detected_at IS NOT NULL AND substr(content, 1, length(sqlc.arg(fallback)::text)) <> sqlc.arg(fallback)::text
+ORDER BY detected_at DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListAIResolvedSamples :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND substr(source_key, 1, length(sqlc.arg(prefix)::text)) = sqlc.arg(prefix)::text AND auto_reason = sqlc.arg(auto_reason)
+ORDER BY COALESCE(tracked_at, detected_at, 0) DESC, id DESC LIMIT sqlc.arg(page_size);
+-- name: ListAITrackedSamples :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND source = sqlc.arg(source) AND substr(source_key, 1, length(sqlc.arg(prefix)::text)) = sqlc.arg(prefix)::text AND status IN ('open','candidate') AND tracking = 1 AND tracked_at IS NOT NULL
+ORDER BY tracked_at DESC, id DESC LIMIT sqlc.arg(page_size);
 -- name: DeleteUserPendingNotificationsByKindAndSourcePrefix :exec
 DELETE FROM notifications WHERE notifications.user_id = sqlc.arg(user_id) AND notifications.kind = sqlc.arg(kind) AND notifications.sent_at IS NULL
 AND notifications.action_item_id IN (SELECT action_items.id FROM action_items WHERE action_items.user_id = sqlc.arg(item_user_id) AND action_items.source = sqlc.arg(source) AND substr(action_items.source_key, 1, length(sqlc.arg(prefix)::text)) = sqlc.arg(prefix)::text);
@@ -387,6 +399,17 @@ UPDATE ai_settings SET api_key_sealed = sqlc.arg(new_sealed)
 WHERE user_id = sqlc.arg(user_id) AND generation = sqlc.arg(generation) AND provider = 'openai' AND api_key_sealed = sqlc.arg(old_sealed);
 -- name: DeleteAISettings :exec
 DELETE FROM ai_settings WHERE user_id = sqlc.arg(user_id);
+-- name: ListAIInstructions :many
+SELECT user_id, scope, body, updated_at FROM ai_instructions
+WHERE user_id = sqlc.arg(user_id) ORDER BY scope;
+-- name: UpsertAIInstruction :exec
+INSERT INTO ai_instructions (user_id,scope,body,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(scope),sqlc.arg(body),sqlc.arg(updated_at))
+ON CONFLICT (user_id, scope) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at;
+-- name: DeleteAIInstruction :exec
+DELETE FROM ai_instructions WHERE user_id = sqlc.arg(user_id) AND scope = sqlc.arg(scope);
+-- name: DeleteUserAIInstructions :exec
+DELETE FROM ai_instructions WHERE user_id = sqlc.arg(user_id);
 -- name: CreatePushSubscription :exec
 INSERT INTO web_push_subscriptions (id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at)
 VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(endpoint),sqlc.arg(p256dh),sqlc.arg(auth),sqlc.arg(label),sqlc.arg(created_at),NULL);

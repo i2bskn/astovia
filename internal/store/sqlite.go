@@ -533,6 +533,18 @@ func (q sqliteQueries) stopTrackingSourcePrefixItems(ctx context.Context, userID
 func (q sqliteQueries) listTrackedSourcePrefixItems(ctx context.Context, userID, source, prefix string, limit int) ([]ActionItem, error) {
 	return q.actionItems(q.q.ListTrackedSourcePrefixItems(ctx, db.ListTrackedSourcePrefixItemsParams{UserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix, PageSize: int64(limit)}))
 }
+
+func (q sqliteQueries) listAIDetectSamples(ctx context.Context, userID, source, prefix, fallback string, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListAIDetectSamples(ctx, db.ListAIDetectSamplesParams{UserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix, Fallback: fallback, PageSize: int64(limit)}))
+}
+
+func (q sqliteQueries) listAIResolvedSamples(ctx context.Context, userID, source, prefix, reason string, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListAIResolvedSamples(ctx, db.ListAIResolvedSamplesParams{UserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix, AutoReason: sql.NullString{String: reason, Valid: true}, PageSize: int64(limit)}))
+}
+
+func (q sqliteQueries) listAITrackedSamples(ctx context.Context, userID, source, prefix string, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListAITrackedSamples(ctx, db.ListAITrackedSamplesParams{UserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix, PageSize: int64(limit)}))
+}
 func (q sqliteQueries) deleteUserPendingNotificationsBySourcePrefix(ctx context.Context, userID, kind, source, prefix string) error {
 	return q.q.DeleteUserPendingNotificationsByKindAndSourcePrefix(ctx, db.DeleteUserPendingNotificationsByKindAndSourcePrefixParams{UserID: userID, Kind: kind, ItemUserID: userID, Source: sql.NullString{String: source, Valid: true}, Prefix: prefix})
 }
@@ -558,6 +570,26 @@ func (q sqliteQueries) updateAISecret(ctx context.Context, userID string, genera
 }
 func (q sqliteQueries) deleteAISettings(ctx context.Context, userID string) error {
 	return q.q.DeleteAISettings(ctx, userID)
+}
+func (q sqliteQueries) listAIInstructions(ctx context.Context, userID string) ([]AIInstruction, error) {
+	rows, err := q.q.ListAIInstructions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AIInstruction, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, AIInstruction(row))
+	}
+	return out, nil
+}
+func (q sqliteQueries) upsertAIInstruction(ctx context.Context, in AIInstruction) error {
+	return q.q.UpsertAIInstruction(ctx, db.UpsertAIInstructionParams(in))
+}
+func (q sqliteQueries) deleteAIInstruction(ctx context.Context, userID, scope string) error {
+	return q.q.DeleteAIInstruction(ctx, db.DeleteAIInstructionParams{UserID: userID, Scope: scope})
+}
+func (q sqliteQueries) deleteUserAIInstructions(ctx context.Context, userID string) error {
+	return q.q.DeleteUserAIInstructions(ctx, userID)
 }
 func (q sqliteQueries) createPushSubscription(ctx context.Context, p PushSubscription) error {
 	return q.q.CreatePushSubscription(ctx, db.CreatePushSubscriptionParams{ID: p.ID, UserID: p.UserID, Endpoint: p.Endpoint, P256dh: p.P256dh, Auth: p.Auth, Label: p.Label, CreatedAt: p.CreatedAt})

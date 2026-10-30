@@ -101,7 +101,7 @@ docker run --rm -v astovia-data:/data -v "$PWD/backups/<日時>:/restore:ro" alp
 
 #### 更新する（VPS）
 
-Slack連携を追加したバージョンへ更新するときは、`slack_connections`テーブルが増えます。Chatwork連携を追加したバージョンへ更新するときは、`chatwork_connections`テーブルが増えます。メール連携を追加したバージョンへ更新するときは、`gmail_accounts`と`google_auth_states`テーブルが増えます。アプリは起動時にこれらのテーブルも確認するため、必ず下の手順どおり、新しいアプリを起動する前にスキーマを適用してください。
+Slack連携を追加したバージョンへ更新するときは、`slack_connections`テーブルが増えます。Chatwork連携を追加したバージョンへ更新するときは、`chatwork_connections`テーブルが増えます。メール連携を追加したバージョンへ更新するときは、`gmail_accounts`と`google_auth_states`テーブルが増えます。AIの追加の指示を追加したバージョンへ更新するときは、`ai_instructions`テーブルが増えます。アプリは起動時にこれらのテーブルも確認するため、必ず下の手順どおり、新しいアプリを起動する前にスキーマを適用してください。
 
 1. 新しいバージョンのタグから`compose.yaml`、`Caddyfile`、`.env.example`を別名で取得し（例: `curl -fsSL -o compose.yaml.new https://raw.githubusercontent.com/i2bskn/astovia/vX.Y.Z/deploy/compose.yaml`）、手元のファイルとの差分を確認して反映します。必須の環境変数が増えた場合は`.env`にも追加します。
 2. アプリを止めます: `docker compose stop app`
@@ -189,7 +189,7 @@ echo "exit code: $?"
 
 #### 更新する（外部PostgreSQL）
 
-Slack連携を追加したバージョンへ更新するときは、`slack_connections`テーブルが増えます。Chatwork連携を追加したバージョンへ更新するときは、`chatwork_connections`テーブルが増えます。メール連携を追加したバージョンへ更新するときは、`gmail_accounts`と`google_auth_states`テーブルが増えます。アプリは起動時にこれらのテーブルも確認するため、必ず下の手順どおり、新しいアプリを起動する前にスキーマを適用してください。
+Slack連携を追加したバージョンへ更新するときは、`slack_connections`テーブルが増えます。Chatwork連携を追加したバージョンへ更新するときは、`chatwork_connections`テーブルが増えます。メール連携を追加したバージョンへ更新するときは、`gmail_accounts`と`google_auth_states`テーブルが増えます。AIの追加の指示を追加したバージョンへ更新するときは、`ai_instructions`テーブルが増えます。アプリは起動時にこれらのテーブルも確認するため、必ず下の手順どおり、新しいアプリを起動する前にスキーマを適用してください。
 
 1. コンテナサービスでアプリを止めます（サービスを無効にする、またはインスタンス数を0にする）。古いアプリが新しいスキーマで動き続けることと、デプロイ中に新旧が並行して動いて通知が重複することを避けるためです。
 2. 「バックアップと復元（外部PostgreSQL）」の手順でバックアップを取ります。
@@ -229,7 +229,7 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は「PostgreSQLを使用する」の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加、Chatwork連携の`chatwork_connections`テーブルの追加、メール連携の`gmail_accounts`・`google_auth_states`テーブルの追加、`action_items`の`importance`列の追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加、Chatwork連携の`chatwork_connections`テーブルの追加、メール連携の`gmail_accounts`・`google_auth_states`テーブルの追加、`action_items`の`importance`列の追加、AIの追加の指示の`ai_instructions`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -384,7 +384,7 @@ make user-role USER_EMAIL=alice@example.com USER_ROLE=owner
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです（画面の招待・再設定も同じです）。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）、未送信の通知をすべて削除し、そのユーザーが発行した招待と再設定リンク、そのユーザー宛ての再設定リンクを取り消します。ユーザー無効化はGitHub連携とSlack連携とChatwork連携とメール連携のGoogleアカウントも削除します（パスワード再設定では残します。「GitHub連携と通知」「Slack連携」「Chatwork連携」「メール連携（Gmail・Google Workspace）」を参照）。パスワード再設定とユーザー無効化は、途中のGoogleアカウントの接続の手続きも取り消します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです（画面の招待・再設定も同じです）。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）とAIの追加の指示、未送信の通知をすべて削除し、そのユーザーが発行した招待と再設定リンク、そのユーザー宛ての再設定リンクを取り消します。ユーザー無効化はGitHub連携とSlack連携とChatwork連携とメール連携のGoogleアカウントも削除します（パスワード再設定では残します。「GitHub連携と通知」「Slack連携」「Chatwork連携」「メール連携（Gmail・Google Workspace）」を参照）。パスワード再設定とユーザー無効化は、途中のGoogleアカウントの接続の手続きも取り消します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## ログイン方式（パスワード / Cloudflare Access）
 
@@ -826,8 +826,32 @@ GitHubのメンションとSlack・Chatwork・メールの発言を読んで、�
 
 - 判断のため、メンションのあったIssue／PRについて、リポジトリ名（非公開のものを含む）、タイトルと本文、コメントの本文、投稿者のGitHubユーザー名と日時が選んだ提供元（AnthropicまたはOpenAI）に送られます。Slack連携では、判断する発言と前後の発言の本文、投稿者の表示名、ワークスペース名とチャンネル名も送られます（「Slack連携」を参照）。Chatwork連携では、判断する発言と前後の発言の本文、投稿者の名前とアカウントID、組織名とルーム名が送られます（「Chatwork連携」を参照）。メール連携では、判断するメールと前後のメールの本文、件名、差出人の名前とアドレス、宛先とCCの名前とアドレス、接続したGoogleアカウントのアドレスが送られます（「メール連携（Gmail・Google Workspace）」を参照）。OpenAIには、保存しない指定（`store: false`）で送ります。
 - AIが書いたタスク文と要約は外部の文章をもとにしています。画面ではテキストとして表示し、MCPでは他の対応事項と同じく`content`として返します。第三者がコメントに「対応不要」などと書くと、AIが対応不要と判断する場合があります。その結果は「自動で処理したもの」に残り、未完了に戻せます。
-- パスワード再設定とユーザー無効化では、AIの設定を削除します（乗っ取られていた間に登録されたキーや接続で、本文が他人の組織やアカウントへ送られ続けないようにするためです）。
+- パスワード再設定とユーザー無効化では、AIの設定とAIの追加の指示を削除します（乗っ取られていた間に登録されたキーや接続で、本文が他人の組織やアカウントへ送られ続けないようにするためです。追加の指示は、乗っ取られていた間に書かれた指示で検出が黙って止まり続けないようにするためです）。
 - `ASTOVIA_JWT_SECRET`を変えると、保存したAPIキーもChatGPTの接続も復号できなくなるため、登録し直してください（ChatGPTの接続に使うホストの識別子も変わります）。
+
+### 追加の指示
+
+管理画面の「設定」→「AI」の「追加の指示」で、AIの判断の基準を自分向けに調整できます（AIの設定がなくても編集・保存できます）。欄は8つです。
+
+- すべての判断: 下の7つすべてに効きます。
+- タスクの検出: GitHub（メンション）・Slack・Chatwork・メールの4つ。タスク／タスク候補／対応不要の判断と重要度の基準を調整できます。
+- 返信で済んだかの判断: Slack・Chatwork・メールの3つ。どういう返信なら用件が済んだとするかの基準を調整できます。
+
+- 各欄は前後の空白を除いて2000文字までです。空にするとその欄の指示を削除します。
+- AIの判定のたびに、固定のシステムプロンプトの末尾に「すべての判断」とその処理の欄の指示を付けて送ります。両方が空なら何も付けません。
+- 固定の決まり（出力の形式と項目、元の会話にないことを事実として補わないこと、迷ったときの扱い）は追加の指示より優先します。追加の指示で変えられるのは上の判断の基準だけです。
+- 同期の途中で保存した指示は、次の同期から効きます。
+
+#### 試す
+
+「すべての判断」以外の7つの欄には「試す」ボタンがあり、保存する前に指示の効き目を確かめられます（AIの設定が有効なときだけ使えます）。
+
+- 押すと、その連携で最近AIが判定したものを最大10件並べます。タスクの検出では、今の接続の判定から作られたもの（AIが判定できなかったときの確認タスク、まとめ用の親、Chatworkのタスクの取り込み、GitHubのレビュー依頼・割り当ては除く）を新しい順に出します。返信の判断では、返信で済んだとして完了したものと、追跡中で一度でも確認したものを最大5件ずつ出します。
+- 1件選ぶと、元の会話を連携先から読み直して判定の入力を作り直し、保存済みの指示と、画面で書きかけの指示（「すべての判断」の欄を含む）で1回ずつ、合わせて2回AIを呼んで、結果を「保存済みの指示」「この指示」の2列で並べます。違う項目は強調します。書きかけの指示は保存しません。
+- タスクの作成・更新、通知、AIの設定の状態、追跡の確認時刻は一切変えません。
+- 元の判定のときと会話の内容（その後の投稿、関連するタスク）が変わっているため、元の判定と同じ入力にはなりません。関連するタスクからは、試すタスク自身を除きます（除かないと、AIが既存の重複として対応不要と判断するためです）。
+- 返信の判断は、元の投稿より後に自分の投稿がないと試せません。
+- 試せるのは1ユーザーあたり1分に5回までです。SlackはMCPのSlackの読み取りと同じ回数の枠を使うため、1分に1回程度になります。Chatworkは各ルームの最新100件より古い発言は試せず、MCPのChatworkの読み取りと同じ枠を使います。メールはMCPのGmailの読み取りと同じ枠を使います。
 
 ## URLと応答
 
@@ -882,6 +906,10 @@ GitHubのメンションとSlack・Chatwork・メールの発言を読んで、�
 | `GET /api/v1/ai` | AIの設定。未設定は`{configured: false}`、設定済みは`{configured, provider, model, key_last4, account, status, last_error, updated_at}`。`provider`は`"anthropic"`か`"openai"`（ChatGPTのプラン）。`key_last4`はAnthropicのキーの末尾4文字（OpenAIでは`""`）、`account`はChatGPTのアカウントのメールアドレス（Anthropicと不明な場合は`null`）。キー・トークンは返さない。Access JWTが必要 |
 | `PUT /api/v1/ai` | 本文`{api_key?, model, provider?}`（16KiB以内）でAPIキーとモデルを登録・変更する。`provider`は`"anthropic"`（省略時）か`"openai"`で、今の設定と違えば409`ai_provider_mismatch`（削除してから設定し直す）。Anthropicでは`api_key`を省くと保存済みのキーでモデルだけを変える。保存前にAnthropicで確かめ、無効なキーは400`ai_key_invalid`、モデルを使えなければ400`ai_model_unavailable`、残高・支払いの問題は400`ai_billing`、Anthropicに届かなければ503`ai_unavailable`、別の要求で設定が変わっていれば409`ai_conflict`。`"openai"`はモデルの変更だけで（接続は`/api/v1/ai/openai/*`）、`api_key`は付けられない。モデルがプランの一覧に無ければ400`ai_model_unavailable`、確認の要求が通らなければ、接続が無効なら400`ai_key_invalid`、プランで使えなければ400`ai_billing`、利用上限なら400`ai_usage_limit`、要求の形式を受け付けなければ400`ai_unsupported`、届かなければ503`ai_unavailable`。Access JWTが必要 |
 | `DELETE /api/v1/ai` | AIの設定を削除し204を返す。未設定でも204。ChatGPTのプランではOpenAIでリフレッシュトークンを取り消し、取り消しに失敗したら（削除はしたうえで）200`{revoke_failed: true}`を返す。Access JWTが必要 |
+| `GET /api/v1/ai/instructions` | AIの追加の指示`{instructions: {common, "github.detect", "slack.detect", "chatwork.detect", "gmail.detect", "slack.reply", "chatwork.reply", "gmail.reply"}}`。8つすべてを返し、指示のない欄は`""`。Access JWTが必要 |
+| `PUT /api/v1/ai/instructions` | 本文`{instructions: {…8つすべて}}`（128KiB以内）で追加の指示をまとめて置き換え、`GET`と同じ形を返す。値はすべて文字列で必須。欠落・未知のキー・`null`・文字列以外は400`invalid_request`。各値は前後の空白を除いて保存し、空なら削除する。2000文字を超えたら400`invalid_request`。Access JWTが必要（APIトークン・MCPでは扱わない） |
+| `GET /api/v1/ai/instructions/samples?scope=` | 追加の指示を試せる判定の一覧`{samples: [{id, content, status, auto_reason, conversation_name, detected_at}]}`（最大10件、新しい順）。`scope`は`common`以外の7つで、それ以外は400`invalid_request`。`conversation_name`は最初の参照の会話名か`null`、`detected_at`はRFC 3339か`null`。連携していなければ409`not_connected`。Access JWTが必要 |
+| `POST /api/v1/ai/instructions/try` | 本文`{scope, item_id, common, instruction}`（すべて必須の文字列、128KiB以内）で、判定を保存済みの指示と書きかけの指示（`common`と`instruction`。前後の空白を除いて2000文字以内）でやり直し、検出は`{current: {decision, task, importance, summary, event}, draft: {…}}`（`event`は`{title, start, end}`か`null`。`start`・`end`はAIが返した現地時刻）、返信は`{current: {done}, draft: {done}}`を返す。何も保存しない。不正な本文・`scope`は400`invalid_request`、1分5回を超えたら429`rate_limited`（`Retry-After`付き）、連携していなければ409`not_connected`、試せない判定は404`not_found`、AIの設定が有効でなければ409`ai_not_ready`、利用上限で待っている間は409`ai_cooling_down`、元の会話を読み直せなければ409`source_unavailable`、自分の返信がなければ409`no_reply`、連携先の制限は429`rate_limited`、連携先の失敗は502`upstream_error`、AIの失敗は409`ai_key_invalid`・`ai_model_unavailable`・`ai_billing`・429`ai_usage_limit`・502`ai_error`、55秒を超えたら504`timeout`。Access JWTが必要 |
 | `POST /api/v1/ai/openai/authorize` | 本文`{}`でChatGPTのサインインを始め、`{url, redirect_uri}`を返す。Anthropicの設定があれば409`ai_provider_mismatch`。接続済みならそのクライアントIDで、未接続なら新しいクライアントの登録として始める。手続きは10分で無効になる。Access JWTが必要 |
 | `POST /api/v1/ai/openai/complete` | 本文`{callback_url}`（ブラウザが戻された`http://127.0.0.1:1455/auth/callback?…`のURL。HTTPS-Onlyモードで`https://`になったものも可）で接続を完了し、`GET /api/v1/ai`と同じ形を返す。URLを読み取れなければ400`openai_callback_invalid`（手続きは使われない）、手続きが無効・期限切れ・使用済み・他のユーザーのもの、またはOpenAIがコードを受け付けなければ400`openai_state_invalid`、拒否されたら400`openai_denied`、プランを使う許可がなければ400`openai_scope_missing`、OpenAIとのやりとりやIDトークンの検証に失敗したら502`openai_unavailable`、Anthropicの設定があれば409`ai_provider_mismatch`。モデルの確認の失敗は`PUT`と同じコード。Access JWTが必要 |
 | `GET /api/v1/ai/openai/models` | ChatGPTのプランで使えるモデルの一覧`{models: [{id, name}]}`。ChatGPTのプランを設定していなければ404。エラーは`PUT`と同じコード。Access JWTが必要 |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 )
 
 // ErrAISettingsNotFound is returned when the user has no AI settings.
@@ -151,4 +152,140 @@ func (s *Store) UpdateAISecret(ctx context.Context, userID string, generation in
 func (s *Store) SetAIStatus(ctx context.Context, userID string, generation int64, status string, lastError sql.NullString, now int64) (bool, error) {
 	n, err := s.q.updateAISettingsStatus(ctx, userID, generation, status, lastError, now)
 	return n == 1, err
+}
+
+// Scopes of the AI instructions: InstructionCommon applies to every
+// judgment, the others to one process of one integration.
+const (
+	InstructionCommon         = "common"
+	InstructionGitHubDetect   = "github.detect"
+	InstructionSlackDetect    = "slack.detect"
+	InstructionChatworkDetect = "chatwork.detect"
+	InstructionGmailDetect    = "gmail.detect"
+	InstructionSlackReply     = "slack.reply"
+	InstructionChatworkReply  = "chatwork.reply"
+	InstructionGmailReply     = "gmail.reply"
+)
+
+// InstructionScopes lists every instruction scope in display order.
+var InstructionScopes = []string{InstructionCommon, InstructionGitHubDetect, InstructionSlackDetect, InstructionChatworkDetect, InstructionGmailDetect, InstructionSlackReply, InstructionChatworkReply, InstructionGmailReply}
+
+// MaxInstructionLength is the maximum length of one instruction in runes.
+const MaxInstructionLength = 2000
+
+// ValidInstructionScope reports whether scope is one of InstructionScopes.
+func ValidInstructionScope(scope string) bool {
+	for _, s := range InstructionScopes {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
+
+// AIInstruction is one of the user's additional instructions to the AI. An
+// empty instruction has no row.
+type AIInstruction struct {
+	UserID    string
+	Scope     string
+	Body      string
+	UpdatedAt int64
+}
+
+// AIInstructions returns the user's instructions by scope. Only the scopes
+// with an instruction are present.
+func (s *Store) AIInstructions(ctx context.Context, userID string) (map[string]string, error) {
+	rows, err := s.q.listAIInstructions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, row := range rows {
+		out[row.Scope] = row.Body
+	}
+	return out, nil
+}
+
+// SaveAIInstructions replaces every instruction of the user with in, keyed
+// by scope. An empty or missing scope removes the instruction. The caller
+// validates the scopes and lengths; unknown scopes are ignored.
+func (s *Store) SaveAIInstructions(ctx context.Context, userID, sessionID string, in map[string]string, now int64) error {
+	return s.transaction(ctx, func(q queries) error {
+		// Lock order: users, ai_instructions.
+		if e := lockActiveUser(ctx, q, userID, sessionID, now); e != nil {
+			return e
+		}
+		for _, scope := range InstructionScopes {
+			var e error
+			if body := in[scope]; body == "" {
+				e = q.deleteAIInstruction(ctx, userID, scope)
+			} else {
+				e = q.upsertAIInstruction(ctx, AIInstruction{UserID: userID, Scope: scope, Body: body, UpdatedAt: now})
+			}
+			if e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+}
+
+// AIDetectSamples returns up to limit of the user's items of source made
+// from AI judgments, newest detection first: a source key starting with one
+// of prefixes, a detection time, and content not starting with fallback
+// (the confirmation task made when the AI could not judge). It reads
+// without locking.
+func (s *Store) AIDetectSamples(ctx context.Context, userID, source string, prefixes []string, fallback string, limit int) ([]ActionItem, error) {
+	var out []ActionItem
+	for _, p := range prefixes {
+		items, err := s.q.listAIDetectSamples(ctx, userID, source, p, fallback, limit)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, items...)
+	}
+	return newestSamples(out, func(item ActionItem) int64 { return item.DetectedAt.Int64 }, limit), nil
+}
+
+// AIReplySamples returns the user's items of source whose replies the AI
+// judged or will judge, newest check first: up to each items completed for
+// reason, and up to each open or candidate items tracked and checked at
+// least once, with a source key starting with one of prefixes. It reads
+// without locking.
+func (s *Store) AIReplySamples(ctx context.Context, userID, source string, prefixes []string, reason string, each int) ([]ActionItem, error) {
+	var resolved, tracked []ActionItem
+	for _, p := range prefixes {
+		items, err := s.q.listAIResolvedSamples(ctx, userID, source, p, reason, each)
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, items...)
+		if items, err = s.q.listAITrackedSamples(ctx, userID, source, p, each); err != nil {
+			return nil, err
+		}
+		tracked = append(tracked, items...)
+	}
+	checked := func(item ActionItem) int64 {
+		if item.TrackedAt.Valid {
+			return item.TrackedAt.Int64
+		}
+		return item.DetectedAt.Int64
+	}
+	out := append(newestSamples(resolved, checked, each), newestSamples(tracked, checked, each)...)
+	return newestSamples(out, checked, len(out)), nil
+}
+
+// newestSamples sorts items by at, newest first, then by ID descending, and
+// keeps the first limit.
+func newestSamples(items []ActionItem, at func(ActionItem) int64, limit int) []ActionItem {
+	sort.SliceStable(items, func(i, j int) bool {
+		if a, b := at(items[i]), at(items[j]); a != b {
+			return a > b
+		}
+		return items[i].ID > items[j].ID
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
 }

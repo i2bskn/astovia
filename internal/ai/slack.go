@@ -114,6 +114,9 @@ type SlackInput struct {
 	ChannelName      string
 	RelatedTasks     []RelatedTask
 	Posts            []SlackPost
+	// Instructions are appended to the system prompt; they are not part
+	// of the input JSON.
+	Instructions Instructions `json:"-"`
 }
 
 // ReplyInput is what a reply judgment is based on: the task and the posts
@@ -123,6 +126,9 @@ type ReplyInput struct {
 	Location *time.Location
 	Task     string
 	Posts    []SlackPost
+	// Instructions are appended to the system prompt; they are not part
+	// of the input JSON.
+	Instructions Instructions `json:"-"`
 }
 
 // ReplyResult is the AI's judgment of the user's replies.
@@ -260,10 +266,11 @@ func (c *Client) JudgeSlack(ctx context.Context, cred Credential, model string, 
 	return c.judgeConversation(ctx, cred, model, SlackSystemPrompt, user, in)
 }
 
-// judgeConversation sends a judgment with the system prompt and the user
-// message built from in, and parses the result.
+// judgeConversation sends a judgment with the system prompt, followed by
+// the user's instructions of in, and the user message built from in, and
+// parses the result.
 func (c *Client) judgeConversation(ctx context.Context, cred Credential, model, system, user string, in SlackInput) (MentionResult, error) {
-	text, err := c.structured(ctx, cred, model, system, user, judgmentSchemaName, outputSchema)
+	text, err := c.structured(ctx, cred, model, withInstructions(system, detectInstructions, in.Instructions), user, judgmentSchemaName, outputSchema)
 	if err != nil {
 		return MentionResult{}, err
 	}
@@ -276,13 +283,13 @@ func (c *Client) JudgeReply(ctx context.Context, cred Credential, model string, 
 	if err != nil {
 		return ReplyResult{}, err
 	}
-	return c.judgeReply(ctx, cred, model, ReplySystemPrompt, user)
+	return c.judgeReply(ctx, cred, model, ReplySystemPrompt, user, in.Instructions)
 }
 
-// judgeReply sends a reply judgment with the system prompt and the user
-// message, and parses the result.
-func (c *Client) judgeReply(ctx context.Context, cred Credential, model, system, user string) (ReplyResult, error) {
-	text, err := c.structured(ctx, cred, model, system, user, replySchemaName, replySchema)
+// judgeReply sends a reply judgment with the system prompt, followed by the
+// user's instructions, and the user message, and parses the result.
+func (c *Client) judgeReply(ctx context.Context, cred Credential, model, system, user string, instructions Instructions) (ReplyResult, error) {
+	text, err := c.structured(ctx, cred, model, withInstructions(system, replyInstructions, instructions), user, replySchemaName, replySchema)
 	if err != nil {
 		return ReplyResult{}, err
 	}

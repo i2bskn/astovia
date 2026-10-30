@@ -162,7 +162,10 @@ type RelatedTask struct {
 // RelatedScope selects the related tasks of a conversation of the
 // integration Source. A key starting with one of GroupPrefixes is a group
 // parent created by the integration; only those are folded with their
-// subtasks, and only those are kept when they are closed.
+// subtasks, and only those are kept when they are closed. The items of
+// Exclude (by ID) are left out, on their own and among the subtasks; they
+// are left out after the items are read, so the related tasks may be fewer
+// than FetchLimit would otherwise give.
 type RelatedScope struct {
 	Source        string
 	Prefixes      []string
@@ -173,6 +176,7 @@ type RelatedScope struct {
 	FetchLimit    int
 	Limit         int
 	SubtaskLimit  int
+	Exclude       []string
 }
 
 // subtaskReadLimit bounds the subtasks read for one group parent.
@@ -200,7 +204,7 @@ func (s *Store) RelatedTasks(ctx context.Context, userID string, scope RelatedSc
 	var order []ActionItem
 	for _, item := range items {
 		group := isGroup(item)
-		if item.Status != "open" && !group {
+		if contains(scope.Exclude, item.ID) || (item.Status != "open" && !group) {
 			continue
 		}
 		if !group {
@@ -215,7 +219,7 @@ func (s *Store) RelatedTasks(ctx context.Context, userID string, scope RelatedSc
 		var subtasks []string
 		for _, c := range children {
 			folded[c.ID] = true
-			if closed || c.Status == "open" {
+			if !contains(scope.Exclude, c.ID) && (closed || c.Status == "open") {
 				subtasks = append(subtasks, c.Content)
 			}
 		}

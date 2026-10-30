@@ -896,6 +896,32 @@ table "ai_settings" {
     ref_columns = [table.users.column.id]
   }
 }
+table "ai_instructions" {
+  schema = schema.main
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "scope" {
+    type = text
+    null = false
+  }
+  column "body" {
+    type = text
+    null = false
+  }
+  column "updated_at" {
+    type = integer
+    null = false
+  }
+  primary_key {
+    columns = [column.user_id, column.scope]
+  }
+  foreign_key "ai_instructions_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+}
 table "web_push_subscriptions" {
   schema = schema.main
   column "id" {

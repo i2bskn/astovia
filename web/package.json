@@ -8,7 +8,7 @@
     "dev": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
-    "test:auth": "tsc --ignoreConfig src/auth.ts src/authConfig.ts src/actionItems.ts src/apiTokens.ts src/oauth.ts src/automation.ts src/integrations.ts src/notifications.ts src/view.ts src/format.ts src/phrases.ts src/settingsPages.ts src/ai.ts src/slackManifest.ts src/nesting.ts src/links.ts src/googleCallback.ts src/users.ts src/resetNotice.ts --target ES2022 --module ES2022 --moduleResolution bundler --lib ES2022,DOM,DOM.Iterable --strict --skipLibCheck --outDir .test-build && node --test tests/*.test.mjs"
+    "test:auth": "tsc --ignoreConfig src/auth.ts src/authConfig.ts src/actionItems.ts src/apiTokens.ts src/oauth.ts src/automation.ts src/integrations.ts src/notifications.ts src/view.ts src/format.ts src/phrases.ts src/settingsPages.ts src/ai.ts src/aiInstructions.ts src/slackManifest.ts src/nesting.ts src/links.ts src/googleCallback.ts src/users.ts src/resetNotice.ts --target ES2022 --module ES2022 --moduleResolution bundler --lib ES2022,DOM,DOM.Iterable --strict --skipLibCheck --outDir .test-build && node --test tests/*.test.mjs"
   },
   "dependencies": {
     "react": "19.3.1",

@@ -853,6 +853,20 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
 	return err
 }
 
+const deleteAIInstruction = `-- name: DeleteAIInstruction :exec
+DELETE FROM ai_instructions WHERE user_id = $1 AND scope = $2
+`
+
+type DeleteAIInstructionParams struct {
+	UserID string
+	Scope  string
+}
+
+func (q *Queries) DeleteAIInstruction(ctx context.Context, arg DeleteAIInstructionParams) error {
+	_, err := q.db.ExecContext(ctx, deleteAIInstruction, arg.UserID, arg.Scope)
+	return err
+}
+
 const deleteAISettings = `-- name: DeleteAISettings :exec
 DELETE FROM ai_settings WHERE user_id = $1
 `
@@ -1085,6 +1099,15 @@ DELETE FROM slack_connections WHERE user_id = $1
 
 func (q *Queries) DeleteSlackConnection(ctx context.Context, userID string) error {
 	_, err := q.db.ExecContext(ctx, deleteSlackConnection, userID)
+	return err
+}
+
+const deleteUserAIInstructions = `-- name: DeleteUserAIInstructions :exec
+DELETE FROM ai_instructions WHERE user_id = $1
+`
+
+func (q *Queries) DeleteUserAIInstructions(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserAIInstructions, userID)
 	return err
 }
 
@@ -2075,6 +2098,241 @@ func (q *Queries) LatestUsedPasswordReset(ctx context.Context, arg LatestUsedPas
 		&i.RevokedAt,
 	)
 	return i, err
+}
+
+const listAIDetectSamples = `-- name: ListAIDetectSamples :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
+WHERE user_id = $1 AND source = $2 AND substr(source_key, 1, length($3::text)) = $3::text AND detected_at IS NOT NULL AND substr(content, 1, length($4::text)) <> $4::text
+ORDER BY detected_at DESC, id DESC LIMIT $5
+`
+
+type ListAIDetectSamplesParams struct {
+	UserID   string
+	Source   sql.NullString
+	Prefix   string
+	Fallback string
+	PageSize int32
+}
+
+func (q *Queries) ListAIDetectSamples(ctx context.Context, arg ListAIDetectSamplesParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listAIDetectSamples,
+		arg.UserID,
+		arg.Source,
+		arg.Prefix,
+		arg.Fallback,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+			&i.Importance,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAIInstructions = `-- name: ListAIInstructions :many
+SELECT user_id, scope, body, updated_at FROM ai_instructions
+WHERE user_id = $1 ORDER BY scope
+`
+
+func (q *Queries) ListAIInstructions(ctx context.Context, userID string) ([]AiInstruction, error) {
+	rows, err := q.db.QueryContext(ctx, listAIInstructions, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AiInstruction
+	for rows.Next() {
+		var i AiInstruction
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Scope,
+			&i.Body,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAIResolvedSamples = `-- name: ListAIResolvedSamples :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
+WHERE user_id = $1 AND source = $2 AND substr(source_key, 1, length($3::text)) = $3::text AND auto_reason = $4
+ORDER BY COALESCE(tracked_at, detected_at, 0) DESC, id DESC LIMIT $5
+`
+
+type ListAIResolvedSamplesParams struct {
+	UserID     string
+	Source     sql.NullString
+	Prefix     string
+	AutoReason sql.NullString
+	PageSize   int32
+}
+
+func (q *Queries) ListAIResolvedSamples(ctx context.Context, arg ListAIResolvedSamplesParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listAIResolvedSamples,
+		arg.UserID,
+		arg.Source,
+		arg.Prefix,
+		arg.AutoReason,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+			&i.Importance,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAITrackedSamples = `-- name: ListAITrackedSamples :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
+WHERE user_id = $1 AND source = $2 AND substr(source_key, 1, length($3::text)) = $3::text AND status IN ('open','candidate') AND tracking = 1 AND tracked_at IS NOT NULL
+ORDER BY tracked_at DESC, id DESC LIMIT $4
+`
+
+type ListAITrackedSamplesParams struct {
+	UserID   string
+	Source   sql.NullString
+	Prefix   string
+	PageSize int32
+}
+
+func (q *Queries) ListAITrackedSamples(ctx context.Context, arg ListAITrackedSamplesParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listAITrackedSamples,
+		arg.UserID,
+		arg.Source,
+		arg.Prefix,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+			&i.Importance,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listAPITokens = `-- name: ListAPITokens :many
@@ -5100,6 +5358,29 @@ func (q *Queries) UpdateSlackSyncState(ctx context.Context, arg UpdateSlackSyncS
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertAIInstruction = `-- name: UpsertAIInstruction :exec
+INSERT INTO ai_instructions (user_id,scope,body,updated_at)
+VALUES ($1,$2,$3,$4)
+ON CONFLICT (user_id, scope) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at
+`
+
+type UpsertAIInstructionParams struct {
+	UserID    string
+	Scope     string
+	Body      string
+	UpdatedAt int64
+}
+
+func (q *Queries) UpsertAIInstruction(ctx context.Context, arg UpsertAIInstructionParams) error {
+	_, err := q.db.ExecContext(ctx, upsertAIInstruction,
+		arg.UserID,
+		arg.Scope,
+		arg.Body,
+		arg.UpdatedAt,
+	)
+	return err
 }
 
 const upsertCIMDClient = `-- name: UpsertCIMDClient :exec

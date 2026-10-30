@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation } from 'react-router';
 import { aiStatus, createAIClient } from './ai';
 import AISettings from './AISettings';
+import AIInstructionsSettings from './AIInstructionsSettings';
 import { request } from './auth';
 import APITokenList from './APITokenList';
 import { createAPITokensClient } from './apiTokens';
@@ -97,7 +98,7 @@ export default function Settings() {
     <Routes>
       <Route index element={phone ? <SettingsIndex /> : <Navigate to="/settings/integrations" replace />} />
       <Route path="integrations" element={<div className="settings-stack"><GitHubSettings /><SlackSettings /><ChatworkSettings /><GmailSettings /></div>} />
-      <Route path="ai" element={<AISettings />} />
+      <Route path="ai" element={<div className="settings-stack"><AISettings /><AIInstructionsSettings /></div>} />
       <Route path="notifications" element={<NotificationSettings />} />
       <Route path="ai-clients" element={<div className="settings-stack"><ConnectionList /><APITokenList /></div>} />
       <Route path="account" element={<Navigate to="/account" replace />} />

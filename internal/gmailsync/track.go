@@ -2,6 +2,7 @@ package gmailsync
 
 import (
 	"errors"
+	"time"
 
 	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/google"
@@ -131,28 +132,12 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, msgs []google.Mes
 	case gate != gateOK:
 		return passAbort, nil
 	}
-	// The newest replyPosts later messages, with the user's latest message
-	// in place of the oldest when it is older than all of them.
-	tail := later
-	if len(tail) > replyPosts {
-		tail = append([]google.Message{}, tail[len(tail)-replyPosts:]...)
-		if indexID(tail, mine.ID) < 0 {
-			tail[0] = mine
-		}
-	}
-	var posts []google.Message
-	if originMsg != nil {
-		posts = append(posts, *originMsg)
-	}
-	posts = append(posts, tail...)
 	loc, err := r.location()
 	if err != nil {
 		return passAbort, err
 	}
-	in := ai.ReplyInput{Me: ai.SlackPerson{ID: r.acct.Email, Name: myName(msgs, r.acct.Email)}, Location: loc, Task: item.Content}
-	for _, m := range posts {
-		in.Posts = append(in.Posts, r.post(m, false))
-	}
+	instructions := ai.Instructions{Common: r.instructions[store.InstructionCommon], Process: r.instructions[store.InstructionGmailReply]}
+	in := replyInput(r.acct.Email, loc, item.Content, msgs, originMsg, later, mine, instructions)
 	r.trackCalls++
 	res, err := r.s.AI.JudgeMailReply(r.ctx, cred, cur.Model, in)
 	class, err := r.classifyAI(cur, err)
@@ -174,6 +159,31 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, msgs []google.Mes
 	}
 	// A temporary failure: the item is checked again by the next pass.
 	return passNext, nil
+}
+
+// replyInput builds the AI input of a reply judgment of the task in a
+// thread of the account: the original message (when known) and the newest
+// replyPosts later messages, with the user's latest message mine in place of
+// the oldest when it is older than all of them. msgs are the visible
+// messages of the thread and later is in thread order.
+func replyInput(email string, loc *time.Location, task string, msgs []google.Message, originMsg *google.Message, later []google.Message, mine google.Message, instructions ai.Instructions) ai.ReplyInput {
+	tail := later
+	if len(tail) > replyPosts {
+		tail = append([]google.Message{}, tail[len(tail)-replyPosts:]...)
+		if indexID(tail, mine.ID) < 0 {
+			tail[0] = mine
+		}
+	}
+	var posts []google.Message
+	if originMsg != nil {
+		posts = append(posts, *originMsg)
+	}
+	posts = append(posts, tail...)
+	in := ai.ReplyInput{Me: ai.SlackPerson{ID: email, Name: myName(msgs, email)}, Location: loc, Task: task, Instructions: instructions}
+	for _, m := range posts {
+		in.Posts = append(in.Posts, toPost(m, false, email))
+	}
+	return in
 }
 
 // touch records that the item was checked at the start of the pass. Nothing

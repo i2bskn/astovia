@@ -35,6 +35,13 @@ type ActionItem struct {
 	Importance   string
 }
 
+type AiInstruction struct {
+	UserID    string
+	Scope     string
+	Body      string
+	UpdatedAt int64
+}
+
 type AiSetting struct {
 	UserID       string
 	Generation   int64

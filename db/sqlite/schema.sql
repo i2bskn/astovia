@@ -279,6 +279,15 @@ CREATE TABLE "ai_settings" (
   PRIMARY KEY ("user_id"),
   CONSTRAINT "ai_settings_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
 );
+-- Create "ai_instructions" table
+CREATE TABLE "ai_instructions" (
+  "user_id" text NOT NULL,
+  "scope" text NOT NULL,
+  "body" text NOT NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("user_id", "scope"),
+  CONSTRAINT "ai_instructions_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
 -- Create "web_push_subscriptions" table
 CREATE TABLE "web_push_subscriptions" (
   "id" text NOT NULL,

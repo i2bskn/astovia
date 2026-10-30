@@ -133,8 +133,11 @@ type run struct {
 	// read again by the next synchronization; overdue when LastSyncedAt has
 	// stayed behind for longer than mentionRetryLimit, so that it moves on
 	// and waiting mentions become confirmation tasks instead.
+	// instructions are the user's AI instructions, read with ai; ones
+	// saved during the synchronization apply from the next one.
 	ai             *store.AISettings
 	aiChecked      bool
+	instructions   ai.Instructions
 	mentionThreads []mentionThread
 	mentionsDone   bool
 	retry          bool

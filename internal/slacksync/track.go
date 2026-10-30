@@ -2,6 +2,7 @@ package slacksync
 
 import (
 	"errors"
+	"time"
 
 	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/slack"
@@ -173,31 +174,14 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, originMsg *slack.
 	case gate != gateOK:
 		return passAbort, nil
 	}
-	// The newest replyPosts later messages, with the user's latest reply
-	// in place of the oldest when it is older than all of them.
-	tail := later
-	if len(tail) > replyPosts {
-		tail = append([]slack.Message{}, tail[len(tail)-replyPosts:]...)
-		if indexTS(tail, mine.TS) < 0 {
-			tail[0] = mine
-		}
-	}
-	var msgs []slack.Message
-	if originMsg != nil {
-		msgs = append(msgs, *originMsg)
-	}
-	msgs = append(msgs, tail...)
 	loc, err := r.location()
 	if err != nil {
 		return passAbort, err
 	}
-	in := ai.ReplyInput{Me: ai.SlackPerson{ID: r.conn.SlackUserID, Name: r.conn.SlackUserName}, Location: loc, Task: item.Content}
-	for _, m := range msgs {
-		p, err := r.post(m, false)
-		if err != nil {
-			return passAbort, err
-		}
-		in.Posts = append(in.Posts, p)
+	instructions := ai.Instructions{Common: r.instructions[store.InstructionCommon], Process: r.instructions[store.InstructionSlackReply]}
+	in, err := replyInput(r.conn, loc, item.Content, originMsg, later, mine, instructions, r.userName)
+	if err != nil {
+		return passAbort, err
 	}
 	r.trackCalls++
 	res, err := r.s.AI.JudgeReply(r.ctx, cred, cur.Model, in)
@@ -224,6 +208,34 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, originMsg *slack.
 	}
 	// A temporary failure: the item is checked again by the next pass.
 	return passNext, nil
+}
+
+// replyInput builds the AI input of a reply judgment of the task: the
+// original message (when known) and the newest replyPosts later messages,
+// with the user's latest reply mine in place of the oldest when it is older
+// than all of them. later is in time order.
+func replyInput(conn store.SlackConnection, loc *time.Location, task string, originMsg *slack.Message, later []slack.Message, mine slack.Message, instructions ai.Instructions, name func(string) (string, error)) (ai.ReplyInput, error) {
+	tail := later
+	if len(tail) > replyPosts {
+		tail = append([]slack.Message{}, tail[len(tail)-replyPosts:]...)
+		if indexTS(tail, mine.TS) < 0 {
+			tail[0] = mine
+		}
+	}
+	var msgs []slack.Message
+	if originMsg != nil {
+		msgs = append(msgs, *originMsg)
+	}
+	msgs = append(msgs, tail...)
+	in := ai.ReplyInput{Me: ai.SlackPerson{ID: conn.SlackUserID, Name: conn.SlackUserName}, Location: loc, Task: task, Instructions: instructions}
+	for _, m := range msgs {
+		p, err := toPost(m, false, conn.SlackUserID, name)
+		if err != nil {
+			return ai.ReplyInput{}, err
+		}
+		in.Posts = append(in.Posts, p)
+	}
+	return in, nil
 }
 
 // touch records that the item was checked at the start of the pass. Nothing

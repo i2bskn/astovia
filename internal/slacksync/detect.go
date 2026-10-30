@@ -469,7 +469,7 @@ func (r *run) mention(m slack.Message) error {
 		return nil
 	}
 	u := &unit{key: key, convType: ai.SlackChannel, channelName: m.Channel.Name, title: "Slack: メンション",
-		posts: list[max(0, i-ai.PostsBefore):min(len(list), i+1+ai.PostsAfter)], targets: map[string]bool{m.TS: true}, last: target}
+		posts: contextPosts(list, i, i), targets: map[string]bool{m.TS: true}, last: target}
 	u.last.Permalink = m.Permalink
 	switch {
 	case m.Channel.IsIM:
@@ -477,16 +477,31 @@ func (r *run) mention(m slack.Message) error {
 	case m.Channel.IsMPIM:
 		u.convType = ai.SlackGroupDM
 	}
-	u.thread = thread
-	if thread == noThread && u.convType == ai.SlackChannel {
-		u.thread = m.TS
-	}
+	u.thread = relatedThread(u.convType, thread, m.TS)
 	if postponed {
 		_, err = r.postpone(u)
 		return err
 	}
 	_, err = r.judge(u)
 	return err
+}
+
+// contextPosts returns the posts sent with a judgment of the messages
+// list[i] to list[j]: them and up to ai.PostsBefore messages before and
+// ai.PostsAfter after.
+func contextPosts(list []slack.Message, i, j int) []slack.Message {
+	return list[max(0, i-ai.PostsBefore):min(len(list), j+1+ai.PostsAfter)]
+}
+
+// relatedThread is the thread of a judgment's conversation for its related
+// tasks and group parent: the key's thread, or for a message outside a
+// thread in a channel the message itself (so that a mention in a thread and
+// one in its first message share a conversation).
+func relatedThread(convType, thread, ts string) string {
+	if thread == noThread && convType == ai.SlackChannel {
+		return ts
+	}
+	return thread
 }
 
 func indexTS(list []slack.Message, ts string) int {
@@ -559,7 +574,7 @@ func (r *run) conversation(c *conversation) error {
 			continue
 		}
 		i, j := indexTS(c.messages, run[0].TS), indexTS(c.messages, last.TS)
-		u := &unit{key: key, convType: c.kind, channelName: c.channel.Name, title: title, posts: c.messages[max(0, i-ai.PostsBefore):min(len(c.messages), j+1+ai.PostsAfter)],
+		u := &unit{key: key, convType: c.kind, channelName: c.channel.Name, title: title, posts: contextPosts(c.messages, i, j),
 			targets: map[string]bool{}, last: last, thread: c.thread}
 		for _, m := range run {
 			u.targets[m.TS] = true
@@ -643,18 +658,25 @@ func (r *run) postpone(u *unit) (bool, error) {
 
 // post converts a message for the AI.
 func (r *run) post(m slack.Message, target bool) (ai.SlackPost, error) {
-	name, err := r.userName(m.User)
+	return toPost(m, target, r.conn.SlackUserID, r.userName)
+}
+
+// toPost converts a message for the AI. me is the user's member ID and name
+// returns a member's display name (see slack.FormatText); a message without
+// one is by "unknown".
+func toPost(m slack.Message, target bool, me string, name func(string) (string, error)) (ai.SlackPost, error) {
+	author, err := name(m.User)
 	if err != nil {
 		return ai.SlackPost{}, err
 	}
-	if name == "" {
-		name = "unknown"
+	if author == "" {
+		author = "unknown"
 	}
-	body, err := r.formatText(m.Text)
+	body, err := slack.FormatText(m.Text, name)
 	if err != nil {
 		return ai.SlackPost{}, err
 	}
-	return ai.SlackPost{ID: m.TS, Author: name, AuthorID: m.User, IsMe: m.User == r.conn.SlackUserID, At: tsTime(m.TS), Target: target, Body: body}, nil
+	return ai.SlackPost{ID: m.TS, Author: author, AuthorID: m.User, IsMe: m.User == me, At: tsTime(m.TS), Target: target, Body: body}, nil
 }
 
 // slackInput builds the AI input of a unit.
@@ -663,49 +685,71 @@ func (r *run) slackInput(u *unit) (ai.SlackInput, error) {
 	if err != nil {
 		return ai.SlackInput{}, err
 	}
-	in := ai.SlackInput{Me: ai.SlackPerson{ID: r.conn.SlackUserID, Name: r.conn.SlackUserName}, Location: loc, Workspace: r.conn.TeamName, ConversationType: u.convType, ChannelName: u.channelName, RelatedTasks: []ai.RelatedTask{}}
-	for _, m := range u.posts {
-		p, err := r.post(m, u.targets[m.TS])
+	tasks, err := r.s.Store.RelatedTasks(r.parent, r.conn.UserID, relatedScope(r.conn.TeamID, u.key.Channel, u.thread, u.convType, r.s.Now()))
+	if err != nil {
+		return ai.SlackInput{}, err
+	}
+	instructions := ai.Instructions{Common: r.instructions[store.InstructionCommon], Process: r.instructions[store.InstructionSlackDetect]}
+	in, err := detectInput(r.conn, loc, u.convType, u.channelName, u.posts, u.targets, tasks, instructions, r.userName)
+	if err != nil {
+		return ai.SlackInput{}, err
+	}
+	u.related = relatedSymbols(tasks)
+	return in, nil
+}
+
+// detectInput builds the AI input of a judgment of the target messages
+// (by ts) of posts, the context in time order, in a conversation of the
+// connection. The related tasks are given to the AI as t1, t2, ... (see
+// relatedSymbols).
+func detectInput(conn store.SlackConnection, loc *time.Location, convType, channelName string, posts []slack.Message, targets map[string]bool, related []store.RelatedTask, instructions ai.Instructions, name func(string) (string, error)) (ai.SlackInput, error) {
+	in := ai.SlackInput{Me: ai.SlackPerson{ID: conn.SlackUserID, Name: conn.SlackUserName}, Location: loc, Workspace: conn.TeamName, ConversationType: convType, ChannelName: channelName, RelatedTasks: []ai.RelatedTask{}, Instructions: instructions}
+	for _, m := range posts {
+		p, err := toPost(m, targets[m.TS], conn.SlackUserID, name)
 		if err != nil {
 			return ai.SlackInput{}, err
 		}
 		in.Posts = append(in.Posts, p)
 	}
-	tasks, err := r.s.Store.RelatedTasks(r.parent, r.conn.UserID, r.relatedScope(u))
-	if err != nil {
-		return ai.SlackInput{}, err
-	}
-	u.related = map[string]store.RelatedTask{}
-	for i, t := range tasks {
-		id := "t" + strconv.Itoa(i+1)
-		u.related[id] = t
-		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: id, Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
+	for i, t := range related {
+		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: relatedSymbol(i), Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
 	}
 	return in, nil
 }
 
-// relatedScope selects the related tasks of a unit's conversation: the
-// mentions and direct message runs of its channel and thread, whatever their
-// kind, the groups made for it, and in a channel the mention of the
-// thread's first message. Outside threads, the items of a direct message
-// conversation are limited to the last groupWindow.
-func (r *run) relatedScope(u *unit) store.RelatedScope {
-	now := r.s.Now()
-	team, channel := r.conn.TeamID, u.key.Channel
-	group := conversationPrefix(team, kindGroup, channel, u.thread)
+// relatedSymbol is the symbol given to the AI for the i-th related task.
+func relatedSymbol(i int) string { return "t" + strconv.Itoa(i+1) }
+
+// relatedSymbols maps the symbols given to the AI to the related tasks.
+func relatedSymbols(tasks []store.RelatedTask) map[string]store.RelatedTask {
+	out := map[string]store.RelatedTask{}
+	for i, t := range tasks {
+		out[relatedSymbol(i)] = t
+	}
+	return out
+}
+
+// relatedScope selects the related tasks of a conversation of the team (a
+// channel, and thread as given by relatedThread): the mentions and direct
+// message runs of the channel and thread, whatever their kind, the groups
+// made for it, and in a channel the mention of the thread's first message.
+// Outside threads, the items of a direct message conversation are limited
+// to the last groupWindow.
+func relatedScope(team, channel, thread, convType string, now time.Time) store.RelatedScope {
+	group := conversationPrefix(team, kindGroup, channel, thread)
 	scope := store.RelatedScope{
 		Source:        store.SourceSlack,
-		Prefixes:      []string{conversationPrefix(team, kindMention, channel, u.thread), conversationPrefix(team, kindDM, channel, u.thread), group},
+		Prefixes:      []string{conversationPrefix(team, kindMention, channel, thread), conversationPrefix(team, kindDM, channel, thread), group},
 		GroupPrefixes: []string{group},
 		ClosedSince:   now.Add(-groupWindow).Unix(),
 		FetchLimit:    relatedFetch,
 		Limit:         relatedLimit,
 		SubtaskLimit:  subtaskLimit,
 	}
-	if u.convType == ai.SlackChannel && u.thread != noThread {
-		scope.ExactKeys = []string{conversationPrefix(team, kindMention, channel, noThread) + u.thread}
+	if convType == ai.SlackChannel && thread != noThread {
+		scope.ExactKeys = []string{conversationPrefix(team, kindMention, channel, noThread) + thread}
 	}
-	if u.convType != ai.SlackChannel && u.thread == noThread {
+	if convType != ai.SlackChannel && thread == noThread {
 		scope.DMSince = now.Add(-groupWindow).Unix()
 	}
 	return scope

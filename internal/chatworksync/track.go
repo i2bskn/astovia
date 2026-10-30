@@ -2,6 +2,7 @@ package chatworksync
 
 import (
 	"errors"
+	"time"
 
 	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/chatwork"
@@ -129,29 +130,12 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, c *roomCache, ori
 	case gate != gateOK:
 		return passAbort, nil
 	}
-	// The newest replyPosts later messages, with the user's latest message
-	// in place of the oldest when it is older than all of them.
-	tail := later
-	if len(tail) > replyPosts {
-		tail = append([]chatwork.Message{}, tail[len(tail)-replyPosts:]...)
-		if indexID(tail, mine.ID) < 0 {
-			tail[0] = mine
-		}
-	}
-	var msgs []chatwork.Message
-	if originMsg != nil {
-		msgs = append(msgs, *originMsg)
-	}
-	msgs = append(msgs, tail...)
 	loc, err := r.location()
 	if err != nil {
 		return passAbort, err
 	}
-	names := r.names(c)
-	in := ai.ReplyInput{Me: ai.SlackPerson{ID: r.conn.AccountID, Name: r.conn.AccountName}, Location: loc, Task: item.Content}
-	for _, m := range msgs {
-		in.Posts = append(in.Posts, r.post(m, false, names))
-	}
+	instructions := ai.Instructions{Common: r.instructions[store.InstructionCommon], Process: r.instructions[store.InstructionChatworkReply]}
+	in := replyInput(r.conn, loc, item.Content, originMsg, later, mine, r.names(c), instructions)
 	r.trackCalls++
 	res, err := r.s.AI.JudgeChatworkReply(r.ctx, cred, cur.Model, in)
 	class, err := r.classifyAI(cur, err)
@@ -173,6 +157,31 @@ func (r *run) judgeReply(item store.ActionItem, key sourceKey, c *roomCache, ori
 	}
 	// A temporary failure: the item is checked again by the next pass.
 	return passNext, nil
+}
+
+// replyInput builds the AI input of a reply judgment of the task: the
+// original message (when known) and the newest replyPosts later messages,
+// with the user's latest message mine in place of the oldest when it is
+// older than all of them. later is in message order and names are the names
+// known in the room.
+func replyInput(conn store.ChatworkConnection, loc *time.Location, task string, originMsg *chatwork.Message, later []chatwork.Message, mine chatwork.Message, names map[string]string, instructions ai.Instructions) ai.ReplyInput {
+	tail := later
+	if len(tail) > replyPosts {
+		tail = append([]chatwork.Message{}, tail[len(tail)-replyPosts:]...)
+		if indexID(tail, mine.ID) < 0 {
+			tail[0] = mine
+		}
+	}
+	var msgs []chatwork.Message
+	if originMsg != nil {
+		msgs = append(msgs, *originMsg)
+	}
+	msgs = append(msgs, tail...)
+	in := ai.ReplyInput{Me: ai.SlackPerson{ID: conn.AccountID, Name: conn.AccountName}, Location: loc, Task: task, Instructions: instructions}
+	for _, m := range msgs {
+		in.Posts = append(in.Posts, toPost(m, false, conn.AccountID, names))
+	}
+	return in
 }
 
 // touch records that the item was checked at the start of the pass. Nothing

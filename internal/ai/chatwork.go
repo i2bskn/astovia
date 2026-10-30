@@ -31,5 +31,5 @@ func (c *Client) JudgeChatworkReply(ctx context.Context, cred Credential, model 
 	if err != nil {
 		return ReplyResult{}, err
 	}
-	return c.judgeReply(ctx, cred, model, ChatworkReplySystemPrompt, user)
+	return c.judgeReply(ctx, cred, model, ChatworkReplySystemPrompt, user, in.Instructions)
 }

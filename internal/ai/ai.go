@@ -298,7 +298,7 @@ func (c *Client) JudgeMention(ctx context.Context, cred Credential, model string
 	if err != nil {
 		return MentionResult{}, err
 	}
-	text, err := c.structured(ctx, cred, model, SystemPrompt, user, judgmentSchemaName, outputSchema)
+	text, err := c.structured(ctx, cred, model, withInstructions(SystemPrompt, detectInstructions, in.Instructions), user, judgmentSchemaName, outputSchema)
 	if err != nil {
 		return MentionResult{}, err
 	}

@@ -150,8 +150,10 @@ type run struct {
 	// count the AI calls. aiFallbackOnly is set after the AI failed in a way
 	// that stops it for the user; aiStale when the settings were replaced
 	// during the synchronization; aiStopped when they were deleted or the
-	// key cannot be opened.
+	// key cannot be opened. instructions are the user's AI instructions,
+	// read with the settings at the start of the steps.
 	ai             *store.AISettings
+	instructions   map[string]string
 	detectCalls    int
 	trackCalls     int
 	aiFallbackOnly bool
@@ -255,6 +257,9 @@ func (r *run) steps() error {
 		return err
 	case a.Status != store.AIActive:
 		return nil
+	}
+	if r.instructions, err = r.s.Store.AIInstructions(r.parent, r.conn.UserID); err != nil {
+		return err
 	}
 	r.ai = &a
 	if due(r.state.LastTrackedAt, r.start.Unix(), trackInterval) {
@@ -626,8 +631,11 @@ var allowedSubtypes = map[string]bool{"": true, "thread_broadcast": true, "file_
 
 // eligible reports whether m may be detected: not by the user, not by a
 // bot and not a system message. Missing fields do not exclude it.
-func (r *run) eligible(m slack.Message) bool {
-	return m.User != r.conn.SlackUserID && !(m.HasBotID && m.BotID != "") && !(m.HasSubtype && !allowedSubtypes[m.Subtype])
+func (r *run) eligible(m slack.Message) bool { return eligible(m, r.conn.SlackUserID) }
+
+// eligible reports whether m may be detected for the user me.
+func eligible(m slack.Message, me string) bool {
+	return m.User != me && !(m.HasBotID && m.BotID != "") && !(m.HasSubtype && !allowedSubtypes[m.Subtype])
 }
 
 // slackURL returns v when it is an https URL on a slack.com host, for refs

@@ -241,7 +241,14 @@ func (r *run) detectRoom(room chatwork.Room) (bool, error) {
 // eligible reports whether a message may be detected: in the window, not by
 // the user, not written by Chatwork, and not a task left to the task import.
 func (r *run) eligible(m chatwork.Message) bool {
-	return r.inWindow(m) && m.AccountID != r.conn.AccountID && !system(m.Body) && !(r.conn.ImportTasks == 1 && hasTask(m.Body))
+	return r.inWindow(m) && detectable(m, r.conn)
+}
+
+// detectable reports whether a message may be detected for the connection,
+// wherever it is: not by the user, not written by Chatwork, and not a task
+// left to the task import.
+func detectable(m chatwork.Message, conn store.ChatworkConnection) bool {
+	return m.AccountID != conn.AccountID && !system(m.Body) && !(conn.ImportTasks == 1 && hasTask(m.Body))
 }
 
 // exists reports whether the user has an item with the key.
@@ -258,10 +265,7 @@ func (r *run) exists(key string) (bool, error) {
 // mentions judges the messages of a room addressed to the user, newest
 // first, each with the messages around it.
 func (r *run) mentions(room chatwork.Room, c *roomCache) error {
-	convType := ai.SlackChannel
-	if room.Type == roomDirect {
-		convType = ai.SlackDM
-	}
+	convType := mentionConversation(room.Type)
 	names := r.names(c)
 	for i := len(c.messages) - 1; i >= 0; i-- {
 		m := c.messages[i]
@@ -276,7 +280,7 @@ func (r *run) mentions(room chatwork.Room, c *roomCache) error {
 		if found {
 			continue
 		}
-		u := &unit{key: key, convType: convType, room: room, title: "Chatwork: TO", posts: c.messages[max(0, i-ai.PostsBefore):min(len(c.messages), i+1+ai.PostsAfter)],
+		u := &unit{key: key, convType: convType, room: room, title: "Chatwork: TO", posts: contextPosts(c.messages, i, i),
 			targets: map[string]bool{m.ID: true}, last: m, names: names}
 		if _, err = r.judge(u); err != nil {
 			return err
@@ -343,7 +347,7 @@ func (r *run) directRuns(room chatwork.Room, c *roomCache) error {
 			continue
 		}
 		i, j := indexID(c.messages, run[0].ID), indexID(c.messages, last.ID)
-		u := &unit{key: key, convType: ai.SlackDM, room: room, title: "Chatwork: ダイレクトチャット", posts: c.messages[max(0, i-ai.PostsBefore):min(len(c.messages), j+1+ai.PostsAfter)],
+		u := &unit{key: key, convType: ai.SlackDM, room: room, title: "Chatwork: ダイレクトチャット", posts: contextPosts(c.messages, i, j),
 			targets: map[string]bool{}, last: last, names: names}
 		for _, m := range run {
 			u.targets[m.ID] = true
@@ -425,13 +429,35 @@ func (r *run) postpone(u *unit) (bool, error) {
 	return false, nil
 }
 
+// mentionConversation is the conversation type of the mentions of a room
+// of the type: a direct chat or a group chat (handled like a channel).
+func mentionConversation(roomType string) string {
+	if roomType == roomDirect {
+		return ai.SlackDM
+	}
+	return ai.SlackChannel
+}
+
+// contextPosts returns the posts sent with a judgment of the messages
+// list[i] to list[j]: them and up to ai.PostsBefore messages before and
+// ai.PostsAfter after.
+func contextPosts(list []chatwork.Message, i, j int) []chatwork.Message {
+	return list[max(0, i-ai.PostsBefore):min(len(list), j+1+ai.PostsAfter)]
+}
+
 // post converts a message for the AI.
 func (r *run) post(m chatwork.Message, target bool, names map[string]string) ai.SlackPost {
+	return toPost(m, target, r.conn.AccountID, names)
+}
+
+// toPost converts a message for the AI. me is the user's account ID and
+// names the names known in the room.
+func toPost(m chatwork.Message, target bool, me string, names map[string]string) ai.SlackPost {
 	name := cleanText(m.AccountName)
 	if name == "" {
 		name = "unknown"
 	}
-	return ai.SlackPost{ID: m.ID, Author: name, AuthorID: m.AccountID, IsMe: m.AccountID == r.conn.AccountID, At: time.Unix(m.SendTime, 0), Target: target, Body: formatText(m.Body, names)}
+	return ai.SlackPost{ID: m.ID, Author: name, AuthorID: m.AccountID, IsMe: m.AccountID == me, At: time.Unix(m.SendTime, 0), Target: target, Body: formatText(m.Body, names)}
 }
 
 // input builds the AI input of a unit.
@@ -440,30 +466,48 @@ func (r *run) input(u *unit) (ai.SlackInput, error) {
 	if err != nil {
 		return ai.SlackInput{}, err
 	}
-	in := ai.SlackInput{Me: ai.SlackPerson{ID: r.conn.AccountID, Name: r.conn.AccountName}, Location: loc, Workspace: r.conn.OrganizationName, ConversationType: u.convType,
-		ChannelName: cleanText(u.room.Name), RelatedTasks: []ai.RelatedTask{}}
-	for _, m := range u.posts {
-		in.Posts = append(in.Posts, r.post(m, u.targets[m.ID], u.names))
-	}
-	tasks, err := r.s.Store.RelatedTasks(r.parent, r.conn.UserID, r.relatedScope(u))
+	tasks, err := r.s.Store.RelatedTasks(r.parent, r.conn.UserID, relatedScope(r.conn.AccountID, u.key.Room, r.s.Now()))
 	if err != nil {
 		return ai.SlackInput{}, err
 	}
-	u.related = map[string]store.RelatedTask{}
-	for i, t := range tasks {
-		id := "t" + strconv.Itoa(i+1)
-		u.related[id] = t
-		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: id, Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
-	}
+	instructions := ai.Instructions{Common: r.instructions[store.InstructionCommon], Process: r.instructions[store.InstructionChatworkDetect]}
+	in := detectInput(r.conn, loc, u.convType, u.room, u.posts, u.targets, u.names, tasks, instructions)
+	u.related = relatedSymbols(tasks)
 	return in, nil
 }
 
-// relatedScope selects the related tasks of a unit's room: the mentions and
-// direct chat runs of the room and the groups made for it, from the last
-// groupWindow (rooms have no threads to narrow them).
-func (r *run) relatedScope(u *unit) store.RelatedScope {
-	now := r.s.Now()
-	account, room := r.conn.AccountID, u.key.Room
+// detectInput builds the AI input of a judgment of the target messages (by
+// ID) of posts, the context in message order, in a room of the connection.
+// names are the names known in the room. The related tasks are given to the
+// AI as t1, t2, ... (see relatedSymbols).
+func detectInput(conn store.ChatworkConnection, loc *time.Location, convType string, room chatwork.Room, posts []chatwork.Message, targets map[string]bool, names map[string]string, related []store.RelatedTask, instructions ai.Instructions) ai.SlackInput {
+	in := ai.SlackInput{Me: ai.SlackPerson{ID: conn.AccountID, Name: conn.AccountName}, Location: loc, Workspace: conn.OrganizationName, ConversationType: convType,
+		ChannelName: cleanText(room.Name), RelatedTasks: []ai.RelatedTask{}, Instructions: instructions}
+	for _, m := range posts {
+		in.Posts = append(in.Posts, toPost(m, targets[m.ID], conn.AccountID, names))
+	}
+	for i, t := range related {
+		in.RelatedTasks = append(in.RelatedTasks, ai.RelatedTask{ID: relatedSymbol(i), Task: t.Content, Subtasks: t.Subtasks, Closed: t.Closed})
+	}
+	return in
+}
+
+// relatedSymbol is the symbol given to the AI for the i-th related task.
+func relatedSymbol(i int) string { return "t" + strconv.Itoa(i+1) }
+
+// relatedSymbols maps the symbols given to the AI to the related tasks.
+func relatedSymbols(tasks []store.RelatedTask) map[string]store.RelatedTask {
+	out := map[string]store.RelatedTask{}
+	for i, t := range tasks {
+		out[relatedSymbol(i)] = t
+	}
+	return out
+}
+
+// relatedScope selects the related tasks of a room of the account: the
+// mentions and direct chat runs of the room and the groups made for it, from
+// the last groupWindow (rooms have no threads to narrow them).
+func relatedScope(account, room string, now time.Time) store.RelatedScope {
 	group := roomPrefix(account, kindGroup, room)
 	return store.RelatedScope{
 		Source:        store.SourceChatwork,

@@ -35,5 +35,5 @@ func (c *Client) JudgeMailReply(ctx context.Context, cred Credential, model stri
 	if err != nil {
 		return ReplyResult{}, err
 	}
-	return c.judgeReply(ctx, cred, model, MailReplySystemPrompt, user)
+	return c.judgeReply(ctx, cred, model, MailReplySystemPrompt, user, in.Instructions)
 }

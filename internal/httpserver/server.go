@@ -68,6 +68,9 @@ type Server struct {
 	tokens *aicred.Tokens
 	// pushTestLimiter limits test notifications per user.
 	pushTestLimiter *loginLimiter
+	// aiTryLimiter limits the tries of AI instructions per user; the reads
+	// of the integrations are limited by their own limiters as well.
+	aiTryLimiter *loginLimiter
 	// chatworkMCPLimiter limits the Chatwork API calls made by the MCP
 	// tools per user, leaving most of Chatwork's limit (shared with the
 	// synchronization) to the synchronization.
@@ -162,7 +165,7 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
-		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute),
+		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute), aiTryLimiter: newKeyLimiter(5, time.Minute),
 		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute), slackSearchLimiter: newKeyLimiter(5, time.Minute), slackConversationsLimiter: newKeyLimiter(10, time.Minute),
 		slackHistoryLimiter: newKeyLimiter(4, time.Minute), slackUsersLimiter: newKeyLimiter(30, time.Minute),
 		gmailMCPLimiter: newKeyLimiter(gmailMCPUnits, time.Minute), gmailTokens: &gmailTokenCache{}}
@@ -259,6 +262,12 @@ func (s *Server) handler() http.Handler {
 		http.MethodPut:    s.requireUser(requireJSON(http.HandlerFunc(s.handlePutAI))),
 		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteAI)),
 	}))
+	mux.Handle("/api/v1/ai/instructions", allowMethods(map[string]http.Handler{
+		http.MethodGet: s.requireUser(http.HandlerFunc(s.handleGetAIInstructions)),
+		http.MethodPut: s.requireUser(requireJSON(http.HandlerFunc(s.handlePutAIInstructions))),
+	}))
+	mux.Handle("/api/v1/ai/instructions/samples", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleAIInstructionSamples))))
+	mux.Handle("/api/v1/ai/instructions/try", allow(http.MethodPost, s.requireUser(requireJSON(http.HandlerFunc(s.handleTryAIInstructions)))))
 	mux.Handle("/api/v1/ai/openai/authorize", allow(http.MethodPost, s.requireUser(requireJSON(http.HandlerFunc(s.handleAuthorizeOpenAI)))))
 	mux.Handle("/api/v1/ai/openai/complete", allow(http.MethodPost, s.requireUser(requireJSON(http.HandlerFunc(s.handleCompleteOpenAI)))))
 	mux.Handle("/api/v1/ai/openai/models", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleOpenAIModels))))
