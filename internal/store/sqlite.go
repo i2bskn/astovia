@@ -247,6 +247,10 @@ func (q sqliteQueries) listTrackedActionItems(ctx context.Context, userID, sourc
 func (q sqliteQueries) listStaleActionItems(ctx context.Context, userID string, createdBefore int64, limit int) ([]ActionItem, error) {
 	return q.actionItems(q.q.ListStaleActionItems(ctx, db.ListStaleActionItemsParams{UserID: userID, CreatedBefore: createdBefore, PageSize: int64(limit)}))
 }
+
+func (q sqliteQueries) listDueActionItems(ctx context.Context, userID string, dueBefore int64, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListDueActionItems(ctx, db.ListDueActionItemsParams{UserID: userID, DueBefore: sql.NullInt64{Int64: dueBefore, Valid: true}, PageSize: int64(limit)}))
+}
 func (q sqliteQueries) countActionItemsByStatus(ctx context.Context, userID, status string) (int64, error) {
 	return q.q.CountActionItemsByStatus(ctx, db.CountActionItemsByStatusParams{UserID: userID, Status: status})
 }

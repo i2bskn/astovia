@@ -89,6 +89,10 @@ ORDER BY COALESCE(tracked_at, 0), id LIMIT sqlc.arg(page_size);
 SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
 WHERE user_id = sqlc.arg(user_id) AND status = 'open' AND created_at <= sqlc.arg(created_before)
 ORDER BY created_at, id LIMIT sqlc.arg(page_size);
+-- name: ListDueActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = sqlc.arg(user_id) AND status = 'open' AND kind = 'task' AND due_at IS NOT NULL AND due_at <= sqlc.arg(due_before)
+ORDER BY due_at, id LIMIT sqlc.arg(page_size);
 -- name: CountActionItemsByStatus :one
 SELECT COUNT(*) FROM action_items WHERE user_id = sqlc.arg(user_id) AND status = sqlc.arg(status);
 -- name: CountAutoActionItemsSince :one

@@ -2688,6 +2688,65 @@ func (q *Queries) ListConversationActionItems(ctx context.Context, arg ListConve
 	return items, nil
 }
 
+const listDueActionItems = `-- name: ListDueActionItems :many
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+WHERE user_id = ?1 AND status = 'open' AND kind = 'task' AND due_at IS NOT NULL AND due_at <= ?2
+ORDER BY due_at, id LIMIT ?3
+`
+
+type ListDueActionItemsParams struct {
+	UserID    string
+	DueBefore sql.NullInt64
+	PageSize  int64
+}
+
+func (q *Queries) ListDueActionItems(ctx context.Context, arg ListDueActionItemsParams) ([]ActionItem, error) {
+	rows, err := q.db.QueryContext(ctx, listDueActionItems, arg.UserID, arg.DueBefore, arg.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ActionItem
+	for rows.Next() {
+		var i ActionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Content,
+			&i.Status,
+			&i.Note,
+			&i.DueAt,
+			&i.Refs,
+			&i.Version,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Source,
+			&i.SourceKey,
+			&i.Tracking,
+			&i.AutoReason,
+			&i.AutoRef,
+			&i.AutoAt,
+			&i.DetectedAt,
+			&i.TrackedAt,
+			&i.Kind,
+			&i.EventTitle,
+			&i.EventStartAt,
+			&i.EventEndAt,
+			&i.ParentID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDueChatworkConnections = `-- name: ListDueChatworkConnections :many
 SELECT user_id, generation, token_sealed, token_last4, account_id, account_name, organization_name, immediate_notify, detect_mentions, detect_dms, import_tasks, status, last_error, failure_count, connected_at, next_poll_at, last_synced_at, last_tracked_at, last_tasks_at, created_at, updated_at FROM chatwork_connections
 WHERE status = 'active' AND next_poll_at <= ?1 AND user_id IN (SELECT id FROM users WHERE disabled = 0)

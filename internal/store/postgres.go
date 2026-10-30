@@ -249,6 +249,10 @@ func (q postgresQueries) listTrackedActionItems(ctx context.Context, userID, sou
 func (q postgresQueries) listStaleActionItems(ctx context.Context, userID string, createdBefore int64, limit int) ([]ActionItem, error) {
 	return q.actionItems(q.q.ListStaleActionItems(ctx, db.ListStaleActionItemsParams{UserID: userID, CreatedBefore: createdBefore, PageSize: int32(limit)}))
 }
+
+func (q postgresQueries) listDueActionItems(ctx context.Context, userID string, dueBefore int64, limit int) ([]ActionItem, error) {
+	return q.actionItems(q.q.ListDueActionItems(ctx, db.ListDueActionItemsParams{UserID: userID, DueBefore: sql.NullInt64{Int64: dueBefore, Valid: true}, PageSize: int32(limit)}))
+}
 func (q postgresQueries) countActionItemsByStatus(ctx context.Context, userID, status string) (int64, error) {
 	return q.q.CountActionItemsByStatus(ctx, db.CountActionItemsByStatusParams{UserID: userID, Status: status})
 }

@@ -44,6 +44,8 @@ func tag(n store.Notification) string {
 	switch n.Kind {
 	case store.NotificationDetected, store.NotificationStale:
 		return n.Kind + "-" + n.ActionItemID.String
+	case store.NotificationDueSoon, store.NotificationOverdue:
+		return "due-" + n.ActionItemID.String
 	}
 	return n.Kind
 }

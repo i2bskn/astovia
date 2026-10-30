@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -124,6 +125,131 @@ func TestEngineStale(t *testing.T) {
 			t.Fatalf("one-day period: %v", got)
 		}
 	})
+}
+
+// dueItem creates an item with a kind and an optional deadline.
+func (f *fixture) dueItem(user, id, status, kind string, created int64, due sql.NullInt64) store.ActionItem {
+	f.t.Helper()
+	item := store.ActionItem{ID: id, UserID: user + "-id", Content: "content " + id, Status: status, DueAt: due, Refs: "[]", Version: 1, CreatedAt: created, UpdatedAt: created, Kind: kind}
+	if kind == store.KindEvent {
+		item.EventTitle = sql.NullString{String: "meeting " + id, Valid: true}
+		item.EventStartAt = sql.NullInt64{Int64: f.now.Unix() + 3600, Valid: true}
+	}
+	if err := f.s.CreateActionItem(context.Background(), item); err != nil {
+		f.t.Fatal(err)
+	}
+	return item
+}
+
+func TestEngineDue(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		f := newFixture(t, driver, "alice", "bob")
+		e := &Engine{Store: f.s, Now: f.clock}
+		ctx := context.Background()
+		f.subscribe("alice", "a1", "https://push.example/a1")
+		// 00:30 UTC is 09:30 in Tokyo, outside the digest hour.
+		if err := f.s.SaveNotificationSettings(ctx, store.NotificationSettings{UserID: "alice-id", Timezone: "Asia/Tokyo", DigestHour: 20, StaleDays: 1, CandidateExpireDays: 3, UpdatedAt: 1}); err != nil {
+			t.Fatal(err)
+		}
+		day, hour := int64(86400), int64(3600)
+		t0 := f.now.Unix()
+		at := func(v int64) sql.NullInt64 { return sql.NullInt64{Int64: v, Valid: true} }
+		due := map[string]int64{"soon": t0 + 23*hour, "fresh": t0 + 23*hour, "far": t0 + 25*hour, "past": t0 - hour, "late": t0 - 2*day - hour, "imported": t0 - 3*day}
+		f.dueItem("alice", "soon", "open", store.KindTask, t0-3*day, at(due["soon"]))
+		f.dueItem("alice", "fresh", "open", store.KindTask, t0-1800, at(due["fresh"]))
+		f.dueItem("alice", "far", "open", store.KindTask, t0-3*day, at(due["far"]))
+		f.dueItem("alice", "past", "open", store.KindTask, t0-7*day, at(due["past"]))
+		f.dueItem("alice", "late", "open", store.KindTask, t0-7*day, at(due["late"]))
+		f.dueItem("alice", "imported", "open", store.KindTask, t0-hour, at(due["imported"]))
+		f.dueItem("alice", "event", "open", store.KindEvent, t0-3*day, at(t0-hour))
+		f.dueItem("alice", "donepast", "done", store.KindTask, t0-3*day, at(t0-hour))
+		f.dueItem("alice", "nodue", "open", store.KindTask, t0-3*day, sql.NullInt64{})
+		f.dueItem("bob", "bobs", "open", store.KindTask, t0-3*day, at(t0-hour)) // bob has no subscription
+		key := func(kind, id string, k ...int64) string {
+			s := fmt.Sprintf("%s:%s:%d", kind, id, due[id])
+			for _, v := range k {
+				s += fmt.Sprintf(":%d", v)
+			}
+			return s
+		}
+		check := func(want map[string]string) map[string]store.Notification {
+			t.Helper()
+			got := map[string]store.Notification{}
+			for _, n := range f.pending() {
+				got[n.DedupeKey] = n
+			}
+			if len(got) != len(want) {
+				t.Fatalf("notifications: %v", got)
+			}
+			for k, title := range want {
+				n, ok := got[k]
+				if !ok {
+					t.Fatalf("missing %s: %v", k, got)
+				}
+				id := n.ActionItemID.String
+				if title != "" && n.Title != title || n.Body != "content "+id || n.URL != "/tasks/"+id || !strings.Contains(k, ":"+id+":") || !strings.HasPrefix(k, n.Kind+":") {
+					t.Fatalf("%s: %+v", k, n)
+				}
+			}
+			return got
+		}
+		e.RunOnce(ctx)
+		e.RunOnce(ctx)
+		want := map[string]string{
+			key("due_soon", "soon"):   "期限が近づいています（10/25 08:30）",
+			"stale:far:3":             "",
+			key("overdue", "past", 0): "期限を過ぎました（10/24 08:30）",
+			key("overdue", "late", 2): "期限を2日過ぎています",
+			"stale:event:3":           "",
+			"stale:nodue:3":           "",
+		}
+		check(want)
+
+		f.now = f.now.Add(24 * time.Hour)
+		e.RunOnce(ctx)
+		want[key("overdue", "past", 1)] = "期限を1日過ぎています"
+		want[key("overdue", "late", 3)] = "期限を3日過ぎています"
+		want[key("overdue", "soon", 0)] = "期限を過ぎました（10/25 08:30）"
+		want[key("overdue", "fresh", 0)] = "期限を過ぎました（10/25 08:30）"
+		want[key("overdue", "imported", 1)] = "期限を4日過ぎています"
+		want[key("due_soon", "far")] = "期限が近づいています（10/25 10:30）"
+		want["stale:nodue:4"] = ""
+		want["stale:event:4"] = ""
+		check(want)
+
+		// A changed deadline notifies again with the new deadline.
+		t1 := f.now.Unix()
+		if _, err := f.s.UpdateActionItem(ctx, "alice-id", "past", func(item *store.ActionItem) error {
+			item.DueAt = at(t1 - 1800)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		e.RunOnce(ctx)
+		changed := fmt.Sprintf("overdue:past:%d:0", t1-1800)
+		found := false
+		for _, n := range f.pending() {
+			if n.DedupeKey == changed {
+				found = n.Kind == store.NotificationOverdue && n.ActionItemID.String == "past"
+			}
+		}
+		if !found {
+			t.Fatalf("changed deadline: %v", f.pending())
+		}
+	})
+}
+
+func TestTag(t *testing.T) {
+	id := sql.NullString{String: "i1", Valid: true}
+	for kind, want := range map[string]string{store.NotificationDueSoon: "due-i1", store.NotificationOverdue: "due-i1", store.NotificationDetected: "detected-i1", store.NotificationStale: "stale-i1", store.NotificationDigest: "digest"} {
+		n := store.Notification{Kind: kind}
+		if kind != store.NotificationDigest {
+			n.ActionItemID = id
+		}
+		if got := tag(n); got != want {
+			t.Fatalf("%s tag %q", kind, got)
+		}
+	}
 }
 
 func TestEngineDigest(t *testing.T) {
@@ -516,7 +642,7 @@ func TestWebPushPayload(t *testing.T) {
 	if err = json.Unmarshal(b, &p); err != nil || len([]rune(p.Title)) != 80 || len([]rune(p.Body)) != 200 {
 		t.Fatalf("payload: %+v %v", p, err)
 	}
-	for kind, want := range map[string]int{store.NotificationDetected: 3600, store.NotificationTest: 3600, store.NotificationStale: 21600, store.NotificationDigest: 43200} {
+	for kind, want := range map[string]int{store.NotificationDetected: 3600, store.NotificationTest: 3600, store.NotificationStale: 21600, store.NotificationDueSoon: 21600, store.NotificationOverdue: 21600, store.NotificationDigest: 43200} {
 		if ttl(kind) != want {
 			t.Fatalf("%s TTL %d", kind, ttl(kind))
 		}

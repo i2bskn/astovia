@@ -157,6 +157,7 @@ type queries interface {
 	listAutoActionItems(ctx context.Context, userID, status string, after AutoActionItemCursor, limit int) ([]ActionItem, error)
 	listTrackedActionItems(ctx context.Context, userID, source string, limit int) ([]ActionItem, error)
 	listStaleActionItems(ctx context.Context, userID string, createdBefore int64, limit int) ([]ActionItem, error)
+	listDueActionItems(ctx context.Context, userID string, dueBefore int64, limit int) ([]ActionItem, error)
 	countActionItemsByStatus(ctx context.Context, userID, status string) (int64, error)
 	countAutoActionItemsSince(ctx context.Context, userID string, since int64) (int64, error)
 	touchActionItemTracked(ctx context.Context, userID, id string, version, now int64) (int64, error)

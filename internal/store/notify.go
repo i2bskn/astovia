@@ -19,6 +19,8 @@ const MaxPushSubscriptions = 20
 const (
 	NotificationDetected = "detected"
 	NotificationStale    = "stale"
+	NotificationDueSoon  = "due_soon"
+	NotificationOverdue  = "overdue"
 	NotificationDigest   = "digest"
 	NotificationTest     = "test"
 )
@@ -264,6 +266,12 @@ func (s *Store) DeleteSentNotifications(ctx context.Context, before int64) error
 // or before createdBefore, oldest first.
 func (s *Store) StaleActionItems(ctx context.Context, userID string, createdBefore int64, limit int) ([]ActionItem, error) {
 	return s.q.listStaleActionItems(ctx, userID, createdBefore, limit)
+}
+
+// DueActionItems returns up to limit of the user's open tasks whose due
+// time is at or before dueBefore, earliest due first.
+func (s *Store) DueActionItems(ctx context.Context, userID string, dueBefore int64, limit int) ([]ActionItem, error) {
+	return s.q.listDueActionItems(ctx, userID, dueBefore, limit)
 }
 
 // CountActionItems returns the number of the user's items with the status.

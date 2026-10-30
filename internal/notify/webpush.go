@@ -94,7 +94,7 @@ type pushPayload struct {
 // ttl returns how long the push service keeps an undelivered message.
 func ttl(kind string) int {
 	switch kind {
-	case store.NotificationStale:
+	case store.NotificationStale, store.NotificationDueSoon, store.NotificationOverdue:
 		return 21600
 	case store.NotificationDigest:
 		return 43200
