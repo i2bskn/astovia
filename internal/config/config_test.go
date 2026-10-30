@@ -212,3 +212,33 @@ func TestAccessClient(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestAIAllowPrivateEndpoints(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "http://localhost:8080")
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", false},
+		{"true", true},
+		{"TRUE", true},
+		{"1", true},
+		{"false", false},
+		{"False", false},
+		{"0", false},
+	} {
+		t.Setenv("ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS", tc.value)
+		c, e := Load(false)
+		if e != nil || c.AIAllowPrivateEndpoints != tc.want {
+			t.Fatalf("%q: got %v, %v", tc.value, c.AIAllowPrivateEndpoints, e)
+		}
+	}
+	for _, v := range []string{"yes", "on", "2", "truthy"} {
+		t.Setenv("ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS", v)
+		if _, e := Load(false); e == nil || !strings.Contains(e.Error(), "ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS") {
+			t.Fatalf("%q: %v", v, e)
+		}
+	}
+}

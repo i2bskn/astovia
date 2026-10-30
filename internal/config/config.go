@@ -23,6 +23,9 @@ type Config struct {
 	// users in to the web UI instead of passwords, or nil when the
 	// ASTOVIA_ACCESS_* variables are not set (password sign-in).
 	Access *AccessClient
+	// AIAllowPrivateEndpoints lets OpenAI-compatible AI endpoints use http
+	// and non-public addresses (ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS).
+	AIAllowPrivateEndpoints bool
 }
 
 // AccessClient identifies the Cloudflare Access SaaS application (OIDC)
@@ -80,6 +83,9 @@ func Load(requireSecret bool) (Config, error) {
 		return c, err
 	}
 	if c.Access, err = accessClient(c.PublicURL); err != nil {
+		return c, err
+	}
+	if c.AIAllowPrivateEndpoints, err = boolEnv("ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS"); err != nil {
 		return c, err
 	}
 	if requireSecret {
@@ -184,6 +190,18 @@ func validAccessSecret(v string) bool {
 		}
 	}
 	return true
+}
+
+// boolEnv reads a boolean variable: true or 1 is true, and unset, empty,
+// false or 0 is false, in any case. Any other value is an error.
+func boolEnv(k string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(k))) {
+	case "true", "1":
+		return true, nil
+	case "", "false", "0":
+		return false, nil
+	}
+	return false, errors.New(k + " must be true or false")
 }
 
 func env(k, d string) string {

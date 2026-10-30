@@ -351,6 +351,63 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+func TestEndpoint(t *testing.T) {
+	box := secretbox.New([]byte(strings.Repeat("s", 32)))
+	compatible, err := aicred.SealEndpoint(box, "u", aicred.Endpoint{BaseURL: "https://example.com/v1", APIKey: "ep-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := aicred.OpenEndpoint(box, store.AISettings{UserID: "u", Provider: ai.ProviderOpenAICompatible, APIKeySealed: compatible})
+	if err != nil || e != (aicred.Endpoint{V: 1, BaseURL: "https://example.com/v1", APIKey: "ep-key"}) {
+		t.Fatalf("round trip: %+v %v", e, err)
+	}
+	cred, err := aicred.Open(box, nil, store.AISettings{UserID: "u", Provider: ai.ProviderOpenAICompatible, APIKeySealed: compatible})
+	if err != nil || cred.Provider != ai.ProviderOpenAICompatible || cred.Key != "ep-key" || cred.BaseURL != "https://example.com/v1" || cred.Token != nil {
+		t.Fatalf("compatible: %+v %v", cred, err)
+	}
+	noKey, err := aicred.SealEndpoint(box, "u", aicred.Endpoint{BaseURL: "http://ollama:11434/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err = aicred.Open(box, nil, store.AISettings{UserID: "u", Provider: ai.ProviderOpenAICompatible, APIKeySealed: noKey})
+	if err != nil || cred.Provider != ai.ProviderOpenAICompatible || cred.Key != "" || cred.BaseURL != "http://ollama:11434/v1" || cred.Token != nil {
+		t.Fatalf("compatible without key: %+v %v", cred, err)
+	}
+	apiKey, err := aicred.SealEndpoint(box, "u", aicred.Endpoint{APIKey: "sk-openai-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err = aicred.Open(box, nil, store.AISettings{UserID: "u", Provider: ai.ProviderOpenAIAPI, APIKeySealed: apiKey})
+	if err != nil || cred.Provider != ai.ProviderOpenAIAPI || cred.Key != "sk-openai-key" || cred.BaseURL != "" || cred.Token != nil {
+		t.Fatalf("openai api: %+v %v", cred, err)
+	}
+	anthropic, err := box.Seal(ai.KeyPurpose("u"), "sk-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	badVersion, err := box.Seal(aicred.EndpointPurpose("u"), `{"v":2,"base_url":"https://example.com","api_key":"k"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, a := range map[string]store.AISettings{
+		"anthropic key as endpoint":   {UserID: "u", Provider: ai.ProviderOpenAICompatible, APIKeySealed: anthropic},
+		"anthropic key as openai api": {UserID: "u", Provider: ai.ProviderOpenAIAPI, APIKeySealed: anthropic},
+		"endpoint as anthropic":       {UserID: "u", Provider: ai.ProviderAnthropic, APIKeySealed: compatible},
+		"endpoint as chatgpt":         {UserID: "u", Provider: ai.ProviderOpenAI, APIKeySealed: compatible},
+		"other user":                  {UserID: "v", Provider: ai.ProviderOpenAICompatible, APIKeySealed: compatible},
+		"version":                     {UserID: "u", Provider: ai.ProviderOpenAICompatible, APIKeySealed: badVersion},
+		"compatible without url":      {UserID: "u", Provider: ai.ProviderOpenAICompatible, APIKeySealed: apiKey},
+		"openai api without key":      {UserID: "u", Provider: ai.ProviderOpenAIAPI, APIKeySealed: noKey},
+	} {
+		if _, err := aicred.Open(box, nil, a); !errors.Is(err, aicred.ErrUndecryptable) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if _, err := aicred.OpenEndpoint(box, store.AISettings{UserID: "u", Provider: ai.ProviderAnthropic, APIKeySealed: compatible}); !errors.Is(err, aicred.ErrUndecryptable) {
+		t.Fatalf("anthropic provider: %v", err)
+	}
+}
+
 func TestCoolingDown(t *testing.T) {
 	limit := sql.NullString{String: aicred.UsageLimit, Valid: true}
 	at := testNow.Unix()

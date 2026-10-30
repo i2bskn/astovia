@@ -71,6 +71,9 @@ type Server struct {
 	// aiTryLimiter limits the tries of AI instructions per user; the reads
 	// of the integrations are limited by their own limiters as well.
 	aiTryLimiter *loginLimiter
+	// aiEndpointLimiter limits the checks of an OpenAI API key or an
+	// OpenAI-compatible endpoint made when saving the AI settings, per user.
+	aiEndpointLimiter *loginLimiter
 	// chatworkMCPLimiter limits the Chatwork API calls made by the MCP
 	// tools per user, leaving most of Chatwork's limit (shared with the
 	// synchronization) to the synchronization.
@@ -161,11 +164,16 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 	if c.Access != nil {
 		oidc = access.New(access.ClientConfig{Issuer: c.Access.Issuer, ClientID: c.Access.ClientID, ClientSecret: c.Access.Secret, RedirectURI: c.Access.RedirectURI})
 	}
+	aiClient := ai.New()
+	if c.AIAllowPrivateEndpoints {
+		aiClient.AllowPrivateEndpoints = true
+		aiClient.Endpoints = ai.NewEndpointClient(true)
+	}
 	return &Server{cfg: c, auth: a, assets: assets, accessOIDC: oidc, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
-		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: ai.New(), box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute), aiTryLimiter: newKeyLimiter(5, time.Minute),
+		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: aiClient, box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute), aiTryLimiter: newKeyLimiter(5, time.Minute), aiEndpointLimiter: newKeyLimiter(10, time.Minute),
 		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute), slackSearchLimiter: newKeyLimiter(5, time.Minute), slackConversationsLimiter: newKeyLimiter(10, time.Minute),
 		slackHistoryLimiter: newKeyLimiter(4, time.Minute), slackUsersLimiter: newKeyLimiter(30, time.Minute),
 		gmailMCPLimiter: newKeyLimiter(gmailMCPUnits, time.Minute), gmailTokens: &gmailTokenCache{}}

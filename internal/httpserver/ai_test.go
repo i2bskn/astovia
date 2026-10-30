@@ -127,7 +127,7 @@ func testAIAPI(t *testing.T, driver string) {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 	body, keys := jsonKeys(t, w.Body.Bytes())
-	if !reflect.DeepEqual(keys, []string{"account", "configured", "key_last4", "last_error", "model", "provider", "status", "updated_at"}) || string(body["last_error"]) != "null" || string(body["account"]) != "null" {
+	if !reflect.DeepEqual(keys, []string{"account", "api_key_set", "base_url", "configured", "key_last4", "last_error", "model", "provider", "status", "updated_at"}) || string(body["last_error"]) != "null" || string(body["account"]) != "null" || string(body["base_url"]) != "null" || string(body["api_key_set"]) != "true" {
 		t.Fatalf("keys: %v %s", keys, w.Body.String())
 	}
 	var got aiResponse

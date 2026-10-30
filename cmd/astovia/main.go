@@ -118,6 +118,10 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 	now := func() time.Time { return a.Now() }
 	box := secretbox.New(c.Secret)
 	aiClient := ai.New()
+	if c.AIAllowPrivateEndpoints {
+		aiClient.AllowPrivateEndpoints = true
+		aiClient.Endpoints = ai.NewEndpointClient(true)
+	}
 	syncer := &githubsync.Syncer{Store: s, GitHub: github.New(now), AI: aiClient, Box: box, Tokens: tokens, Now: now}
 	slackSyncer := &slacksync.Syncer{Store: s, Slack: slack.New(now), AI: aiClient, Box: box, Tokens: tokens, Now: now}
 	chatworkSyncer := &chatworksync.Syncer{Store: s, Chatwork: chatwork.New(now), AI: aiClient, Box: box, Tokens: tokens, Now: now}

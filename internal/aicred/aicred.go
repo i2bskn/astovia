@@ -75,6 +75,50 @@ func openSecret(box *secretbox.Box, a store.AISettings) (Secret, error) {
 	return s, nil
 }
 
+// EndpointPurpose is the secretbox purpose of a user's OpenAI API key or
+// OpenAI-compatible endpoint. It differs from ai.KeyPurpose and
+// SecretPurpose so that one cannot be taken for another.
+func EndpointPurpose(userID string) string { return "ai-endpoint:" + userID }
+
+// Endpoint is what the settings of an OpenAI API key or an
+// OpenAI-compatible endpoint keep sealed in api_key_sealed. BaseURL is
+// empty for the OpenAI API; APIKey may be empty for an endpoint.
+type Endpoint struct {
+	V       int    `json:"v"`
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+}
+
+// SealEndpoint seals e (with version 1) for the user's settings.
+func SealEndpoint(box *secretbox.Box, userID string, e Endpoint) (string, error) {
+	e.V = 1
+	data, err := json.Marshal(e)
+	if err != nil {
+		return "", err
+	}
+	return box.Seal(EndpointPurpose(userID), string(data))
+}
+
+// OpenEndpoint opens and checks the sealed endpoint of settings a of an
+// OpenAI API key or an OpenAI-compatible endpoint.
+func OpenEndpoint(box *secretbox.Box, a store.AISettings) (Endpoint, error) {
+	if box == nil || (a.Provider != ai.ProviderOpenAIAPI && a.Provider != ai.ProviderOpenAICompatible) {
+		return Endpoint{}, ErrUndecryptable
+	}
+	raw, err := box.Open(EndpointPurpose(a.UserID), a.APIKeySealed)
+	if err != nil {
+		return Endpoint{}, ErrUndecryptable
+	}
+	var e Endpoint
+	if json.Unmarshal([]byte(raw), &e) != nil || e.V != 1 {
+		return Endpoint{}, ErrUndecryptable
+	}
+	if (a.Provider == ai.ProviderOpenAICompatible && e.BaseURL == "") || (a.Provider == ai.ProviderOpenAIAPI && e.APIKey == "") {
+		return Endpoint{}, ErrUndecryptable
+	}
+	return e, nil
+}
+
 // Open returns the credential of the saved settings a. For OpenAI it only
 // opens and checks the secret; the token source refreshes the access
 // token when needed. A secret that cannot be opened, or an unknown
@@ -102,6 +146,16 @@ func Open(box *secretbox.Box, tokens *Tokens, a store.AISettings) (ai.Credential
 			}
 		} else {
 			cred.Token = tokens.source(a.UserID, a.Generation)
+		}
+		return cred, nil
+	case ai.ProviderOpenAIAPI, ai.ProviderOpenAICompatible:
+		e, err := OpenEndpoint(box, a)
+		if err != nil {
+			return ai.Credential{}, err
+		}
+		cred := ai.Credential{Provider: a.Provider, Key: e.APIKey}
+		if a.Provider == ai.ProviderOpenAICompatible {
+			cred.BaseURL = e.BaseURL
 		}
 		return cred, nil
 	}

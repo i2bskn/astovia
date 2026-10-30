@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import type { FormEvent } from 'react';
-import { ANTHROPIC_KEYS_URL, DEFAULT_AI_MODEL, MANAGE_USAGE_URL, aiErrorMessage, aiHasProblem, aiModels, aiStatusMessage, createAIClient, modelName, providerName } from './ai';
+import { ANTHROPIC_KEYS_URL, DEFAULT_AI_MODEL, MANAGE_USAGE_URL, aiErrorMessage, aiHasProblem, aiModels, aiStatusMessage, createAIClient, endpointKey, modelName, normalizeEndpointURL, providerName } from './ai';
 import type { AIProvider, AISettings as SavedAISettings, AIState, OpenAIModel } from './ai';
 import { APIError, request } from './auth';
 import Phrased from './Phrased';
 
 const client = createAIClient(request);
+
+// providerChoices are the providers offered when nothing is configured.
+const providerChoices: readonly { value: AIProvider; label: string }[] = [
+  { value: 'anthropic', label: 'Anthropic の API キー' },
+  { value: 'openai', label: 'ChatGPT のプラン' },
+  { value: 'openai_api', label: 'OpenAI の API キー' },
+  { value: 'openai_compatible', label: 'OpenAI 互換' },
+];
 
 function errorCode(failure: unknown): string | null {
   return failure instanceof APIError ? failure.code : null;
@@ -60,6 +68,92 @@ function KeyForm({ submitLabel, initialModel, busy, error, onSubmit, onCancel }:
       <button className="button primary add-button" type="submit" disabled={busy}>{busy ? '確認中…' : submitLabel}</button>
     </div>
   </form>;
+}
+
+type EndpointProvider = 'openai_api' | 'openai_compatible';
+
+// EndpointForm registers or changes an OpenAI API key or an
+// OpenAI-compatible endpoint. With saved settings, the fields start with the
+// saved URL and model; an empty key field keeps the saved key, except for
+// an endpoint whose URL changes (the key is entered again, or left empty
+// for none).
+function EndpointForm({ provider, saved, busy, error, onSubmit, onCancel }: {
+  provider: EndpointProvider;
+  saved?: SavedAISettings;
+  busy: boolean;
+  error: string | null;
+  onSubmit: (model: string, key: string | undefined, baseUrl: string | undefined) => void;
+  onCancel?: () => void;
+}) {
+  const compatible = provider === 'openai_compatible';
+  const [url, setURL] = useState(saved?.base_url ?? '');
+  const [key, setKey] = useState('');
+  const [model, setModel] = useState(saved?.model ?? '');
+  const [removeKey, setRemoveKey] = useState(false);
+  const [validation, setValidation] = useState<string | null>(null);
+  const urlID = useId();
+  const keyID = useId();
+  const removeID = useId();
+  const modelID = useId();
+  const errorID = useId();
+  const message = validation ?? error;
+
+  function submit(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+    if (busy) return;
+    const nextModel = model.trim();
+    if (compatible && !url.trim()) {
+      setValidation('URL を入力してください。');
+      return;
+    }
+    if (!compatible && !saved && !key.trim()) {
+      setValidation('API キーを入力してください。');
+      return;
+    }
+    if (!nextModel) {
+      setValidation('モデル名を入力してください。');
+      return;
+    }
+    setValidation(null);
+    const urlChanged = !saved || normalizeEndpointURL(url) !== normalizeEndpointURL(saved.base_url ?? '');
+    onSubmit(nextModel, endpointKey(provider, key, urlChanged, removeKey), compatible ? url.trim() : undefined);
+  }
+
+  const describedBy = message ? errorID : undefined;
+  return <form className="action-form" onSubmit={submit} aria-busy={busy}>
+    {compatible ? <div className="field">
+      <label htmlFor={urlID}>接続先の URL</label>
+      <input id={urlID} name="base_url" type="url" required autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={2048} placeholder="https://example.com/v1" value={url} onChange={(e) => { setURL(e.target.value); setValidation(null); }} disabled={busy} aria-describedby={describedBy} />
+    </div> : null}
+    {compatible && saved ? <p className="field-hint">URL を変えるときは API キーも入れ直してください。</p> : null}
+    <div className="field">
+      <label htmlFor={keyID}>{compatible ? 'API キー（任意）' : 'OpenAI の API キー'}</label>
+      <input id={keyID} name="api_key" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={512} required={!compatible && !saved} value={key} onChange={(e) => { setKey(e.target.value); setValidation(null); }} disabled={busy} aria-describedby={describedBy} />
+    </div>
+    {compatible ? <p className="field-hint">{saved?.api_key_set ? '不要な接続先では空のまま。URL を変えないときは、空のままなら登録済みのキーを使います。' : '不要な接続先では空のまま。'}</p> : null}
+    {!compatible && saved ? <p className="field-hint">空のままなら、登録済みのキーを使います。</p> : null}
+    {compatible && saved?.api_key_set ? <div className="toggle-field">
+      <input id={removeID} type="checkbox" checked={removeKey} disabled={busy} onChange={(e) => setRemoveKey(e.target.checked)} />
+      <label htmlFor={removeID}>API キーを削除する</label>
+    </div> : null}
+    <div className="field">
+      <label htmlFor={modelID}>モデル名</label>
+      <input id={modelID} name="model" type="text" required autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={256} placeholder={compatible ? '例: meta-llama/Llama-3.1-8B-Instruct' : '例: gpt-5-mini'} value={model} onChange={(e) => { setModel(e.target.value); setValidation(null); }} disabled={busy} aria-describedby={describedBy} />
+    </div>
+    {message ? <p id={errorID} className="notice error" role="alert">{message}</p> : null}
+    <div className="form-actions">
+      {onCancel ? <button className="button secondary" type="button" disabled={busy} onClick={onCancel}>やめる</button> : null}
+      <button className="button primary add-button" type="submit" disabled={busy}>{busy ? '確認中…' : '保存'}</button>
+    </div>
+  </form>;
+}
+
+// EndpointNotice tells what an OpenAI API key or an OpenAI-compatible
+// endpoint needs.
+function EndpointNotice({ provider }: { provider: EndpointProvider }) {
+  return <p className="field-hint"><Phrased text={provider === 'openai_api'
+    ? 'OpenAI の API キーとモデル名で判断します。費用は登録したキーの組織に請求されます。モデルは Chat Completions API と JSON スキーマの構造化出力に対応している必要があります。保存の前に、確認のための小さなリクエストを 1 回送ります（トークンを少し使います）。'
+    : 'OpenRouter、Ollama、vLLM、LM Studio など、OpenAI の Chat Completions API と同じ形式の接続先で判断します。JSON スキーマの構造化出力に対応している必要があります。保存の前に、確認のための小さなリクエストを 1 回送ります。1 回の判断は 20 秒までで、応答の遅いモデルでは判断できません。'} /></p>;
 }
 
 // ChatGPTConnect connects the user's ChatGPT plan. OpenAI sends the browser
@@ -242,13 +336,13 @@ export default function AISettings() {
   useEffect(() => { void load(); }, [load]);
 
   // save stores the settings; a conflict reloads them after the message.
-  async function save(nextModel: string, key: string | undefined, provider: AIProvider, onError: (message: string) => void): Promise<void> {
+  async function save(nextModel: string, key: string | undefined, provider: AIProvider, onError: (message: string) => void, baseUrl?: string): Promise<void> {
     setBusy(true);
     setFormError(null);
     setError(null);
     setNotice(null);
     try {
-      const next = await client.saveAI(nextModel, key, provider === 'openai' ? 'openai' : undefined);
+      const next = await client.saveAI(nextModel, key, provider === 'anthropic' ? undefined : provider, baseUrl);
       setState(next);
       if (next.configured && next.provider === 'anthropic') setModel(next.model);
       setReplacing(false);
@@ -293,17 +387,19 @@ export default function AISettings() {
 
   return <section className="action-panel settings-panel" id="ai" aria-labelledby={headingID}>
     <h2 id={headingID}>AI</h2>
-    <p className="intro"><Phrased text="GitHub のメンションなどを読んで、あなたがやることがあるかを AI が判断します。判断のため、本文が選んだ提供元（Anthropic または OpenAI）に送られます。" /></p>
+    <p className="intro"><Phrased text="GitHub のメンションなどを読んで、あなたがやることがあるかを AI が判断します。判断のため、本文が選んだ提供元や接続先に送られます。" /></p>
     <p className="notice"><Phrased text="送られる内容: リポジトリ名（非公開のものを含む）、Issue と Pull Request のタイトルと本文、コメントの本文、投稿者の GitHub ユーザー名と日時。" /></p>
     {notice ? <p className="notice error" role="alert">{notice}</p> : null}
     {error ? <p className="notice error" role="alert">{error}</p> : null}
     {loading ? <p className="action-loading" aria-live="polite">読み込んでいます…</p> : null}
     {!loading && state && !state.configured ? <>
-      <div className="segmented" role="group" aria-label="AI の提供元">
-        <button type="button" className="segment" aria-pressed={choice === 'anthropic'} disabled={busy} onClick={() => { setChoice('anthropic'); setFormError(null); }}>Anthropic の API キー</button>
-        <button type="button" className="segment" aria-pressed={choice === 'openai'} disabled={busy} onClick={() => { setChoice('openai'); setFormError(null); }}>ChatGPT のプラン</button>
+      <div className="segmented provider-choice" role="group" aria-label="AI の提供元">
+        {providerChoices.map((c) => <button key={c.value} type="button" className="segment" aria-pressed={choice === c.value} disabled={busy} onClick={() => { setChoice(c.value); setFormError(null); }}>{c.label}</button>)}
       </div>
-      {choice === 'anthropic' ? <>
+      {choice === 'openai_api' || choice === 'openai_compatible' ? <>
+        <EndpointNotice provider={choice} />
+        <EndpointForm key={choice} provider={choice} busy={busy} error={formError} onSubmit={(m, key, baseUrl) => { void save(m, key, choice, setFormError, baseUrl); }} />
+      </> : choice === 'anthropic' ? <>
         <p className="field-hint"><Phrased text="費用は登録したキーの組織に請求されます。" /></p>
         <ol className="steps">
           <li><a href={ANTHROPIC_KEYS_URL} rel="noopener noreferrer" target="_blank">Anthropic Console の API キーのページ</a>を開き、API キーを作ります。</li>
@@ -356,6 +452,19 @@ export default function AISettings() {
           <button className="button secondary danger" type="button" disabled={busy} onClick={() => { void remove(); }}>AI の設定を削除</button>
         </div>
       </>}
+    </> : null}
+    {!loading && state?.configured && (state.provider === 'openai_api' || state.provider === 'openai_compatible') ? <>
+      <dl className="settings-facts">
+        <div><dt>提供元</dt><dd>{providerName(state.provider)}</dd></div>
+        {state.provider === 'openai_compatible' ? <div><dt>接続先 URL</dt><dd>{state.base_url ?? '読み出せません'}</dd></div> : null}
+        <div><dt>モデル</dt><dd>{modelName(state.model, state.provider)}</dd></div>
+        <div><dt>API キー</dt><dd>{state.api_key_set ? (state.key_last4 ? `…${state.key_last4}` : '登録済み') : 'なし'}</dd></div>
+        <div><dt>状態</dt><dd className={aiHasProblem(state) ? 'status-error' : undefined}>{aiStatusMessage(state.status, state.last_error, state.provider)}</dd></div>
+      </dl>
+      {replacing ? <EndpointForm key={state.updated_at} provider={state.provider} saved={state} busy={busy} error={formError} onSubmit={(m, key, baseUrl) => { void save(m, key, state.provider, setFormError, baseUrl); }} onCancel={() => { setReplacing(false); setFormError(null); }} /> : <div className="form-actions">
+        <button className="button secondary" type="button" disabled={busy} onClick={() => { setReplacing(true); setFormError(null); }}>設定を変更</button>
+        <button className="button secondary danger" type="button" disabled={busy} onClick={() => { void remove(); }}>AI の設定を削除</button>
+      </div>}
     </> : null}
   </section>;
 }

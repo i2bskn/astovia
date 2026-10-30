@@ -40,6 +40,9 @@ const (
 	// DELETE: the lock and the delete, then the revocation.
 	openAIDeleteTimeout = 15 * time.Second
 	openAIRevokeTimeout = 10 * time.Second
+	// endpointCheckTimeout bounds the check of an OpenAI API key or an
+	// OpenAI-compatible endpoint, within openAIWriteDeadline.
+	endpointCheckTimeout = 20 * time.Second
 )
 
 // openAIAuthPurpose is the secretbox purpose of a user's ChatGPT
@@ -55,14 +58,19 @@ type openAIAuthState struct {
 }
 
 // aiResponse is the user's AI settings. The key and the tokens are never
-// included; key_last4 identifies an Anthropic key and account is the
-// ChatGPT account's address (null for Anthropic or when unknown).
+// included; key_last4 identifies an API key, api_key_set tells whether one
+// is saved, account is the ChatGPT account's address (null for the other
+// providers or when unknown) and base_url is the URL of an
+// OpenAI-compatible endpoint (null for the other providers or when the
+// saved settings cannot be opened).
 type aiResponse struct {
 	Configured bool    `json:"configured"`
 	Provider   string  `json:"provider"`
 	Model      string  `json:"model"`
 	KeyLast4   string  `json:"key_last4"`
+	APIKeySet  bool    `json:"api_key_set"`
 	Account    *string `json:"account"`
+	BaseURL    *string `json:"base_url"`
 	Status     string  `json:"status"`
 	LastError  *string `json:"last_error"`
 	UpdatedAt  string  `json:"updated_at"`
@@ -74,11 +82,19 @@ type aiUnconfiguredResponse struct {
 
 func (s *Server) toAIResponse(a store.AISettings) aiResponse {
 	out := aiResponse{Configured: true, Provider: a.Provider, Model: a.Model, KeyLast4: a.KeyLast4, Status: a.Status, UpdatedAt: formatTime(a.UpdatedAt)}
-	if a.Provider == ai.ProviderOpenAI {
+	switch a.Provider {
+	case ai.ProviderOpenAI:
 		out.KeyLast4 = ""
 		if secret, err := s.tokens.OpenSecret(a); err == nil && secret.Email != "" {
 			out.Account = &secret.Email
 		}
+	case ai.ProviderOpenAICompatible:
+		if e, err := aicred.OpenEndpoint(s.box, a); err == nil {
+			out.BaseURL = &e.BaseURL
+			out.APIKeySet = e.APIKey != ""
+		}
+	case ai.ProviderAnthropic, ai.ProviderOpenAIAPI:
+		out.APIKeySet = true
 	}
 	if a.LastError.Valid {
 		out.LastError = &a.LastError.String
@@ -89,6 +105,20 @@ func (s *Server) toAIResponse(a store.AISettings) aiResponse {
 // validAIKey accepts 20-512 bytes of printable ASCII without spaces.
 func validAIKey(v string) bool {
 	if len(v) < 20 || len(v) > 512 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x21 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// validEndpointKey accepts 1-512 bytes of printable ASCII without spaces:
+// the API key of an OpenAI-compatible endpoint may be short.
+func validEndpointKey(v string) bool {
+	if len(v) < 1 || len(v) > 512 {
 		return false
 	}
 	for i := 0; i < len(v); i++ {
@@ -128,7 +158,8 @@ func (s *Server) handleGetAI(w http.ResponseWriter, r *http.Request) {
 // of the saved settings: switching providers means deleting the settings
 // first. The credential is checked with the provider before it is saved,
 // outside the token lock; the save, under the lock, fails with ai_conflict
-// when the settings changed since they were read here.
+// when the settings changed since they were read here. The OpenAI API and
+// OpenAI-compatible endpoints are handled by putEndpoint.
 func (s *Server) handlePutAI(w http.ResponseWriter, r *http.Request) {
 	u, ok := userFrom(r.Context())
 	if !ok {
@@ -144,6 +175,7 @@ func (s *Server) handlePutAI(w http.ResponseWriter, r *http.Request) {
 		APIKey   json.RawMessage `json:"api_key"`
 		Model    json.RawMessage `json:"model"`
 		Provider json.RawMessage `json:"provider"`
+		BaseURL  json.RawMessage `json:"base_url"`
 	}
 	if !decode(w, r, &in, integrationBodyLimit) {
 		return
@@ -151,19 +183,32 @@ func (s *Server) handlePutAI(w http.ResponseWriter, r *http.Request) {
 	provider := ai.ProviderAnthropic
 	if in.Provider != nil {
 		v, ok := decodeString(in.Provider)
-		if !ok || (v != ai.ProviderAnthropic && v != ai.ProviderOpenAI) {
+		if !ok || (v != ai.ProviderAnthropic && v != ai.ProviderOpenAI && v != ai.ProviderOpenAIAPI && v != ai.ProviderOpenAICompatible) {
 			fail(w, 400, "invalid_request", "provider is invalid.")
 			return
 		}
 		provider = v
 	}
+	// base_url (null included) is only used by an OpenAI-compatible
+	// endpoint.
+	if in.BaseURL != nil && provider != ai.ProviderOpenAICompatible {
+		fail(w, 400, "invalid_request", "base_url is not used with this provider.")
+		return
+	}
 	model, ok := decodeString(in.Model)
 	valid := ai.ValidModel
-	if provider == ai.ProviderOpenAI {
+	switch provider {
+	case ai.ProviderOpenAI:
 		valid = ai.ValidOpenAIModel
+	case ai.ProviderOpenAIAPI, ai.ProviderOpenAICompatible:
+		valid = ai.ValidEndpointModel
 	}
 	if in.Model == nil || !ok || !valid(model) {
 		fail(w, 400, "invalid_request", "model is invalid.")
+		return
+	}
+	if provider == ai.ProviderOpenAIAPI || provider == ai.ProviderOpenAICompatible {
+		s.putEndpoint(w, r, u.ID, sid, provider, model, in.APIKey, in.BaseURL)
 		return
 	}
 	var key string
@@ -299,6 +344,162 @@ func (s *Server) putOpenAI(w http.ResponseWriter, r *http.Request, userID, sid, 
 		return
 	}
 	writeJSON(w, 200, s.toAIResponse(saved))
+}
+
+// putEndpoint registers or changes the settings of an OpenAI API key or an
+// OpenAI-compatible endpoint. An omitted api_key (or, for the OpenAI API,
+// an empty one) keeps the saved key, and an omitted base_url the saved URL;
+// a saved key is never sent to another URL. The endpoint is checked with one
+// request, outside the store transaction and the token lock, after the
+// per-user limit; the save fails with ai_conflict when the settings changed
+// since they were read here.
+func (s *Server) putEndpoint(w http.ResponseWriter, r *http.Request, userID, sid, provider, model string, rawKey, rawURL json.RawMessage) {
+	compatible := provider == ai.ProviderOpenAICompatible
+	var key, baseURL string
+	keyGiven, urlGiven := false, false
+	if rawKey != nil {
+		v, ok := decodeString(rawKey)
+		key = strings.TrimSpace(v)
+		valid := validAIKey
+		if compatible {
+			valid = validEndpointKey
+		}
+		if !ok || (key != "" && !valid(key)) {
+			fail(w, 400, "invalid_request", "api_key is invalid.")
+			return
+		}
+		// An empty key keeps the saved OpenAI API key, and removes the
+		// key of an endpoint.
+		keyGiven = compatible || key != ""
+	}
+	if compatible && rawURL != nil {
+		v, ok := decodeString(rawURL)
+		if !ok {
+			fail(w, 400, "invalid_request", "base_url is invalid.")
+			return
+		}
+		normalized, err := ai.NormalizeEndpointURL(v, s.cfg.AIAllowPrivateEndpoints)
+		switch {
+		case errors.Is(err, ai.ErrEndpointBlocked):
+			fail(w, 400, "ai_endpoint_blocked", endpointBlockedMessage)
+			return
+		case err != nil:
+			fail(w, 400, "invalid_request", "base_url is invalid.")
+			return
+		}
+		baseURL, urlGiven = normalized, true
+	}
+	current, err := s.auth.Store.AISettings(r.Context(), userID)
+	found := err == nil
+	if err != nil && !errors.Is(err, store.ErrAISettingsNotFound) {
+		integrationError(w, "ai read", userID, err)
+		return
+	}
+	if found && current.Provider != provider {
+		fail(w, 409, "ai_provider_mismatch", "Delete the current AI settings before using another provider.")
+		return
+	}
+	if !found {
+		switch {
+		case compatible && !urlGiven:
+			fail(w, 400, "invalid_request", "base_url is required.")
+			return
+		case compatible && !keyGiven:
+			fail(w, 400, "invalid_request", "api_key is required when base_url changes.")
+			return
+		case !keyGiven:
+			fail(w, 400, "invalid_request", "api_key is required.")
+			return
+		}
+	}
+	keyChanged := keyGiven
+	if !keyGiven || (compatible && !urlGiven) {
+		saved, err := aicred.OpenEndpoint(s.box, current)
+		if err != nil {
+			fail(w, 400, "ai_key_invalid", "The saved settings cannot be used. Register them again.")
+			return
+		}
+		if compatible && !urlGiven {
+			baseURL = saved.BaseURL
+		}
+		if compatible && baseURL != saved.BaseURL {
+			// The saved key is not sent to another URL.
+			if !keyGiven {
+				fail(w, 400, "invalid_request", "api_key is required when base_url changes.")
+				return
+			}
+			keyChanged = true
+		}
+		if !keyGiven {
+			key = saved.APIKey
+		}
+	}
+	if !s.aiEndpointLimiter.allowKey(userID) {
+		fail(w, 429, "rate_limited", "Too many attempts. Try again later.")
+		return
+	}
+	cred := ai.Credential{Provider: provider, Key: key}
+	if compatible {
+		cred.BaseURL = baseURL
+	}
+	// The endpoint is called before, and outside, the store transaction.
+	extendWriteDeadline(w)
+	ctx, cancel := context.WithTimeout(r.Context(), endpointCheckTimeout)
+	err = s.ai.CheckEndpoint(ctx, cred, model)
+	cancel()
+	if err != nil {
+		s.endpointError(w, r, userID, provider, err)
+		return
+	}
+	sealed, err := aicred.SealEndpoint(s.box, userID, aicred.Endpoint{BaseURL: cred.BaseURL, APIKey: key})
+	if err != nil {
+		integrationError(w, "ai seal", userID, err)
+		return
+	}
+	next := store.AISettings{UserID: userID, Provider: provider, Model: model, APIKeySealed: sealed, KeyLast4: tokenLast4(key)}
+	var saved store.AISettings
+	err = s.tokens.WithLock(r.Context(), userID, func() error {
+		var e error
+		saved, e = s.auth.Store.SaveAISettings(r.Context(), next, current.Generation, keyChanged, sid, s.auth.Now().Unix())
+		return e
+	})
+	if !s.aiSaveError(w, r, userID, err) {
+		return
+	}
+	writeJSON(w, 200, s.toAIResponse(saved))
+}
+
+// endpointBlockedMessage is the message of a URL or address that may not
+// be used.
+const endpointBlockedMessage = "This address cannot be used. Use a public HTTPS URL, or set ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS on the server."
+
+// endpointError writes the response of a failed check of an OpenAI API key
+// or an OpenAI-compatible endpoint. The caller's own end is checked first;
+// the errors of package ai carry no URL or key, so they are logged as they
+// are.
+func (s *Server) endpointError(w http.ResponseWriter, r *http.Request, userID, provider string, err error) {
+	switch {
+	case r.Context().Err() != nil:
+		fail(w, 503, "ai_unavailable", "The AI provider could not be reached. Try again later.")
+	case errors.Is(err, ai.ErrEndpointBlocked):
+		fail(w, 400, "ai_endpoint_blocked", endpointBlockedMessage)
+	case errors.Is(err, ai.ErrKeyInvalid):
+		fail(w, 400, "ai_key_invalid", "The API key is invalid.")
+	case errors.Is(err, ai.ErrModelUnavailable):
+		if provider == ai.ProviderOpenAICompatible {
+			fail(w, 400, "ai_model_unavailable", "The endpoint or the model was not found. Check the URL and the model.")
+			return
+		}
+		fail(w, 400, "ai_model_unavailable", "The API key cannot use this model.")
+	case errors.Is(err, ai.ErrBilling):
+		fail(w, 400, "ai_billing", "Check the credit balance or billing settings of the provider.")
+	case errors.Is(err, ai.ErrUnusable):
+		log.Printf("integrations: ai verify user=%s: %v", userID, err)
+		fail(w, 400, "ai_unsupported", "The endpoint did not accept the request Astovia needs. Check the URL and that the endpoint supports structured output with a JSON schema.")
+	default:
+		log.Printf("integrations: ai verify user=%s: %v", userID, err)
+		fail(w, 503, "ai_unavailable", "The AI provider could not be reached. Try again later.")
+	}
 }
 
 // hasModel reports whether slug is in models.

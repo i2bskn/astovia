@@ -20,17 +20,24 @@ export const ANTHROPIC_KEYS_URL = 'https://platform.claude.com/settings/keys';
 // what the ChatGPT plan is used for.
 export const MANAGE_USAGE_URL = 'https://chatgpt.com/settings/usage';
 
-// AIProvider is an Anthropic API key, or the user's ChatGPT plan (OpenAI).
-export type AIProvider = 'anthropic' | 'openai';
+// AIProvider is an Anthropic API key, the user's ChatGPT plan (OpenAI), an
+// OpenAI API key, or an OpenAI-compatible endpoint.
+export type AIProvider = 'anthropic' | 'openai' | 'openai_api' | 'openai_compatible';
 
-// AISettings are the saved settings. key_last4 identifies an Anthropic key
-// ("" for ChatGPT); account is the ChatGPT account's address, or null.
+const providers: readonly AIProvider[] = ['anthropic', 'openai', 'openai_api', 'openai_compatible'];
+
+// AISettings are the saved settings. key_last4 identifies an API key ("" for
+// ChatGPT or a short key); api_key_set tells whether a key is saved;
+// account is the ChatGPT account's address, or null; base_url is the URL of
+// an OpenAI-compatible endpoint, or null.
 export interface AISettings {
   configured: true;
   provider: AIProvider;
   model: string;
   key_last4: string;
+  api_key_set: boolean;
   account: string | null;
+  base_url: string | null;
   status: string;
   last_error: string | null;
   updated_at: string;
@@ -45,16 +52,43 @@ const modelNames: Readonly<Record<string, string>> = {
 };
 
 // modelName returns the display name of a model, or the model itself when
-// it is unknown. A ChatGPT model is shown as its slug.
+// it is unknown. The models of the other providers are shown as they are.
 export function modelName(model: string, provider: AIProvider = 'anthropic'): string {
-  if (provider === 'openai') return model;
+  if (provider !== 'anthropic') return model;
   return Object.hasOwn(modelNames, model) ? modelNames[model] ?? model : model;
 }
 
 export function providerName(provider: string): string {
-  if (provider === 'anthropic') return 'Anthropic';
-  if (provider === 'openai') return 'ChatGPT のプラン（OpenAI）';
+  switch (provider) {
+    case 'anthropic':
+      return 'Anthropic';
+    case 'openai':
+      return 'ChatGPT のプラン（OpenAI）';
+    case 'openai_api':
+      return 'OpenAI の API キー';
+    case 'openai_compatible':
+      return 'OpenAI 互換の接続先';
+  }
   return provider;
+}
+
+// normalizeEndpointURL is the URL of an endpoint as the server keeps it:
+// without surrounding spaces and trailing slashes.
+export function normalizeEndpointURL(value: string): string {
+  return value.trim().replace(/\/+$/, '');
+}
+
+// endpointKey is the api_key to send when saving an OpenAI API key or an
+// OpenAI-compatible endpoint, or undefined to keep the saved key. key is
+// the field's value. An OpenAI API key is kept when the field is empty. An
+// endpoint whose URL is new or changed gets the field as it is (empty means
+// no key), so that the saved key is never sent to another URL; with the
+// same URL, an empty field keeps the saved key unless removeKey is set.
+export function endpointKey(provider: AIProvider, key: string, urlChanged: boolean, removeKey: boolean): string | undefined {
+  const value = key.trim();
+  if (provider !== 'openai_compatible') return value || undefined;
+  if (urlChanged || value) return value;
+  return removeKey ? '' : undefined;
 }
 
 const statusErrors: Readonly<Record<AIProvider, Readonly<Record<string, string>>>> = {
@@ -73,13 +107,36 @@ const statusErrors: Readonly<Record<AIProvider, Readonly<Record<string, string>>
     request_rejected: 'AI が一部のリクエストを受け付けませんでした。モデルを変えるか、時間をおいて様子を見てください。',
     usage_limit: 'ChatGPT のプランの利用上限に達しています。',
   },
+  openai_api: {
+    key_invalid: 'API キーが無効になりました。設定を更新してください。',
+    key_undecryptable: '保存した API キーを読み出せません。設定を登録し直してください。',
+    billing: '提供元の残高または支払い設定を確認してください。',
+    model_unavailable: 'このキーでは選んだモデルを使えなくなりました。モデルかキーを変更してください。',
+    request_rejected: 'AI が一部のリクエストを受け付けませんでした。モデルを変えるか、時間をおいて様子を見てください。',
+  },
+  openai_compatible: {
+    key_invalid: 'API キーか接続先の URL が使えなくなりました。設定を更新してください。',
+    key_undecryptable: '保存した接続先の設定を読み出せません。設定を登録し直してください。',
+    billing: '提供元の残高または支払い設定を確認してください。',
+    model_unavailable: '接続先の URL かモデル名が見つからなくなりました。URL とモデル名を確認してください。',
+    request_rejected: '接続先が一部のリクエストを受け付けませんでした。モデルを変えるか、時間をおいて様子を見てください。',
+  },
+};
+
+// stoppedMessages describe settings stopped by an error without a known
+// last error.
+const stoppedMessages: Readonly<Record<AIProvider, string>> = {
+  anthropic: 'エラーで停止しています。キーを更新してください。',
+  openai: 'エラーで停止しています。ChatGPT とつなぎ直してください。',
+  openai_api: 'エラーで停止しています。設定を更新してください。',
+  openai_compatible: 'エラーで停止しています。設定を更新してください。',
 };
 
 // aiStatusMessage describes the state of the settings of provider.
 export function aiStatusMessage(status: string, lastError: string | null, provider: AIProvider = 'anthropic'): string {
   const messages = statusErrors[provider];
   if (lastError && Object.hasOwn(messages, lastError)) return messages[lastError] ?? lastError;
-  if (status === 'error') return provider === 'openai' ? 'エラーで停止しています。ChatGPT とつなぎ直してください。' : 'エラーで停止しています。キーを更新してください。';
+  if (status === 'error') return stoppedMessages[provider];
   return '正常';
 }
 
@@ -88,19 +145,51 @@ export function aiHasProblem(state: AISettings): boolean {
   return state.status === 'error' || state.last_error !== null;
 }
 
+// providerErrors are the messages of the errors that depend on the
+// provider.
+const providerErrors: Readonly<Record<AIProvider, Readonly<Record<string, string>>>> = {
+  anthropic: {
+    ai_key_invalid: 'API キーが無効です。',
+    ai_model_unavailable: 'このキーではそのモデルを使えません。',
+    ai_billing: 'Anthropic の残高または支払い設定を確認してください。',
+    ai_unavailable: 'Anthropic に接続できませんでした。時間をおいて試してください。',
+    invalid_request: 'API キーの形式が正しくありません。',
+  },
+  openai: {
+    ai_key_invalid: 'ChatGPT との接続が切れました。つなぎ直してください。',
+    ai_model_unavailable: 'このプランではそのモデルを使えません。',
+    ai_billing: 'この ChatGPT のプランでは使えません。',
+    ai_unavailable: 'OpenAI に接続できませんでした。時間をおいて試してください。',
+    invalid_request: '入力を確認してください。',
+  },
+  openai_api: {
+    ai_key_invalid: 'API キーが無効です。',
+    ai_model_unavailable: 'このキーではそのモデルを使えません。',
+    ai_billing: '提供元の残高または支払い設定を確認してください。',
+    ai_unavailable: 'OpenAI に接続できませんでした。時間をおいて試してください。',
+    ai_unsupported: 'この接続先は、Astovia が使う形式（JSON スキーマの構造化出力）に対応していません。',
+    ai_endpoint_blocked: 'この URL は使えません。公開されている HTTPS の URL を指定してください（社内やローカルの接続先は、サーバーの設定で許可が必要です）。',
+    invalid_request: '入力を確認してください。',
+  },
+  openai_compatible: {
+    ai_key_invalid: 'API キーが無効です。',
+    ai_model_unavailable: '接続先の URL かモデル名が見つかりません。URL（/v1 などのパスを含むか）とモデル名を確認してください。',
+    ai_billing: '提供元の残高または支払い設定を確認してください。',
+    ai_unavailable: '接続先に接続できませんでした。URL を確認するか、時間をおいて試してください。',
+    ai_unsupported: 'この接続先は、Astovia が使う形式（JSON スキーマの構造化出力）に対応していません。',
+    ai_endpoint_blocked: 'この URL は使えません。公開されている HTTPS の URL を指定してください（社内やローカルの接続先は、サーバーの設定で許可が必要です）。',
+    invalid_request: '入力を確認してください。',
+  },
+};
+
 // aiErrorMessage describes why saving the settings (or connecting ChatGPT)
 // failed, from the error code of the response and the provider in use.
 export function aiErrorMessage(code: string | null, provider: AIProvider = 'anthropic'): string {
-  const openai = provider === 'openai';
+  const messages = providerErrors[provider];
+  if (code !== null && Object.hasOwn(messages, code)) return messages[code] ?? code;
   switch (code) {
-    case 'ai_key_invalid':
-      return openai ? 'ChatGPT との接続が切れました。つなぎ直してください。' : 'API キーが無効です。';
-    case 'ai_model_unavailable':
-      return openai ? 'このプランではそのモデルを使えません。' : 'このキーではそのモデルを使えません。';
-    case 'ai_billing':
-      return openai ? 'この ChatGPT のプランでは使えません。' : 'Anthropic の残高または支払い設定を確認してください。';
-    case 'ai_unavailable':
-      return openai ? 'OpenAI に接続できませんでした。時間をおいて試してください。' : 'Anthropic に接続できませんでした。時間をおいて試してください。';
+    case 'rate_limited':
+      return '試す回数が多すぎます。1分ほど待ってから試してください。';
     case 'ai_conflict':
       return '別の画面で設定が変わりました。読み込み直してください。';
     case 'ai_provider_mismatch':
@@ -119,17 +208,23 @@ export function aiErrorMessage(code: string | null, provider: AIProvider = 'anth
       return 'ChatGPT のプランを使う許可がありませんでした。';
     case 'openai_unavailable':
       return 'ChatGPT との接続を完了できませんでした。時間をおいて、もう一度『ChatGPT で続ける』から始めてください。';
-    case 'invalid_request':
-      return openai ? '入力を確認してください。' : 'API キーの形式が正しくありません。';
   }
   return 'AI の設定を保存できませんでした。接続を確認して、もう一度お試しください。';
 }
+
+// stoppedStatus is the phone list state of settings stopped by an error.
+const stoppedStatus: Readonly<Record<AIProvider, string>> = {
+  anthropic: 'AI のキーを確認してください',
+  openai: 'ChatGPT との接続を確認してください',
+  openai_api: 'AI の設定を確認してください',
+  openai_compatible: 'AI の設定を確認してください',
+};
 
 // aiStatus is the state shown in the phone list of settings pages. The
 // provider is the one of state.
 export function aiStatus(state: AIState): string {
   if (!state.configured) return '未設定';
-  if (state.status === 'error') return state.provider === 'openai' ? 'ChatGPT との接続を確認してください' : 'AI のキーを確認してください';
+  if (state.status === 'error') return stoppedStatus[state.provider];
   const name = modelName(state.model, state.provider);
   return state.last_error ? `${name} を使用中（一部の判定に失敗）` : `${name} を使用中`;
 }
@@ -148,8 +243,9 @@ function readAI(data: unknown): AIState {
   if (isRecord(data) && data.configured === false) return { configured: false };
   if (
     isRecord(data) && data.configured === true &&
-    (data.provider === 'anthropic' || data.provider === 'openai') && typeof data.model === 'string' && typeof data.key_last4 === 'string' &&
-    (data.account === null || typeof data.account === 'string') &&
+    providers.includes(data.provider as AIProvider) && typeof data.model === 'string' && typeof data.key_last4 === 'string' &&
+    typeof data.api_key_set === 'boolean' && (data.account === null || typeof data.account === 'string') &&
+    (data.base_url === null || typeof data.base_url === 'string') &&
     typeof data.status === 'string' && (data.last_error === null || typeof data.last_error === 'string') &&
     typeof data.updated_at === 'string'
   ) return data as unknown as AISettings;
@@ -207,11 +303,14 @@ export function createAIClient(request: RequestFunction) {
       return readAI(await request<unknown>('/api/v1/ai'));
     },
     // apiKey is left out to keep the saved key (or the ChatGPT connection)
-    // and change only the model; provider is left out for Anthropic.
-    async saveAI(model: string, apiKey?: string, provider?: AIProvider): Promise<AIState> {
-      const body: { model: string; api_key?: string; provider?: AIProvider } = { model };
+    // and change only the model; "" removes the key of an OpenAI-compatible
+    // endpoint. provider is left out for Anthropic, and baseUrl is only for
+    // an OpenAI-compatible endpoint (left out to keep the saved URL).
+    async saveAI(model: string, apiKey?: string, provider?: AIProvider, baseUrl?: string): Promise<AIState> {
+      const body: { model: string; api_key?: string; provider?: AIProvider; base_url?: string } = { model };
       if (apiKey !== undefined) body.api_key = apiKey;
       if (provider !== undefined) body.provider = provider;
+      if (baseUrl !== undefined) body.base_url = baseUrl;
       return readAI(await request<unknown>('/api/v1/ai', { method: 'PUT', headers: json, body: JSON.stringify(body) }));
     },
     async deleteAI(): Promise<{ revokeFailed: boolean }> {

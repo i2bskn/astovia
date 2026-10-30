@@ -1,6 +1,9 @@
 // Package ai calls the AI provider with the user's own credential: an
-// Anthropic API key, or the access token of the user's ChatGPT plan
-// (OpenAI). Anthropic clients are built without any environment default:
+// Anthropic API key, the access token of the user's ChatGPT plan (OpenAI),
+// an OpenAI API key, or an OpenAI-compatible endpoint (a URL, an optional
+// API key and a model chosen by the user). The last two use the Chat
+// Completions API through a client that only reaches public addresses
+// unless the operator allows others. Anthropic clients are built without any environment default:
 // neither the API key nor the base URL can come from ANTHROPIC_* variables
 // or profile files, so a request only ever carries the key it was given and
 // goes to BaseURL.
@@ -32,14 +35,26 @@ const (
 	// ProviderOpenAI is the user's ChatGPT plan, used through OpenAI's Sign
 	// in with ChatGPT.
 	ProviderOpenAI = "openai"
+	// ProviderOpenAIAPI is an OpenAI API key, used with the Chat
+	// Completions API of OpenAIAPIBaseURL.
+	ProviderOpenAIAPI = "openai_api"
+	// ProviderOpenAICompatible is an OpenAI-compatible endpoint (such as
+	// OpenRouter, Ollama, vLLM or LM Studio): its URL, an optional API key
+	// and a model, used with the Chat Completions API.
+	ProviderOpenAICompatible = "openai_compatible"
 )
 
 // Credential is what a judgment authenticates with.
 type Credential struct {
-	// Provider is ProviderAnthropic or ProviderOpenAI.
+	// Provider is one of the Provider constants.
 	Provider string
-	// Key is the Anthropic API key.
+	// Key is the Anthropic API key, or the API key of the OpenAI API or of
+	// an OpenAI-compatible endpoint (which may be empty).
 	Key string
+	// BaseURL is the URL of an OpenAI-compatible endpoint, without the
+	// trailing slash. It is empty for an OpenAI API key, which uses
+	// OpenAIAPIBaseURL.
+	BaseURL string
 	// Token returns an OpenAI access token. failed is the token that a
 	// request just rejected with 401, or "" for the current one. Its
 	// errors wrap one of the error classes, or are the context's.
@@ -96,8 +111,9 @@ var (
 	ErrUsageLimit = errors.New("ai: usage limit")
 )
 
-// Client calls the Anthropic API and, for the ChatGPT plan, OpenAI.
-// BaseURL, HTTP, OpenAI and the timeouts are replaced by tests.
+// Client calls the Anthropic API, OpenAI for the ChatGPT plan, and the
+// OpenAI API or OpenAI-compatible endpoints. BaseURL, HTTP, OpenAI,
+// OpenAIAPIBaseURL, Endpoints and the timeouts are replaced by tests.
 type Client struct {
 	BaseURL        string
 	HTTP           *http.Client
@@ -107,16 +123,30 @@ type Client struct {
 	OpenAI *openai.Client
 	// OpenAITimeout bounds one judgment with the ChatGPT plan.
 	OpenAITimeout time.Duration
+	// Endpoints is the client of the OpenAI API and the OpenAI-compatible
+	// endpoints. When nil, a NewEndpointClient(AllowPrivateEndpoints) is
+	// made for each request.
+	Endpoints *http.Client
+	// AllowPrivateEndpoints lets the URL of an OpenAI-compatible endpoint
+	// use http. It is checked again for every request; Endpoints must be
+	// a NewEndpointClient(true) to reach non-public addresses as well.
+	AllowPrivateEndpoints bool
+	// OpenAIAPIBaseURL replaces the constant OpenAIAPIBaseURL when set.
+	OpenAIAPIBaseURL string
+	// EndpointTimeout bounds one judgment with the OpenAI API or an
+	// OpenAI-compatible endpoint.
+	EndpointTimeout time.Duration
 }
 
 // New returns a client of the Anthropic API and OpenAI that does not follow
-// redirects.
+// redirects. Its endpoints are limited to public addresses and https.
 func New() *Client {
-	return &Client{BaseURL: DefaultBaseURL, RequestTimeout: requestTimeout, ModelTimeout: modelTimeout, OpenAI: openai.New(""), OpenAITimeout: openAITimeout, HTTP: &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}}
+	return &Client{BaseURL: DefaultBaseURL, RequestTimeout: requestTimeout, ModelTimeout: modelTimeout, OpenAI: openai.New(""), OpenAITimeout: openAITimeout,
+		Endpoints: NewEndpointClient(false), EndpointTimeout: endpointTimeout, HTTP: &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}}
 }
 
 // sdk builds an SDK client for one request. WithoutEnvironmentDefaults
@@ -305,7 +335,7 @@ func (c *Client) JudgeMention(ctx context.Context, cred Credential, model string
 	return parseResult(text, location(in.Location), in.RelatedTasks)
 }
 
-// Names of the JSON schemas sent to OpenAI.
+// Names of the JSON schemas sent to OpenAI and the endpoints.
 const (
 	judgmentSchemaName = "judgment"
 	replySchemaName    = "reply"
@@ -322,6 +352,8 @@ func (c *Client) structured(ctx context.Context, cred Credential, model, system,
 		return c.structuredAnthropic(ctx, cred.Key, model, system, user, schema)
 	case ProviderOpenAI:
 		return c.structuredOpenAI(ctx, cred, model, system, user, schemaName, schema)
+	case ProviderOpenAIAPI, ProviderOpenAICompatible:
+		return c.structuredEndpoint(ctx, cred, model, system, user, schemaName, schema)
 	}
 	return "", fmt.Errorf("%w (provider)", ErrKeyInvalid)
 }
