@@ -313,6 +313,13 @@ func testMCPTools(t *testing.T, driver string) {
 		} else if tool.Name != "action_items_get" {
 			t.Fatalf("%s: no status property", tool.Name)
 		}
+		// create and update take the importance levels.
+		if tool.Name == "action_items_create" || tool.Name == "action_items_update" {
+			importance, _ := schema["properties"].(map[string]any)["importance"].(map[string]any)
+			if enum, _ := json.Marshal(importance["enum"]); importance["type"] != "string" || string(enum) != `["high","normal","low"]` {
+				t.Fatalf("%s importance: %#v", tool.Name, importance)
+			}
+		}
 		readOnly := tool.Name == "action_items_list" || tool.Name == "action_items_get"
 		if tool.Annotations.ReadOnlyHint != readOnly || !readOnly && (tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint) {
 			t.Fatalf("%s annotations: %+v", tool.Name, tool.Annotations)
@@ -326,7 +333,7 @@ func testMCPTools(t *testing.T, driver string) {
 	// create -> get -> list -> update.
 	var item actionItemResponse
 	c.ok("action_items_create", map[string]any{"content": "日程を返答する", "note": "memo", "due_at": "2026-10-24T13:00:00+09:00", "refs": []any{map[string]any{"service": "slack", "url": "https://example.com/x"}}}, &item)
-	if item.Content != "日程を返答する" || item.Status != "open" || item.Note == nil || *item.Note != "memo" || item.DueAt == nil || *item.DueAt != "2026-10-24T04:00:00Z" || len(item.Refs) != 1 || item.Version != 1 || item.Kind != "task" || item.Event != nil {
+	if item.Content != "日程を返答する" || item.Status != "open" || item.Note == nil || *item.Note != "memo" || item.DueAt == nil || *item.DueAt != "2026-10-24T04:00:00Z" || len(item.Refs) != 1 || item.Version != 1 || item.Kind != "task" || item.Event != nil || item.Importance != "normal" {
 		t.Fatalf("created: %+v", item)
 	}
 	if stored, err := api.store.ActionItem(context.Background(), "alice-id", item.ID); err != nil || stored.Kind != store.KindTask {
@@ -355,6 +362,10 @@ func testMCPTools(t *testing.T, driver string) {
 		t.Fatalf("open after done: %+v", page)
 	}
 	c.fails("action_items_update", map[string]any{"id": item.ID, "status": "open", "version": 1}, "conflict: The action item was updated by another request.")
+	c.ok("action_items_update", map[string]any{"id": item.ID, "importance": "high", "version": 2}, &got)
+	if got.Importance != "high" || got.Version != 3 || got.Status != "done" {
+		t.Fatalf("update importance: %+v", got)
+	}
 
 	// Arguments may be omitted, null or empty; null list arguments mean the
 	// defaults.
@@ -379,6 +390,9 @@ func testMCPTools(t *testing.T, driver string) {
 		{"action_items_create", nil, "invalid_request: content is required."},
 		{"action_items_create", map[string]any{"content": "x", "user_id": "bob-id"}, "invalid_request: Invalid arguments."},
 		{"action_items_create", map[string]any{"content": "x", "status": "closed"}, "invalid_request: status must be open, candidate, done or dismissed."},
+		{"action_items_create", map[string]any{"content": "x", "importance": "urgent"}, "invalid_request: importance must be one of high, normal or low."},
+		{"action_items_create", map[string]any{"content": "x", "importance": nil}, "invalid_request: importance must be one of high, normal or low."},
+		{"action_items_update", map[string]any{"id": item.ID, "importance": 1}, "invalid_request: importance must be one of high, normal or low."},
 		{"action_items_create", map[string]any{"content": "x", "refs": nil}, "invalid_request: refs must be an array of at most 10 objects with a valid service and optional account, conversation_id, conversation_name, message_id and http(s) url."},
 		{"action_items_create", []any{"x"}, "invalid_request: Invalid arguments."},
 		{"action_items_list", map[string]any{"limit": "50"}, "invalid_request: limit must be an integer from 1 to 100."},
@@ -398,7 +412,7 @@ func testMCPTools(t *testing.T, driver string) {
 		{"action_items_get", map[string]any{"id": "missing"}, "not_found: Action item not found."},
 		{"action_items_get", map[string]any{"id": item.ID, "extra": 1}, "invalid_request: Invalid arguments."},
 		{"action_items_update", map[string]any{"status": "done"}, "invalid_request: id is required."},
-		{"action_items_update", map[string]any{"id": item.ID}, "invalid_request: At least one of content, status, note, due_at, refs or parent_id is required."},
+		{"action_items_update", map[string]any{"id": item.ID}, "invalid_request: At least one of content, status, note, due_at, refs, parent_id or importance is required."},
 		{"action_items_update", map[string]any{"id": item.ID, "version": 0, "status": "open"}, "invalid_request: version must be a positive integer."},
 		{"action_items_update", map[string]any{"id": item.ID, "content": ""}, "invalid_request: content must be 1-500 characters."},
 		{"action_items_update", map[string]any{"id": item.ID, "unknown": 1}, "invalid_request: Invalid arguments."},

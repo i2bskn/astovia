@@ -482,6 +482,8 @@ func (r *run) relatedScope(u *unit) store.RelatedScope {
 // after the connection and the AI settings were made. Candidates are
 // tracked like tasks but not notified; event items are not tracked, since a
 // reply does not add the event to the calendar.
+// An open high-importance task is notified even while immediate
+// notifications are off; an event item is not.
 func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 	link := chatworkURL(messageURL(u.key.Room, u.last.ID))
 	now := r.s.Now().Unix()
@@ -496,7 +498,7 @@ func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 	}
 	key := u.key.String()
 	item := store.ActionItem{ID: id, Status: "open", Refs: string(refs), Version: 1, CreatedAt: now, UpdatedAt: now,
-		Source: nullString(store.SourceChatwork), SourceKey: nullString(key), Tracking: 1, DetectedAt: nullInt(now)}
+		Source: nullString(store.SourceChatwork), SourceKey: nullString(key), Tracking: 1, DetectedAt: nullInt(now), Kind: store.KindTask, Importance: store.ImportanceNormal}
 	// The group parent shares the room's reference, with a link to the room
 	// itself.
 	groupRefs, err := json.Marshal([]ref{{Service: store.SourceChatwork, Account: r.conn.OrganizationName, ConversationID: u.key.Room, ConversationName: place, URL: chatworkURL(roomURL(u.key.Room)).String}})
@@ -506,6 +508,9 @@ func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 	switch o {
 	case outcomeAction, outcomeCandidate:
 		item.Content = res.Task
+		if res.Importance != "" {
+			item.Importance = res.Importance
+		}
 		if o == outcomeCandidate {
 			item.Status = "candidate"
 		}
@@ -541,7 +546,7 @@ func (r *run) create(u *unit, o outcome, res ai.MentionResult) (bool, error) {
 			item.ParentID = sql.NullString{}
 			created, e = tx.CreateItem(item)
 		}
-		if e != nil || !created || item.Status != "open" || !notify || tx.Conn.ImmediateNotify != 1 {
+		if e != nil || !created || item.Status != "open" || !notify || (tx.Conn.ImmediateNotify != 1 && !(item.Importance == store.ImportanceHigh && item.Kind == store.KindTask)) {
 			return e
 		}
 		return tx.Enqueue(detectedNotification(u.title, item, now))
@@ -643,7 +648,12 @@ func (r *run) conversationName(u *unit) string {
 	return truncate(name, conversationNameLimit)
 }
 
+// detectedNotification is the detection notification of item. The title of
+// a high-importance item starts with 【重要】.
 func detectedNotification(title string, item store.ActionItem, now int64) store.Notification {
+	if item.Importance == store.ImportanceHigh {
+		title = "【重要】" + title
+	}
 	id, err := auth.Random()
 	if err != nil {
 		// The ID only needs to be unique; the dedupe key keeps the

@@ -93,7 +93,7 @@ func (s *tokenSource) cred() Credential {
 	}}
 }
 
-const judgmentJSON = `{"decision":"task","task":"返信する","summary":"s","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`
+const judgmentJSON = `{"decision":"task","task":"返信する","summary":"s","event_title":"","event_start":"","event_end":"","topic":"","same_as":"","importance":"normal"}`
 
 func TestJudgeOpenAI(t *testing.T) {
 	c, f := openAIClient(t, completedWith(judgmentJSON))

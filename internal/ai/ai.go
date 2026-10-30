@@ -213,15 +213,26 @@ const eventLayout = "2006-01-02T15:04"
 // when the posts fixed a meeting that the user attends. Topic names the
 // matter the task belongs to, and SameAs is the ID of the related task of
 // the same matter (one of the IDs given in the input), both empty when there
-// is none or the decision is DecisionNone.
+// is none or the decision is DecisionNone. Importance is one of the
+// Importance constants; it is ImportanceNormal when the decision is
+// DecisionNone or the AI returned an unknown level.
 type MentionResult struct {
-	Decision string
-	Task     string
-	Summary  string
-	Event    *Event
-	Topic    string
-	SameAs   string
+	Decision   string
+	Task       string
+	Summary    string
+	Event      *Event
+	Topic      string
+	SameAs     string
+	Importance string
 }
+
+// Importance levels of a judgment. They are the importance levels of
+// action items.
+const (
+	ImportanceHigh   = "high"
+	ImportanceNormal = "normal"
+	ImportanceLow    = "low"
+)
 
 // RelatedTask is a task the user already has in the same conversation,
 // shown to the AI so that it can tell whether a new task belongs to the
@@ -275,8 +286,9 @@ var outputSchema = map[string]any{
 		"event_end":   map[string]any{"type": "string", "description": "YYYY-MM-DDTHH:MM in the local time of the input timezone, or an empty string"},
 		"topic":       map[string]any{"type": "string", "description": "A short name of the matter the task belongs to, or an empty string"},
 		"same_as":     map[string]any{"type": "string", "description": "The id of the related task of the same matter, or an empty string"},
+		"importance":  map[string]any{"type": "string", "enum": []string{ImportanceHigh, ImportanceNormal, ImportanceLow}},
 	},
-	"required":             []string{"decision", "task", "summary", "event_title", "event_start", "event_end", "topic", "same_as"},
+	"required":             []string{"decision", "task", "summary", "event_title", "event_start", "event_end", "topic", "same_as", "importance"},
 	"additionalProperties": false,
 }
 
@@ -359,13 +371,19 @@ func parseResult(text string, loc *time.Location, related []RelatedTask) (Mentio
 		EventEnd   *string `json:"event_end"`
 		Topic      *string `json:"topic"`
 		SameAs     *string `json:"same_as"`
+		Importance *string `json:"importance"`
 	}
 	d := json.NewDecoder(strings.NewReader(text))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&out); err != nil || out.Decision == nil || out.Task == nil || out.Summary == nil || out.EventTitle == nil || out.EventStart == nil || out.EventEnd == nil || out.Topic == nil || out.SameAs == nil {
+	if err := d.Decode(&out); err != nil || out.Decision == nil || out.Task == nil || out.Summary == nil || out.EventTitle == nil || out.EventStart == nil || out.EventEnd == nil || out.Topic == nil || out.SameAs == nil || out.Importance == nil {
 		return MentionResult{}, fmt.Errorf("%w (invalid output)", ErrUnusable)
 	}
-	r := MentionResult{Decision: *out.Decision, Task: truncate(clean(*out.Task), resultLimit), Summary: truncate(clean(*out.Summary), resultLimit), Topic: truncate(clean(*out.Topic), topicLimit)}
+	r := MentionResult{Decision: *out.Decision, Task: truncate(clean(*out.Task), resultLimit), Summary: truncate(clean(*out.Summary), resultLimit), Topic: truncate(clean(*out.Topic), topicLimit), Importance: ImportanceNormal}
+	// An unknown level is read as normal so that the task is not lost.
+	switch v := strings.TrimSpace(*out.Importance); v {
+	case ImportanceHigh, ImportanceLow:
+		r.Importance = v
+	}
 	for _, t := range related {
 		if t.ID != "" && t.ID == strings.TrimSpace(*out.SameAs) {
 			r.SameAs = t.ID
@@ -374,7 +392,7 @@ func parseResult(text string, loc *time.Location, related []RelatedTask) (Mentio
 	}
 	switch r.Decision {
 	case DecisionNone:
-		r.Task, r.Topic, r.SameAs = "", "", ""
+		r.Task, r.Topic, r.SameAs, r.Importance = "", "", "", ImportanceNormal
 		return r, nil
 	case DecisionTask, DecisionCandidate:
 		if r.Task == "" {

@@ -20,7 +20,7 @@ const toggles: readonly { key: keyof ChatworkOptions; label: string; hint?: stri
   { key: 'detect_mentions', label: 'グループチャットで自分宛ての TO・返信・TO ALL を検出する' },
   { key: 'detect_dms', label: 'ダイレクトチャットを検出する', hint: '無効にすると、ダイレクトチャットの中の TO と返信だけを検出します。' },
   { key: 'import_tasks', label: '自分に割り当てられたタスクを取り込む', hint: 'AI の設定がなくても取り込みます。Astovia で完了にしても、Chatwork のタスクは完了になりません。' },
-  { key: 'immediate_notify', label: '検出したらすぐ通知する' },
+  { key: 'immediate_notify', label: '検出したらすぐ通知する', hint: '重要度が高いものは、オフでも通知します。' },
 ];
 
 // ChatworkSettings connects a Chatwork API token. The token is sent once

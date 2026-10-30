@@ -22,7 +22,7 @@ const toggles: readonly { key: keyof SlackOptions; label: string; hint?: string 
   { key: 'detect_mentions', label: 'チャンネルでのメンションを検出する' },
   { key: 'detect_dms', label: 'DM を検出する', hint: '無効にすると、DM の中のメンションはメンションとして検出します。' },
   { key: 'detect_group_dms', label: 'グループ DM を検出する', hint: '参加中のグループ DM は 20 件まで読みます。無効にすると、グループ DM の中のメンションはメンションとして検出します。' },
-  { key: 'immediate_notify', label: '検出したらすぐ通知する' },
+  { key: 'immediate_notify', label: '検出したらすぐ通知する', hint: '重要度が高いものは、オフでも通知します。' },
 ];
 
 // SlackSettings connects a Slack user token from an app the user creates

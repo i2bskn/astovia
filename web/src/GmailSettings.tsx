@@ -39,9 +39,10 @@ function AccountRow({ account, busy, confirming, onToggle, onReconnect, onAsk, o
         <div><dt>最終同期</dt><dd>{account.last_synced_at ? dateTime(account.last_synced_at, new Date()) : 'まだ同期していません'}</dd></div>
       </dl>
       <div className="toggle-field">
-        <input id={toggleID} type="checkbox" checked={account.immediate_notify} disabled={busy} onChange={(e) => onToggle(e.target.checked)} />
+        <input id={toggleID} type="checkbox" checked={account.immediate_notify} disabled={busy} onChange={(e) => onToggle(e.target.checked)} aria-describedby={`${toggleID}-hint`} />
         <label htmlFor={toggleID}>検出したらすぐ通知する</label>
       </div>
+      <p id={`${toggleID}-hint`} className="field-hint">重要度が高いものは、オフでも通知します。</p>
     </div>
     <div className="action-buttons">
       {account.status === 'error' ? <button className="button secondary small" type="button" disabled={busy} onClick={onReconnect}>再接続</button> : null}

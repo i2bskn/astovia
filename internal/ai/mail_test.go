@@ -33,7 +33,7 @@ func TestMailPrompts(t *testing.T) {
 }
 
 func TestJudgeMail(t *testing.T) {
-	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"見積もりに返事する","summary":"bob さんが依頼","event_title":"打ち合わせ","event_start":"2026-10-29T12:30","event_end":"","topic":"見積もりの件","same_as":"t9"}`))
+	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"見積もりに返事する","summary":"bob さんが依頼","event_title":"打ち合わせ","event_start":"2026-10-29T12:30","event_end":"","topic":"見積もりの件","same_as":"t9","importance":"normal"}`))
 	in := slackInput()
 	tokyo := time.FixedZone("JST", 9*3600)
 	in.ConversationType, in.ChannelName, in.Workspace, in.Me, in.Location = MailThread, "見積もりの件", "alice@example.com", SlackPerson{ID: "alice@example.com", Name: "Alice"}, tokyo
@@ -44,7 +44,7 @@ func TestJudgeMail(t *testing.T) {
 		t.Fatalf("result: %+v %v", res, err)
 	}
 	text, system, schema := userText(t, f.last().body)
-	if system != MailSystemPrompt || len(schema["required"].([]any)) != 8 {
+	if system != MailSystemPrompt || len(schema["required"].([]any)) != 9 {
 		t.Fatalf("system or schema: %s", f.last().body)
 	}
 	head, doc, ok := strings.Cut(text, "\n")
@@ -64,7 +64,7 @@ func TestJudgeMail(t *testing.T) {
 		t.Fatalf("input: %+v %v", got, err)
 	}
 	// An unusable answer is ErrUnusable from parseResult.
-	_, c = newFake(t, message("end_turn", `{"decision":"maybe","task":"","summary":"","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`))
+	_, c = newFake(t, message("end_turn", `{"decision":"maybe","task":"","summary":"","event_title":"","event_start":"","event_end":"","topic":"","same_as":"","importance":"normal"}`))
 	if _, err = c.JudgeMail(context.Background(), testCred, "claude-haiku-5-5", in); !errors.Is(err, ErrUnusable) {
 		t.Fatalf("invalid decision: %v", err)
 	}

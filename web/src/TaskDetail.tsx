@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { Link } from 'react-router';
 import { request } from './auth';
 import { calendarURL, createActionItemsClient, isConflict, isInvalid, isNotFound } from './actionItems';
-import type { ActionItem, ActionItemStatus } from './actionItems';
+import type { ActionItem, ActionItemImportance, ActionItemStatus } from './actionItems';
 import { autoOutcome, autoReasonLabel, httpsURL } from './automation';
 import { candidates } from './candidates';
 import { dueLabel, eventRange, fullDateTime } from './format';
@@ -11,7 +11,7 @@ import { CalendarIcon, CheckIcon, DismissIcon, ExternalIcon, UndoIcon } from './
 import { backLink, canAddChild, canJoinParent, detailTitle, parentChoices } from './nesting';
 import Phrased from './Phrased';
 import RefChip from './RefChip';
-import TaskRow, { toastMessage } from './TaskRow';
+import TaskRow, { ImportanceChip, importanceLabels, toastMessage } from './TaskRow';
 import { useNow } from './useNow';
 
 const client = createActionItemsClient(request);
@@ -27,6 +27,8 @@ const statuses: Record<ActionItemStatus, { label: string; chip: string }> = {
 const loadError = 'タスクを読み込めませんでした。接続を確認して、もう一度お試しください。';
 const childrenError = '子タスクを読み込めませんでした。接続を確認して、もう一度お試しください。';
 const statusError = '状態を変更できませんでした。接続を確認して、もう一度お試しください。';
+const importanceError = '重要度を変更できませんでした。接続を確認して、もう一度お試しください。';
+const importances: readonly ActionItemImportance[] = ['high', 'normal', 'low'];
 
 // parentError is the message of a failed change of parent.
 function parentError(failure: unknown): string {
@@ -67,6 +69,7 @@ export default function TaskDetail({ id }: { id: string }) {
   const childInputID = useId();
   const childErrorID = useId();
   const parentSelectID = useId();
+  const importanceSelectID = useId();
 
   // load reads the item, then its subtasks when it can have some. Only the
   // response to the latest request is applied.
@@ -146,6 +149,23 @@ export default function TaskDetail({ id }: { id: string }) {
     } catch (failure) {
       if (isConflict(failure)) setConflict(true);
       else setError(statusError);
+    } finally {
+      markBusy(target.id, false);
+    }
+  }
+
+  // changeImportance changes the importance of the item, whatever its
+  // status. Unlike a status change there is nothing to undo.
+  async function changeImportance(target: ActionItem, importance: ActionItemImportance): Promise<void> {
+    if (busyIDs.has(target.id) || importance === target.importance) return;
+    markBusy(target.id, true);
+    setError(null);
+    try {
+      await client.updateActionItem(target.id, { importance, version: target.version });
+      await reload();
+    } catch (failure) {
+      if (isConflict(failure)) setConflict(true);
+      else setError(importanceError);
     } finally {
       markBusy(target.id, false);
     }
@@ -262,6 +282,7 @@ export default function TaskDetail({ id }: { id: string }) {
       <h1 className="detail-title" id={titleID}><Phrased text={item.content} /></h1>
       <div className="task-meta">
         <span className={`chip ${statuses[item.status].chip}`}><span className="sr-only">状態: </span>{statuses[item.status].label}</span>
+        <ImportanceChip item={item} />
         {item.source ? <span className="chip chip-auto">自動検出</span> : null}
       </div>
     </header>
@@ -290,6 +311,11 @@ export default function TaskDetail({ id }: { id: string }) {
     </div>
 
     <dl className="settings-facts detail-facts">
+      <div><dt><label htmlFor={importanceSelectID}>重要度</label></dt><dd>
+        <select id={importanceSelectID} className="detail-importance" value={item.importance} disabled={busy} onChange={(e) => { void changeImportance(item, e.target.value as ActionItemImportance); }}>
+          {importances.map((v) => <option key={v} value={v}>{importanceLabels[v]}</option>)}
+        </select>
+      </dd></div>
       {item.note ? <div><dt>補足</dt><dd className="detail-note"><Phrased text={item.note} /></dd></div> : null}
       {item.due_at ? <div><dt>期限</dt><dd title={fullDateTime(item.due_at)}>{due ? due.text : item.due_at}{due?.tone === 'past' && (open || candidate) ? '（超過）' : ''}</dd></div> : null}
       {event ? <div><dt>予定</dt><dd><Phrased text={event.title} /><br />{eventRange(event.start_at, event.end_at, now)}</dd></div> : null}

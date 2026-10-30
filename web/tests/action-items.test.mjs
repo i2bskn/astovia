@@ -6,6 +6,7 @@ const item = {
   id: 'item-1',
   content: '日程を返答する',
   status: 'open',
+  importance: 'normal',
   note: null,
   due_at: null,
   refs: [{ service: 'slack', url: 'https://example.com/x' }],
@@ -115,6 +116,19 @@ test('updateActionItem patches JSON', async () => {
   assert.equal(calls[0].init.method, 'PATCH');
   assert.equal(new Headers(calls[0].init.headers).get('content-type'), 'application/json');
   assert.deepEqual(JSON.parse(calls[0].init.body), { status: 'done', version: 1 });
+});
+
+test('importance is one of high, normal and low', async () => {
+  const { client, calls } = fake({ items: ['high', 'normal', 'low'].map((importance) => ({ ...item, importance })), next_cursor: null });
+  assert.equal((await client.listActionItems()).items.length, 3);
+  const { importance: _importance, ...withoutImportance } = item;
+  for (const body of [withoutImportance, { ...item, importance: 'urgent' }, { ...item, importance: '' }, { ...item, importance: null }, { ...item, importance: 1 }]) {
+    await assert.rejects(fake(body).client.getActionItem('item-1'), /Unexpected action item response/);
+  }
+  const patch = fake({ ...item, importance: 'high', version: 2 });
+  assert.equal((await patch.client.updateActionItem('item-1', { importance: 'high', version: 1 })).importance, 'high');
+  assert.deepEqual(JSON.parse(patch.calls[0].init.body), { importance: 'high', version: 1 });
+  assert.equal(calls.length, 1);
 });
 
 test('candidates and events are accepted', async () => {

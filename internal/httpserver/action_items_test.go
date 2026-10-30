@@ -110,7 +110,7 @@ func testActionItemsAPI(t *testing.T, driver string) {
 		t.Fatalf("create: %d %s", w.Code, w.Body.String())
 	}
 	body, keys := jsonKeys(t, w.Body.Bytes())
-	if !reflect.DeepEqual(keys, []string{"auto", "children", "content", "created_at", "due_at", "event", "id", "kind", "note", "parent", "parent_id", "refs", "source", "status", "updated_at", "version"}) {
+	if !reflect.DeepEqual(keys, []string{"auto", "children", "content", "created_at", "due_at", "event", "id", "importance", "kind", "note", "parent", "parent_id", "refs", "source", "status", "updated_at", "version"}) {
 		t.Fatalf("item keys: %v", keys)
 	}
 	if string(body["source"]) != "null" || string(body["auto"]) != "null" || string(body["kind"]) != `"task"` || string(body["event"]) != "null" {
@@ -133,7 +133,7 @@ func testActionItemsAPI(t *testing.T, driver string) {
 	if w.Header().Get("Location") != "/api/v1/action-items/"+item.ID || len(item.ID) != 43 {
 		t.Fatalf("Location=%q id=%q", w.Header().Get("Location"), item.ID)
 	}
-	if item.Content != " 日程を返答する " || item.Status != "open" || item.Version != 1 || item.Note == nil || *item.Note != "memo" {
+	if item.Content != " 日程を返答する " || item.Status != "open" || item.Importance != "normal" || item.Version != 1 || item.Note == nil || *item.Note != "memo" {
 		t.Fatalf("created: %+v", item)
 	}
 	if item.CreatedAt != "2026-10-23T01:02:03Z" || item.UpdatedAt != "2026-10-23T01:02:03Z" || item.DueAt == nil || *item.DueAt != "2026-10-24T00:30:00Z" {
@@ -179,7 +179,17 @@ func testActionItemsAPI(t *testing.T, driver string) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != 200 || got.Note != nil {
 		t.Fatalf("blank note: %d %s", w.Code, w.Body.String())
 	}
-	for _, body := range []string{`{}`, `{"version":4}`, `{"content":null}`, `{"status":null}`, `{"refs":null}`, `{"version":null,"status":"open"}`, `{"version":0,"status":"open"}`, `{"version":1.5,"status":"open"}`, `{"version":"4","status":"open"}`, `{"id":"x","status":"open"}`} {
+	// The importance changes alone, like any other field.
+	w = api.do("PATCH", "/api/v1/action-items/"+item.ID, api.alice, "application/json", `{"importance":"high","version":4}`)
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != 200 || got.Importance != "high" || got.Version != 5 || got.Status != "done" {
+		t.Fatalf("importance: %d %s", w.Code, w.Body.String())
+	}
+	w = api.do("PATCH", "/api/v1/action-items/"+item.ID, api.alice, "application/json", `{"importance":"urgent"}`)
+	expectStatus(t, w, 400, "invalid_request")
+	if !strings.Contains(w.Body.String(), "importance must be one of high, normal or low.") {
+		t.Fatalf("importance message: %s", w.Body.String())
+	}
+	for _, body := range []string{`{}`, `{"importance":null}`, `{"importance":1}`, `{"importance":"HIGH"}`, `{"version":4}`, `{"content":null}`, `{"status":null}`, `{"refs":null}`, `{"version":null,"status":"open"}`, `{"version":0,"status":"open"}`, `{"version":1.5,"status":"open"}`, `{"version":"4","status":"open"}`, `{"id":"x","status":"open"}`} {
 		expectStatus(t, api.do("PATCH", "/api/v1/action-items/"+item.ID, api.alice, "application/json", body), 400, "invalid_request")
 	}
 
@@ -293,6 +303,13 @@ func TestActionItemValidation(t *testing.T) {
 		{`{"content":"x","version":1}`, false},
 		{`{"content":"x","unknown":1}`, false},
 		{`{"content":"x","kind":"event"}`, false},
+		{`{"content":"x","importance":"high"}`, true},
+		{`{"content":"x","importance":"normal"}`, true},
+		{`{"content":"x","importance":"low"}`, true},
+		{`{"content":"x","importance":"urgent"}`, false},
+		{`{"content":"x","importance":""}`, false},
+		{`{"content":"x","importance":null}`, false},
+		{`{"content":"x","importance":2}`, false},
 		{`{"content":"x","event":null}`, false},
 	} {
 		w := api.do("POST", "/api/v1/action-items", api.alice, "application/json", tc.body)
@@ -300,10 +317,23 @@ func TestActionItemValidation(t *testing.T) {
 			t.Errorf("%.120s: got %d %s", tc.body, w.Code, w.Body.String())
 		}
 	}
+	if item := api.create(api.alice, `{"content":"x","importance":"low"}`); item.Importance != "low" {
+		t.Fatalf("created importance: %+v", item)
+	}
 	// Stored refs are the normalized form, not the raw input.
 	item := api.create(api.alice, `{"content":"x","refs":[{"url":"https://example.com/","service":"slack"}]}`)
 	if !reflect.DeepEqual(item.Refs, []actionItemRef{{Service: "slack", URL: "https://example.com/"}}) {
 		t.Fatalf("refs: %+v", item.Refs)
+	}
+}
+
+// A stored importance outside the three levels is returned as normal.
+func TestActionItemResponseImportance(t *testing.T) {
+	for stored, want := range map[string]string{"high": "high", "normal": "normal", "low": "low", "": "normal", "urgent": "normal"} {
+		out, err := toActionItemResponse(store.ActionItem{ID: "x", Refs: "[]", Importance: stored})
+		if err != nil || out.Importance != want {
+			t.Fatalf("%q: %+v %v", stored, out, err)
+		}
 	}
 }
 

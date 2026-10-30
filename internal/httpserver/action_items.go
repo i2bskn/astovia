@@ -42,15 +42,17 @@ type actionItemRef struct {
 
 // actionItemResponse is the public representation of an action item.
 type actionItemResponse struct {
-	ID        string          `json:"id"`
-	Content   string          `json:"content"`
-	Status    string          `json:"status"`
-	Note      *string         `json:"note"`
-	DueAt     *string         `json:"due_at"`
-	Refs      []actionItemRef `json:"refs"`
-	Version   int64           `json:"version"`
-	CreatedAt string          `json:"created_at"`
-	UpdatedAt string          `json:"updated_at"`
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	Status  string `json:"status"`
+	// Importance is "high", "normal" or "low".
+	Importance string          `json:"importance"`
+	Note       *string         `json:"note"`
+	DueAt      *string         `json:"due_at"`
+	Refs       []actionItemRef `json:"refs"`
+	Version    int64           `json:"version"`
+	CreatedAt  string          `json:"created_at"`
+	UpdatedAt  string          `json:"updated_at"`
 	// Source is the integration that created the item, or null. Auto
 	// describes an automatic completion, or is null. The source key and the
 	// tracking flag are internal and not returned.
@@ -115,7 +117,12 @@ func toActionItemResponse(item store.ActionItem) (actionItemResponse, error) {
 	if refs == nil {
 		refs = []actionItemRef{}
 	}
-	out := actionItemResponse{ID: item.ID, Content: item.Content, Status: item.Status, Refs: refs, Version: item.Version, CreatedAt: formatTime(item.CreatedAt), UpdatedAt: formatTime(item.UpdatedAt)}
+	out := actionItemResponse{ID: item.ID, Content: item.Content, Status: item.Status, Importance: item.Importance, Refs: refs, Version: item.Version, CreatedAt: formatTime(item.CreatedAt), UpdatedAt: formatTime(item.UpdatedAt)}
+	// The column has no check constraint; an unknown level reads as normal
+	// so that clients can rely on the three values.
+	if !store.ValidImportance(out.Importance) {
+		out.Importance = store.ImportanceNormal
+	}
 	if item.Note.Valid {
 		out.Note = &item.Note.String
 	}
@@ -161,7 +168,8 @@ type actionItemFields struct {
 	DueAt   json.RawMessage `json:"due_at"`
 	Refs    json.RawMessage `json:"refs"`
 	// ParentID is the parent's ID, or null for no parent.
-	ParentID json.RawMessage `json:"parent_id"`
+	ParentID   json.RawMessage `json:"parent_id"`
+	Importance json.RawMessage `json:"importance"`
 }
 
 type actionItemPatch struct {
@@ -267,6 +275,13 @@ func (in actionItemFields) parse() (func(*store.ActionItem), int, string) {
 			parent = sql.NullString{String: v, Valid: true}
 		}
 		sets = append(sets, func(item *store.ActionItem) { item.ParentID = parent })
+	}
+	if in.Importance != nil {
+		v, ok := decodeString(in.Importance)
+		if !ok || !store.ValidImportance(v) {
+			return nil, 0, importanceMessage
+		}
+		sets = append(sets, func(item *store.ActionItem) { item.Importance = v })
 	}
 	return func(item *store.ActionItem) {
 		for _, set := range sets {
@@ -441,8 +456,10 @@ func decodeAutoCursor(v string) (*store.AutoActionItemCursor, bool) {
 const (
 	parentMessage = "parent_id must be the id of your item that has no parent, and an item with subtasks cannot have a parent."
 	statusMessage = "status must be open, candidate, done or dismissed."
-	limitMessage  = "limit must be an integer from 1 to 100."
-	cursorMessage = "cursor is invalid."
+	// importanceMessage is shared with the MCP tools.
+	importanceMessage = "importance must be one of high, normal or low."
+	limitMessage      = "limit must be an integer from 1 to 100."
+	cursorMessage     = "cursor is invalid."
 )
 
 // listActionItems lists the user's items. An empty status lists every status
@@ -562,7 +579,7 @@ func (s *Server) createActionItem(ctx context.Context, userID string, body actio
 		return actionItemResponse{}, storeError("create", userID, err)
 	}
 	now := s.auth.Now().Unix()
-	item := store.ActionItem{ID: id, UserID: userID, Status: "open", Refs: "[]", Version: 1, CreatedAt: now, UpdatedAt: now, Kind: store.KindTask}
+	item := store.ActionItem{ID: id, UserID: userID, Status: "open", Refs: "[]", Version: 1, CreatedAt: now, UpdatedAt: now, Kind: store.KindTask, Importance: store.ImportanceNormal}
 	apply(&item)
 	if err = s.auth.Store.CreateActionItem(ctx, item); err != nil {
 		return actionItemResponse{}, storeError("create", userID, err)
@@ -599,7 +616,7 @@ func (s *Server) updateActionItem(ctx context.Context, userID, id string, body a
 		return actionItemResponse{}, invalidRequest(msg)
 	}
 	if n == 0 {
-		return actionItemResponse{}, invalidRequest("At least one of content, status, note, due_at, refs or parent_id is required.")
+		return actionItemResponse{}, invalidRequest("At least one of content, status, note, due_at, refs, parent_id or importance is required.")
 	}
 	now := s.auth.Now().Unix()
 	item, err := s.auth.Store.UpdateActionItem(ctx, userID, id, func(item *store.ActionItem) error {

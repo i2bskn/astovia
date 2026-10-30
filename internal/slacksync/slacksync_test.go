@@ -334,15 +334,20 @@ func aiNoAction(summary string) func(http.ResponseWriter) {
 }
 
 // aiJudged answers a judgment with a decision and an event (empty strings
-// for none), without a topic or a related task.
+// for none), without a topic or a related task, of normal importance.
 func aiJudged(decision, task, summary, eventTitle, eventStart, eventEnd string) func(http.ResponseWriter) {
-	return aiText(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd, "topic": "", "same_as": ""})
+	return aiJudgedImportance(ai.ImportanceNormal, decision, task, summary, eventTitle, eventStart, eventEnd)
+}
+
+// aiJudgedImportance is aiJudged with the given importance.
+func aiJudgedImportance(importance, decision, task, summary, eventTitle, eventStart, eventEnd string) func(http.ResponseWriter) {
+	return aiText(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd, "topic": "", "same_as": "", "importance": importance})
 }
 
 // aiGrouped answers a judgment with a task that the AI put in the same
 // matter as the related task sameAs.
 func aiGrouped(decision, task, topic, sameAs string) func(http.ResponseWriter) {
-	return aiText(map[string]any{"decision": decision, "task": task, "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs})
+	return aiText(map[string]any{"decision": decision, "task": task, "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs, "importance": "normal"})
 }
 
 func aiResolved(v bool) func(http.ResponseWriter) {

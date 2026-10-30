@@ -6,7 +6,7 @@ import { dueLabel } from '../.test-build/format.js';
 
 function task(id, extra = {}) {
   return {
-    id, content: id, status: 'open', note: null, due_at: null, refs: [], version: 1,
+    id, content: id, status: 'open', importance: 'normal', note: null, due_at: null, refs: [], version: 1,
     created_at: '2026-10-28T00:00:00Z', updated_at: '2026-10-28T00:00:00Z', kind: 'task', event: null,
     parent_id: null, parent: null, children: null, ...extra,
   };

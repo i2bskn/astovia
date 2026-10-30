@@ -129,7 +129,7 @@ func TestEnvironmentIsIgnored(t *testing.T) {
 			if r.method != "GET" || r.path != "/v1/models/claude-haiku-5-5" {
 				t.Fatalf("request: %s %s", r.method, r.path)
 			}
-			f.set(message("end_turn", `{"decision":"none","task":"","summary":"x","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`))
+			f.set(message("end_turn", `{"decision":"none","task":"","summary":"x","event_title":"","event_start":"","event_end":"","topic":"","same_as":"","importance":"normal"}`))
 			if _, err := c.JudgeMention(context.Background(), testCred, "claude-haiku-5-5", testInput()); err != nil {
 				t.Fatal(err)
 			}
@@ -197,7 +197,7 @@ func TestErrorClasses(t *testing.T) {
 }
 
 func TestJudgeMention(t *testing.T) {
-	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"  設計方針について回答する​ ","summary":"bob さんが質問","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`))
+	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"  設計方針について回答する​ ","summary":"bob さんが質問","event_title":"","event_start":"","event_end":"","topic":"","same_as":"","importance":"normal"}`))
 	res, err := c.JudgeMention(context.Background(), testCred, "claude-sonnet-5-5", testInput())
 	if err != nil || res.Decision != DecisionTask || res.Event != nil || res.Task != "設計方針について回答する" || res.Summary != "bob さんが質問" {
 		t.Fatalf("result: %+v %v", res, err)
@@ -238,28 +238,29 @@ func TestJudgeMention(t *testing.T) {
 		t.Fatalf("messages: %s", r.body)
 	}
 	schema := body.OutputConfig.Format.Schema
-	if body.OutputConfig.Effort != "low" || body.OutputConfig.Format.Type != "json_schema" || schema["additionalProperties"] != false || len(schema["required"].([]any)) != 8 {
+	if body.OutputConfig.Effort != "low" || body.OutputConfig.Format.Type != "json_schema" || schema["additionalProperties"] != false || len(schema["required"].([]any)) != 9 {
 		t.Fatalf("output_config: %s", r.body)
 	}
 
 	long := strings.Repeat("あ", 300)
-	f.set(message("end_turn", `{"decision":"none","task":"ignored","summary":"`+long+`","event_title":"MTG","event_start":"2026-10-29T12:30","event_end":"","topic":"話題","same_as":"t1"}`))
+	f.set(message("end_turn", `{"decision":"none","task":"ignored","summary":"`+long+`","event_title":"MTG","event_start":"2026-10-29T12:30","event_end":"","topic":"話題","same_as":"t1","importance":"normal"}`))
 	if res, err = c.JudgeMention(context.Background(), testCred, "claude-haiku-5-5", testInput()); err != nil || res.Decision != DecisionNone || res.Event != nil || res.Task != "" || res.Summary != strings.Repeat("あ", 200) || res.Topic != "" || res.SameAs != "" {
 		t.Fatalf("no action: %+v %v", res, err)
 	}
 
 	for name, reply := range map[string]func(http.ResponseWriter, *http.Request){
-		"refusal":          message("refusal", `{"decision":"task","task":"x","summary":"y"`+noEvent+`}`),
-		"max_tokens":       message("max_tokens", `{"decision":"task","task":"x","summary":"y"`+noEvent+`}`),
-		"invalid JSON":     message("end_turn", `{"decision":"task",`),
-		"missing field":    message("end_turn", `{"decision":"task","task":"x","summary":"y"}`),
-		"missing topic":    message("end_turn", `{"decision":"task","task":"x","summary":"y","event_title":"","event_start":"","event_end":"","same_as":""}`),
-		"missing same_as":  message("end_turn", `{"decision":"task","task":"x","summary":"y","event_title":"","event_start":"","event_end":"","topic":""}`),
-		"extra field":      message("end_turn", `{"decision":"task","task":"x","summary":"y"`+noEvent+`,"due":"z"}`),
-		"old field":        message("end_turn", `{"needs_action":true,"task":"x","summary":"y"`+noEvent+`}`),
-		"unknown decision": message("end_turn", `{"decision":"maybe","task":"x","summary":"y"`+noEvent+`}`),
-		"empty task":       message("end_turn", `{"decision":"task","task":" \n","summary":"y"`+noEvent+`}`),
-		"empty candidate":  message("end_turn", `{"decision":"candidate","task":"","summary":"y"`+noEvent+`}`),
+		"refusal":            message("refusal", `{"decision":"task","task":"x","summary":"y"`+noEvent+`}`),
+		"max_tokens":         message("max_tokens", `{"decision":"task","task":"x","summary":"y"`+noEvent+`}`),
+		"invalid JSON":       message("end_turn", `{"decision":"task",`),
+		"missing field":      message("end_turn", `{"decision":"task","task":"x","summary":"y"}`),
+		"missing topic":      message("end_turn", `{"decision":"task","task":"x","summary":"y","event_title":"","event_start":"","event_end":"","same_as":"","importance":"normal"}`),
+		"missing same_as":    message("end_turn", `{"decision":"task","task":"x","summary":"y","event_title":"","event_start":"","event_end":"","topic":"","importance":"normal"}`),
+		"missing importance": message("end_turn", `{"decision":"task","task":"x","summary":"y","event_title":"","event_start":"","event_end":"","topic":"","same_as":""}`),
+		"extra field":        message("end_turn", `{"decision":"task","task":"x","summary":"y"`+noEvent+`,"due":"z"}`),
+		"old field":          message("end_turn", `{"needs_action":true,"task":"x","summary":"y"`+noEvent+`}`),
+		"unknown decision":   message("end_turn", `{"decision":"maybe","task":"x","summary":"y"`+noEvent+`}`),
+		"empty task":         message("end_turn", `{"decision":"task","task":" \n","summary":"y"`+noEvent+`}`),
+		"empty candidate":    message("end_turn", `{"decision":"candidate","task":"","summary":"y"`+noEvent+`}`),
 	} {
 		f.set(reply)
 		if _, err = c.JudgeMention(context.Background(), testCred, "claude-haiku-5-5", testInput()); !errors.Is(err, ErrUnusable) {
@@ -268,9 +269,9 @@ func TestJudgeMention(t *testing.T) {
 	}
 }
 
-// noEvent is the event, topic and same_as fields of an answer without an
-// event or related task.
-const noEvent = `,"event_title":"","event_start":"","event_end":"","topic":"","same_as":""`
+// noEvent is the event, topic, same_as and importance fields of an answer
+// without an event or related task.
+const noEvent = `,"event_title":"","event_start":"","event_end":"","topic":"","same_as":"","importance":"normal"`
 
 func TestOutputSchema(t *testing.T) {
 	data, err := json.Marshal(outputSchema)
@@ -285,11 +286,14 @@ func TestOutputSchema(t *testing.T) {
 	if err = json.Unmarshal(data, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(schema.Required, ",") != "decision,task,summary,event_title,event_start,event_end,topic,same_as" || schema.AdditionalProperties || len(schema.Properties) != 8 {
+	if strings.Join(schema.Required, ",") != "decision,task,summary,event_title,event_start,event_end,topic,same_as,importance" || schema.AdditionalProperties || len(schema.Properties) != 9 {
 		t.Fatalf("schema: %s", data)
 	}
 	if enum, _ := json.Marshal(schema.Properties["decision"]["enum"]); string(enum) != `["task","candidate","none"]` {
 		t.Fatalf("decision enum: %s", enum)
+	}
+	if enum, _ := json.Marshal(schema.Properties["importance"]["enum"]); string(enum) != `["high","normal","low"]` {
+		t.Fatalf("importance enum: %s", enum)
 	}
 }
 
@@ -299,7 +303,7 @@ func TestParseResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	answer := func(decision, task, title, start, end string) string {
-		v, _ := json.Marshal(map[string]string{"decision": decision, "task": task, "summary": "s", "event_title": title, "event_start": start, "event_end": end, "topic": "", "same_as": ""})
+		v, _ := json.Marshal(map[string]string{"decision": decision, "task": task, "summary": "s", "event_title": title, "event_start": start, "event_end": end, "topic": "", "same_as": "", "importance": "normal"})
 		return string(v)
 	}
 	start := time.Date(2026, 10, 29, 12, 30, 0, 0, tokyo)
@@ -339,7 +343,7 @@ func TestParseResult(t *testing.T) {
 func TestParseResultTopic(t *testing.T) {
 	related := []RelatedTask{{ID: "t1", Task: "調査する"}, {ID: "t2", Task: "まとめ", Subtasks: []string{"報告する"}}}
 	answer := func(decision, topic, sameAs string) string {
-		v, _ := json.Marshal(map[string]string{"decision": decision, "task": "x", "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs})
+		v, _ := json.Marshal(map[string]string{"decision": decision, "task": "x", "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs, "importance": "normal"})
 		return string(v)
 	}
 	long := strings.Repeat("話", 50)
@@ -362,6 +366,28 @@ func TestParseResultTopic(t *testing.T) {
 	// Without related tasks no symbol is known.
 	if r, err := parseResult(answer("task", "障害", "t1"), time.UTC, nil); err != nil || r.SameAs != "" {
 		t.Fatalf("no related: %+v %v", r, err)
+	}
+}
+
+func TestParseResultImportance(t *testing.T) {
+	answer := func(decision, importance string) string {
+		v, _ := json.Marshal(map[string]string{"decision": decision, "task": "x", "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": "", "same_as": "", "importance": importance})
+		return string(v)
+	}
+	for name, tc := range map[string]struct {
+		text, importance string
+	}{
+		"high":           {answer("task", "high"), ImportanceHigh},
+		"normal":         {answer("task", "normal"), ImportanceNormal},
+		"low":            {answer("candidate", "low"), ImportanceLow},
+		"unknown":        {answer("task", "urgent"), ImportanceNormal},
+		"empty":          {answer("task", ""), ImportanceNormal},
+		"none is normal": {answer("none", "high"), ImportanceNormal},
+	} {
+		r, err := parseResult(tc.text, time.UTC, nil)
+		if err != nil || r.Importance != tc.importance {
+			t.Fatalf("%s: %+v %v", name, r, err)
+		}
 	}
 }
 

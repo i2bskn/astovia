@@ -58,6 +58,9 @@ const (
 	mentionRetryLimit = 6 * time.Hour
 	// mentionDoneTTL is how long a completely handled thread is remembered.
 	mentionDoneTTL = time.Hour
+	// notifyAge is the age after which a high-importance mention is not
+	// notified while immediate notifications are off.
+	notifyAge = 2 * time.Hour
 )
 
 // Error codes stored in ai_settings.last_error by the synchronization.
@@ -479,7 +482,9 @@ func (r *run) location() (*time.Location, error) {
 }
 
 // createMention creates the item of a mention unless it exists. Mention
-// items are not tracked. A candidate is not notified. An open task the AI
+// items are not tracked. A candidate is not notified. While immediate
+// notifications are off, an open high-importance task is still notified if
+// the mention is within notifyAge; an event is not. An open task the AI
 // judged to belong to the same matter as one of related is grouped with it
 // (see groupParent).
 func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p mentionPost, o mentionOutcome, res ai.MentionResult, related map[string]store.RelatedTask) error {
@@ -502,10 +507,13 @@ func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p m
 		return err
 	}
 	item := store.ActionItem{ID: id, Status: "open", Refs: string(refs), Version: 1, CreatedAt: now, UpdatedAt: now,
-		Source: nullString(store.SourceGitHub), SourceKey: nullString(key), Tracking: 0, DetectedAt: nullInt(now)}
+		Source: nullString(store.SourceGitHub), SourceKey: nullString(key), Tracking: 0, DetectedAt: nullInt(now), Kind: store.KindTask, Importance: store.ImportanceNormal}
 	switch o {
 	case mentionAction, mentionCandidate:
 		item.Content = res.Task
+		if res.Importance != "" {
+			item.Importance = res.Importance
+		}
 		if o == mentionCandidate {
 			item.Status = "candidate"
 		}
@@ -526,6 +534,7 @@ func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p m
 	if err != nil {
 		return err
 	}
+	fresh := !p.since.Before(r.s.Now().Add(-notifyAge))
 	return r.s.Store.GitHubSync(r.parent, r.conn.UserID, r.conn.Generation, func(tx *store.GitHubTx) error {
 		if _, found, e := tx.LockItemBySourceKey(key); e != nil || found {
 			return e
@@ -545,7 +554,7 @@ func (r *run) createMention(key string, gref github.Ref, issue github.Issue, p m
 			item.ParentID = sql.NullString{}
 			created, e = tx.CreateItem(item)
 		}
-		if e != nil || !created || item.Status != "open" || tx.Conn.ImmediateNotify != 1 {
+		if e != nil || !created || item.Status != "open" || (tx.Conn.ImmediateNotify != 1 && !(item.Importance == store.ImportanceHigh && item.Kind == store.KindTask && fresh)) {
 			return e
 		}
 		return tx.Enqueue(mentionNotification(name, item, now))
@@ -641,7 +650,16 @@ func mentionNotification(name string, item store.ActionItem, now int64) store.No
 	}
 	return store.Notification{ID: id, Kind: store.NotificationDetected, ActionItemID: nullString(item.ID),
 		DedupeKey: "detected:" + item.ID + ":" + strconv.FormatInt(item.Version, 10),
-		Title:     "メンション: " + name, Body: item.Content, URL: "/tasks/" + item.ID, ScheduledAt: now, CreatedAt: now}
+		Title:     importantTitle(item, "メンション: "+name), Body: item.Content, URL: "/tasks/" + item.ID, ScheduledAt: now, CreatedAt: now}
+}
+
+// importantTitle returns title with 【重要】 in front when item is of high
+// importance.
+func importantTitle(item store.ActionItem, title string) string {
+	if item.Importance == store.ImportanceHigh {
+		return "【重要】" + title
+	}
+	return title
 }
 
 // mentions reports whether body mentions @login (ASCII case-insensitive).

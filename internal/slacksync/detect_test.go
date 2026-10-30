@@ -145,6 +145,53 @@ func TestCandidatesAndEvents(t *testing.T) {
 	})
 }
 
+// While immediate notifications are off, only an open task of high
+// importance is notified, with 【重要】 in the title. Candidates and events
+// are not notified.
+func TestImportance(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		st := newSyncTest(t, driver)
+		off := false
+		st.settings(store.SlackSettings{ImmediateNotify: &off})
+		st.advance(time.Minute)
+		m1, m2, m3 := st.ts(5*time.Minute, 1), st.ts(4*time.Minute, 1), st.ts(3*time.Minute, 1)
+		st.sl.post("C1", msg{TS: m1, User: "U2", Text: "<@U1> 本番障害です。至急見てください"})
+		st.sl.post("C1", msg{TS: m2, User: "U2", Text: "<@U1> 来週レビューしてください"})
+		st.sl.post("C1", msg{TS: m3, User: "U2", Text: "<@U3> 至急お願いします cc <@U1>"})
+		// Newest first.
+		st.ai.set(
+			aiJudgedImportance(ai.ImportanceHigh, ai.DecisionCandidate, "対応を確認する", "s", "", "", ""),
+			aiJudgedImportance(ai.ImportanceNormal, ai.DecisionTask, "レビューする", "s", "", "", ""),
+			aiJudgedImportance(ai.ImportanceHigh, ai.DecisionTask, "本番障害を調査する", "s", "", "", ""),
+		)
+		st.sync()
+		if st.ai.count() != 3 {
+			t.Fatalf("AI calls: %d", st.ai.count())
+		}
+		high, normal, candidate := st.mustItem(mentionKey("C1", "-", m1)), st.mustItem(mentionKey("C1", "-", m2)), st.mustItem(mentionKey("C1", "-", m3))
+		if high.Status != "open" || high.Importance != store.ImportanceHigh || normal.Status != "open" || normal.Importance != store.ImportanceNormal || candidate.Status != "candidate" || candidate.Importance != store.ImportanceHigh {
+			t.Fatalf("items: %+v %+v %+v", high, normal, candidate)
+		}
+		if p := st.pending(); len(p) != 1 || p[0].ActionItemID.String != high.ID || p[0].Title != "【重要】Slack: メンション" {
+			t.Fatalf("notifications: %+v", p)
+		}
+
+		// A high-importance event is not notified.
+		st.advance(time.Minute)
+		m4 := st.ts(time.Minute, 1)
+		st.sl.post("C1", msg{TS: m4, User: "U2", Text: "<@U1> 明日 12:30 に打ち合わせ"})
+		start := st.now.Add(24 * time.Hour).Truncate(time.Minute)
+		st.ai.set(aiJudgedImportance(ai.ImportanceHigh, ai.DecisionTask, "打ち合わせを登録する", "s", "打ち合わせ", start.UTC().Format("2006-01-02T15:04"), ""))
+		st.sync()
+		if event := st.mustItem(mentionKey("C1", "-", m4)); event.Kind != store.KindEvent || event.Importance != store.ImportanceHigh {
+			t.Fatalf("event: %+v", event)
+		}
+		if p := st.pending(); len(p) != 1 {
+			t.Fatalf("event notified: %+v", p)
+		}
+	})
+}
+
 // related returns the related tasks of an AI input as "id:task" strings,
 // with the subtasks in brackets and "!" for a closed group.
 func related(in map[string]any) []string {

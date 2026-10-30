@@ -28,10 +28,10 @@ func testActionItems(t *testing.T, driver string) {
 	}
 
 	// Round trip with and without the nullable columns. An empty kind is
-	// stored as "task".
+	// stored as "task" and an empty importance as "normal".
 	plain := store.ActionItem{ID: "plain", UserID: "alice-id", Content: "reply", Status: "open", Refs: "[]", Version: 1, CreatedAt: 100, UpdatedAt: 100}
 	full := store.ActionItem{ID: "full", UserID: "alice-id", Content: "call", Status: "done", Note: sql.NullString{String: "note", Valid: true}, DueAt: sql.NullInt64{Int64: 1700000000, Valid: true}, Refs: `[{"service":"slack"}]`, Version: 1, CreatedAt: 101, UpdatedAt: 101,
-		Kind: store.KindEvent, EventTitle: sql.NullString{String: "MTG", Valid: true}, EventStartAt: sql.NullInt64{Int64: 1700000000, Valid: true}, EventEndAt: sql.NullInt64{Int64: 1700003600, Valid: true}}
+		Kind: store.KindEvent, EventTitle: sql.NullString{String: "MTG", Valid: true}, EventStartAt: sql.NullInt64{Int64: 1700000000, Valid: true}, EventEndAt: sql.NullInt64{Int64: 1700003600, Valid: true}, Importance: store.ImportanceHigh}
 	for _, item := range []store.ActionItem{plain, full} {
 		if err := s.CreateActionItem(ctx, item); err != nil {
 			t.Fatal(err)
@@ -43,11 +43,14 @@ func testActionItems(t *testing.T, driver string) {
 		if item.Kind == "" {
 			item.Kind = store.KindTask
 		}
+		if item.Importance == "" {
+			item.Importance = store.ImportanceNormal
+		}
 		if !reflect.DeepEqual(got, item) {
 			t.Fatalf("round trip:\ngot  %+v\nwant %+v", got, item)
 		}
 	}
-	plain.Kind = store.KindTask
+	plain.Kind, plain.Importance = store.KindTask, store.ImportanceNormal
 	list, err := s.ListActionItems(ctx, "alice-id", "", nil, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +82,7 @@ func testActionItems(t *testing.T, driver string) {
 	updated, err := s.UpdateActionItem(ctx, "alice-id", "plain", func(item *store.ActionItem) error {
 		item.Content, item.Status, item.UpdatedAt = "replied", "done", 200
 		item.Kind, item.EventTitle, item.EventStartAt = store.KindEvent, sql.NullString{String: "MTG", Valid: true}, sql.NullInt64{Int64: 300, Valid: true}
+		item.Importance = store.ImportanceLow
 		item.ID, item.UserID, item.CreatedAt, item.Version = "other", "bob-id", 1, 99
 		return nil
 	})
@@ -88,6 +92,7 @@ func testActionItems(t *testing.T, driver string) {
 	want := plain
 	want.Content, want.Status, want.UpdatedAt, want.Version = "replied", "done", 200, 2
 	want.Kind, want.EventTitle, want.EventStartAt = store.KindEvent, sql.NullString{String: "MTG", Valid: true}, sql.NullInt64{Int64: 300, Valid: true}
+	want.Importance = store.ImportanceLow
 	if !reflect.DeepEqual(updated, want) {
 		t.Fatalf("update:\ngot  %+v\nwant %+v", updated, want)
 	}

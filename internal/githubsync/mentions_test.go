@@ -77,10 +77,15 @@ func aiOK(needsAction bool, task, summary string) func(http.ResponseWriter) {
 }
 
 // aiJudged answers a judgment with a decision and an event (empty strings
-// for none).
+// for none), of normal importance.
 func aiJudged(decision, task, summary, eventTitle, eventStart, eventEnd string) func(http.ResponseWriter) {
+	return aiJudgedImportance(ai.ImportanceNormal, decision, task, summary, eventTitle, eventStart, eventEnd)
+}
+
+// aiJudgedImportance is aiJudged with the given importance.
+func aiJudgedImportance(importance, decision, task, summary, eventTitle, eventStart, eventEnd string) func(http.ResponseWriter) {
 	return func(w http.ResponseWriter) {
-		out, _ := json.Marshal(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd, "topic": "", "same_as": ""})
+		out, _ := json.Marshal(map[string]any{"decision": decision, "task": task, "summary": summary, "event_title": eventTitle, "event_start": eventStart, "event_end": eventEnd, "topic": "", "same_as": "", "importance": importance})
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
 			"content": []map[string]any{{"type": "text", "text": string(out)}}, "stop_reason": "end_turn", "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}})
@@ -96,10 +101,17 @@ func aiError(code int) func(http.ResponseWriter) {
 }
 
 // newMentionTest is a synchronization test after the initial import, with
-// the AI configured for alice.
+// the AI configured for alice and immediate notifications on.
 func newMentionTest(t *testing.T, driver string) (*syncTest, *fakeAI) {
 	t.Helper()
-	st := newSyncTest(t, driver, true)
+	return newMentionTestImmediate(t, driver, true)
+}
+
+// newMentionTestImmediate is newMentionTest with immediate notifications
+// on or off.
+func newMentionTestImmediate(t *testing.T, driver string, immediate bool) (*syncTest, *fakeAI) {
+	t.Helper()
+	st := newSyncTest(t, driver, immediate)
 	st.gh.set(func(f *fakeGitHub) { f.headers["/notifications"] = map[string]string{"Last-Modified": "v1"} })
 	st.sync()
 	fa := &fakeAI{}
@@ -240,6 +252,56 @@ func TestMentionDetection(t *testing.T) {
 		st.sync()
 		if st.gh.requested("/repos/o/r/issues/1") != reads+1 || fa.count() != 2 || st.count() != 2 {
 			t.Fatalf("updated thread: %d reads, %d AI calls, %d items", st.gh.requested("/repos/o/r/issues/1")-reads, fa.count(), st.count())
+		}
+	})
+}
+
+// While immediate notifications are off, only a recent open task of high
+// importance is notified, with 【重要】 in the title.
+func TestMentionImportance(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		st, fa := newMentionTestImmediate(t, driver, false)
+		recent := st.now.Add(-30 * time.Minute)
+		st.issueWithComments(
+			comment(31, "bob", "@octocat 本番障害です。至急見てください", recent),
+			comment(32, "bob", "@octocat 来週レビューしてください", recent.Add(time.Minute)),
+			comment(33, "bob", "@carol 至急お願いします cc @octocat", recent.Add(2*time.Minute)),
+		)
+		fa.set(func(f *fakeAI) {
+			f.replies = []func(http.ResponseWriter){
+				aiJudgedImportance(ai.ImportanceHigh, ai.DecisionTask, "本番障害を調査する", "s", "", "", ""),
+				aiJudgedImportance(ai.ImportanceNormal, ai.DecisionTask, "レビューする", "s", "", "", ""),
+				aiJudgedImportance(ai.ImportanceHigh, ai.DecisionCandidate, "対応を確認する", "s", "", "", ""),
+			}
+		})
+		st.advance(time.Minute)
+		st.sync()
+		if fa.count() != 3 {
+			t.Fatalf("AI calls: %d", fa.count())
+		}
+		high := st.mustItem(mentionKey(1, "c31"))
+		normal := st.mustItem(mentionKey(1, "c32"))
+		candidate := st.mustItem(mentionKey(1, "c33"))
+		if high.Status != "open" || high.Importance != store.ImportanceHigh || normal.Status != "open" || normal.Importance != store.ImportanceNormal || candidate.Status != "candidate" || candidate.Importance != store.ImportanceHigh {
+			t.Fatalf("items: %+v %+v %+v", high, normal, candidate)
+		}
+		if p := st.pending(); len(p) != 1 || p[0].ActionItemID.String != high.ID || p[0].Title != "【重要】メンション: o/r#1" {
+			t.Fatalf("notifications: %+v", p)
+		}
+
+		// A high-importance mention older than notifyAge is not notified.
+		st, fa = newMentionTestImmediate(t, driver, false)
+		st.issueWithComments(comment(41, "bob", "@octocat 至急お願いします", st.now.Add(-3*time.Hour)))
+		fa.set(func(f *fakeAI) {
+			f.replies = []func(http.ResponseWriter){aiJudgedImportance(ai.ImportanceHigh, ai.DecisionTask, "対応する", "s", "", "", "")}
+		})
+		st.advance(time.Minute)
+		st.sync()
+		if old := st.mustItem(mentionKey(1, "c41")); old.Status != "open" || old.Importance != store.ImportanceHigh {
+			t.Fatalf("old item: %+v", old)
+		}
+		if p := st.pending(); len(p) != 0 {
+			t.Fatalf("old mention notified: %+v", p)
 		}
 	})
 }
@@ -727,7 +789,7 @@ func TestMentions(t *testing.T) {
 // matter as the related task sameAs.
 func aiGrouped(task, topic, sameAs string) func(http.ResponseWriter) {
 	return func(w http.ResponseWriter) {
-		out, _ := json.Marshal(map[string]any{"decision": ai.DecisionTask, "task": task, "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs})
+		out, _ := json.Marshal(map[string]any{"decision": ai.DecisionTask, "task": task, "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": topic, "same_as": sameAs, "importance": "normal"})
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "msg", "type": "message", "role": "assistant", "model": "claude-haiku-5-5",
 			"content": []map[string]any{{"type": "text", "text": string(out)}}, "stop_reason": "end_turn", "usage": map[string]int{"input_tokens": 1, "output_tokens": 1}})

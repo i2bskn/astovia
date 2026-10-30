@@ -293,7 +293,7 @@ func (t *sourceTx) CreateItem(item ActionItem) (bool, error) {
 			return false, e
 		}
 	}
-	n, e := t.q.insertSourcedActionItem(t.ctx, withKind(item))
+	n, e := t.q.insertSourcedActionItem(t.ctx, withDefaults(item))
 	if e != nil || n != 1 || !item.ParentID.Valid {
 		return n == 1, e
 	}

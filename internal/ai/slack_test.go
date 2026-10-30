@@ -47,13 +47,13 @@ func userText(t *testing.T, raw []byte) (string, string, map[string]any) {
 }
 
 func TestJudgeSlack(t *testing.T) {
-	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"返事する","summary":"bob さんが依頼","event_title":"","event_start":"","event_end":"","topic":"資料の件","same_as":"t2"}`))
+	f, c := newFake(t, message("end_turn", `{"decision":"task","task":"返事する","summary":"bob さんが依頼","event_title":"","event_start":"","event_end":"","topic":"資料の件","same_as":"t2","importance":"normal"}`))
 	res, err := c.JudgeSlack(context.Background(), testCred, "claude-haiku-5-5", slackInput())
 	if err != nil || res.Decision != DecisionTask || res.Task != "返事する" || res.Topic != "資料の件" || res.SameAs != "t2" {
 		t.Fatalf("result: %+v %v", res, err)
 	}
 	text, system, schema := userText(t, f.last().body)
-	if system != SlackSystemPrompt || len(schema["required"].([]any)) != 8 {
+	if system != SlackSystemPrompt || len(schema["required"].([]any)) != 9 {
 		t.Fatalf("system or schema: %s", f.last().body)
 	}
 	// The posts are one JSON document; a body cannot forge the structure.
@@ -92,7 +92,7 @@ func TestJudgeSlack(t *testing.T) {
 		t.Fatalf("related tasks: %+v", r)
 	}
 	// A symbol the input did not give is dropped.
-	f.set(message("end_turn", `{"decision":"task","task":"返事する","summary":"s","event_title":"","event_start":"","event_end":"","topic":"資料の件","same_as":"t9"}`))
+	f.set(message("end_turn", `{"decision":"task","task":"返事する","summary":"s","event_title":"","event_start":"","event_end":"","topic":"資料の件","same_as":"t9","importance":"normal"}`))
 	if res, err = c.JudgeSlack(context.Background(), testCred, "claude-haiku-5-5", slackInput()); err != nil || res.SameAs != "" || res.Topic != "資料の件" {
 		t.Fatalf("unknown symbol: %+v %v", res, err)
 	}
@@ -187,7 +187,7 @@ func TestSlackPostTimesInLocation(t *testing.T) {
 // closed groups out of the duplicate rule.
 func TestPromptsExplainGrouping(t *testing.T) {
 	for name, prompt := range map[string]string{"github": SystemPrompt, "slack": SlackSystemPrompt} {
-		for _, want := range []string{`"related_tasks"`, "同じ用件のまとまり", "同じ相手・同じ会話というだけでは同じとしません", "迷ったら same_as は空文字", "decision を none にしてください", `"closed": true のものとその subtasks は same_as の候補としてだけ使い`, "- topic:", "- same_as:"} {
+		for _, want := range []string{`"related_tasks"`, "同じ用件のまとまり", "同じ相手・同じ会話というだけでは同じとしません", "迷ったら same_as は空文字", "decision を none にしてください", `"closed": true のものとその subtasks は same_as の候補としてだけ使い`, "- topic:", "- same_as:", "- importance:", "開始が近くても \"normal\""} {
 			if !strings.Contains(prompt, want) {
 				t.Fatalf("%s prompt lacks %q", name, want)
 			}

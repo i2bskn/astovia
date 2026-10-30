@@ -54,7 +54,8 @@ task か candidate か迷ったら candidate、candidate か none か迷った�
 - event_start: 予定の開始日時。"timezone" の現地時刻で YYYY-MM-DDTHH:MM の形（例 "2026-10-29T12:30"）。予定がなければ空文字。
 - event_end: 予定の終了日時。event_start と同じ形。終了時刻が書かれていなければ空文字。
 - topic: decision が task か candidate のときの、このタスクが属する用件のまとまりの短い名前（20〜40 文字程度。例「Mikata 決済障害（10/28）の対応」）。none のときは空文字。
-- same_as: 新しいタスクが "related_tasks" のどれかと同じ用件のまとまりなら、その id（例 "t1"）。どれとも違う場合、"related_tasks" が空の場合、decision が none の場合は空文字。`
+- same_as: 新しいタスクが "related_tasks" のどれかと同じ用件のまとまりなら、その id（例 "t1"）。どれとも違う場合、"related_tasks" が空の場合、decision が none の場合は空文字。
+- importance: decision が task か candidate のときの重要度。"high"、"normal"、"low" のいずれか。high は、"target": true の投稿のうち最も新しいものの日時（at）から見て今日・明日が期限のもの、障害・事故・苦情への対応、相手が至急と明示している依頼など、遅れると大きな影響が出るもの。low は、急がない・任意・参考程度のもの。それ以外と迷ったときは "normal"。会議・打ち合わせなどの予定の登録は、開始が近くても "normal" にしてください。none のときは "normal"。`
 }
 
 // replyPrompt is the fixed instruction of a reply judgment of service.

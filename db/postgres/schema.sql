@@ -43,6 +43,7 @@ CREATE TABLE "action_items" (
   "event_start_at" bigint NULL,
   "event_end_at" bigint NULL,
   "parent_id" text NULL,
+  "importance" text NOT NULL DEFAULT 'normal',
   PRIMARY KEY ("id"),
   CONSTRAINT "action_items_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
 );

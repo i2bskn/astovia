@@ -32,6 +32,7 @@ type ActionItem struct {
 	EventStartAt sql.NullInt64
 	EventEndAt   sql.NullInt64
 	ParentID     sql.NullString
+	Importance   string
 }
 
 type AiSetting struct {

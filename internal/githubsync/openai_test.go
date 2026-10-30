@@ -87,7 +87,7 @@ func planText(v map[string]any) func(http.ResponseWriter) {
 }
 
 func planAction(task string) func(http.ResponseWriter) {
-	return planText(map[string]any{"decision": ai.DecisionTask, "task": task, "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": "", "same_as": ""})
+	return planText(map[string]any{"decision": ai.DecisionTask, "task": task, "summary": "s", "event_title": "", "event_start": "", "event_end": "", "topic": "", "same_as": "", "importance": "normal"})
 }
 
 // usePlan replaces alice's AI settings with the ChatGPT plan, with an

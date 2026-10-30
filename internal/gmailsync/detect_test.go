@@ -128,7 +128,7 @@ func TestDetectOutcomes(t *testing.T) {
 
 // Detections are notified only for messages received after the account
 // was connected and the AI settings were made, within notifyAge, and while
-// the account notifies at once.
+// the account notifies at once or the task is of high importance.
 func TestNotifications(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		ctx := context.Background()
@@ -176,6 +176,16 @@ func TestNotifications(t *testing.T) {
 		st.sync(me)
 		if st.mustItem(runKey(me, quiet, quiet, quiet)).Status != "open" || len(st.pending()) != 0 {
 			t.Fatalf("immediate_notify off: %+v", st.pending())
+		}
+		// A task of high importance is notified even so, with 【重要】 in
+		// the title.
+		st.advance(time.Minute)
+		urgent := st.recv("", "障害", "至急見てください", time.Minute)
+		st.ai.set(aiJudgedImportance(ai.ImportanceHigh, ai.DecisionTask, "障害を調査する", "s", "", "", ""))
+		st.sync(me)
+		high := st.mustItem(runKey(me, urgent, urgent, urgent))
+		if p := st.pending(); high.Importance != store.ImportanceHigh || len(p) != 1 || p[0].ActionItemID.String != high.ID || p[0].Title != "【重要】メール: 障害" {
+			t.Fatalf("high importance with immediate_notify off: %+v %+v", high, p)
 		}
 	})
 }

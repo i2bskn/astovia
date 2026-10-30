@@ -264,8 +264,8 @@ func (q *Queries) CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) 
 }
 
 const createActionItem = `-- name: CreateActionItem :exec
-INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
 `
 
 type CreateActionItemParams struct {
@@ -292,6 +292,7 @@ type CreateActionItemParams struct {
 	EventStartAt sql.NullInt64
 	EventEndAt   sql.NullInt64
 	ParentID     sql.NullString
+	Importance   string
 }
 
 func (q *Queries) CreateActionItem(ctx context.Context, arg CreateActionItemParams) error {
@@ -319,6 +320,7 @@ func (q *Queries) CreateActionItem(ctx context.Context, arg CreateActionItemPara
 		arg.EventStartAt,
 		arg.EventEndAt,
 		arg.ParentID,
+		arg.Importance,
 	)
 	return err
 }
@@ -1383,7 +1385,7 @@ func (q *Queries) GetAPITokenByHash(ctx context.Context, tokenHash string) (GetA
 }
 
 const getActionItem = `-- name: GetActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE id = $1 AND user_id = $2
 `
 
@@ -1419,12 +1421,13 @@ func (q *Queries) GetActionItem(ctx context.Context, arg GetActionItemParams) (A
 		&i.EventStartAt,
 		&i.EventEndAt,
 		&i.ParentID,
+		&i.Importance,
 	)
 	return i, err
 }
 
 const getActionItemBySourceKey = `-- name: GetActionItemBySourceKey :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND source_key = $2
 `
 
@@ -1460,6 +1463,7 @@ func (q *Queries) GetActionItemBySourceKey(ctx context.Context, arg GetActionIte
 		&i.EventStartAt,
 		&i.EventEndAt,
 		&i.ParentID,
+		&i.Importance,
 	)
 	return i, err
 }
@@ -1964,8 +1968,8 @@ func (q *Queries) GetUsersByIDs(ctx context.Context, ids string) ([]User, error)
 }
 
 const insertSourcedActionItem = `-- name: InsertSourcedActionItem :execrows
-INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
 ON CONFLICT (user_id, source_key) DO NOTHING
 `
 
@@ -1993,6 +1997,7 @@ type InsertSourcedActionItemParams struct {
 	EventStartAt sql.NullInt64
 	EventEndAt   sql.NullInt64
 	ParentID     sql.NullString
+	Importance   string
 }
 
 func (q *Queries) InsertSourcedActionItem(ctx context.Context, arg InsertSourcedActionItemParams) (int64, error) {
@@ -2020,6 +2025,7 @@ func (q *Queries) InsertSourcedActionItem(ctx context.Context, arg InsertSourced
 		arg.EventStartAt,
 		arg.EventEndAt,
 		arg.ParentID,
+		arg.Importance,
 	)
 	if err != nil {
 		return 0, err
@@ -2114,7 +2120,7 @@ func (q *Queries) ListAPITokens(ctx context.Context, userID string) ([]ListAPITo
 }
 
 const listActionItems = `-- name: ListActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND (created_at < $2 OR (created_at = $3 AND id < $4))
 ORDER BY created_at DESC, id DESC LIMIT $5
 `
@@ -2166,6 +2172,7 @@ func (q *Queries) ListActionItems(ctx context.Context, arg ListActionItemsParams
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -2181,7 +2188,7 @@ func (q *Queries) ListActionItems(ctx context.Context, arg ListActionItemsParams
 }
 
 const listActionItemsByStatus = `-- name: ListActionItemsByStatus :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND status = $2 AND (created_at < $3 OR (created_at = $4 AND id < $5))
 ORDER BY created_at DESC, id DESC LIMIT $6
 `
@@ -2235,6 +2242,7 @@ func (q *Queries) ListActionItemsByStatus(ctx context.Context, arg ListActionIte
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -2295,7 +2303,7 @@ func (q *Queries) ListActiveInvitations(ctx context.Context, arg ListActiveInvit
 }
 
 const listAutoActionItems = `-- name: ListAutoActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND auto_reason IS NOT NULL AND (auto_at < $2 OR (auto_at = $3 AND id < $4))
 ORDER BY auto_at DESC, id DESC LIMIT $5
 `
@@ -2347,6 +2355,7 @@ func (q *Queries) ListAutoActionItems(ctx context.Context, arg ListAutoActionIte
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -2362,7 +2371,7 @@ func (q *Queries) ListAutoActionItems(ctx context.Context, arg ListAutoActionIte
 }
 
 const listAutoActionItemsByStatus = `-- name: ListAutoActionItemsByStatus :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND status = $2 AND auto_reason IS NOT NULL AND (auto_at < $3 OR (auto_at = $4 AND id < $5))
 ORDER BY auto_at DESC, id DESC LIMIT $6
 `
@@ -2416,6 +2425,7 @@ func (q *Queries) ListAutoActionItemsByStatus(ctx context.Context, arg ListAutoA
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -2501,7 +2511,7 @@ func (q *Queries) ListChatworkJudgedKeys(ctx context.Context, arg ListChatworkJu
 }
 
 const listChatworkTaskItems = `-- name: ListChatworkTaskItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND source = 'chatwork' AND status = 'open' AND substr(source_key, 1, length($2::text)) = $2::text
 ORDER BY created_at, id LIMIT $3
 `
@@ -2545,6 +2555,7 @@ func (q *Queries) ListChatworkTaskItems(ctx context.Context, arg ListChatworkTas
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -2560,7 +2571,7 @@ func (q *Queries) ListChatworkTaskItems(ctx context.Context, arg ListChatworkTas
 }
 
 const listChildActionItems = `-- name: ListChildActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND parent_id = $2
 ORDER BY created_at, id LIMIT $3
 `
@@ -2604,6 +2615,7 @@ func (q *Queries) ListChildActionItems(ctx context.Context, arg ListChildActionI
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -2619,7 +2631,7 @@ func (q *Queries) ListChildActionItems(ctx context.Context, arg ListChildActionI
 }
 
 const listConversationActionItems = `-- name: ListConversationActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND source = $2 AND substr(source_key, 1, length($3::text)) = $3::text AND created_at >= $4
 AND (status = 'open' OR (status = 'done' AND auto_reason = 'children.done' AND auto_at >= $5))
 ORDER BY created_at DESC, id DESC LIMIT $6
@@ -2674,6 +2686,7 @@ func (q *Queries) ListConversationActionItems(ctx context.Context, arg ListConve
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -2689,7 +2702,7 @@ func (q *Queries) ListConversationActionItems(ctx context.Context, arg ListConve
 }
 
 const listDueActionItems = `-- name: ListDueActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND status = 'open' AND kind = 'task' AND due_at IS NOT NULL AND due_at <= $2
 ORDER BY due_at, id LIMIT $3
 `
@@ -2733,6 +2746,7 @@ func (q *Queries) ListDueActionItems(ctx context.Context, arg ListDueActionItems
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -3281,7 +3295,7 @@ func (q *Queries) ListSlackJudgedKeys(ctx context.Context, arg ListSlackJudgedKe
 }
 
 const listStaleActionItems = `-- name: ListStaleActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND status = 'open' AND created_at <= $2
 ORDER BY created_at, id LIMIT $3
 `
@@ -3325,6 +3339,7 @@ func (q *Queries) ListStaleActionItems(ctx context.Context, arg ListStaleActionI
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -3340,7 +3355,7 @@ func (q *Queries) ListStaleActionItems(ctx context.Context, arg ListStaleActionI
 }
 
 const listTopActionItems = `-- name: ListTopActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND parent_id IS NULL AND (created_at < $2 OR (created_at = $3 AND id < $4))
 ORDER BY created_at DESC, id DESC LIMIT $5
 `
@@ -3392,6 +3407,7 @@ func (q *Queries) ListTopActionItems(ctx context.Context, arg ListTopActionItems
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -3407,7 +3423,7 @@ func (q *Queries) ListTopActionItems(ctx context.Context, arg ListTopActionItems
 }
 
 const listTopActionItemsByStatus = `-- name: ListTopActionItemsByStatus :many
-SELECT action_items.id, action_items.user_id, action_items.content, action_items.status, action_items.note, action_items.due_at, action_items.refs, action_items.version, action_items.created_at, action_items.updated_at, action_items.source, action_items.source_key, action_items.tracking, action_items.auto_reason, action_items.auto_ref, action_items.auto_at, action_items.detected_at, action_items.tracked_at, action_items.kind, action_items.event_title, action_items.event_start_at, action_items.event_end_at, action_items.parent_id FROM action_items
+SELECT action_items.id, action_items.user_id, action_items.content, action_items.status, action_items.note, action_items.due_at, action_items.refs, action_items.version, action_items.created_at, action_items.updated_at, action_items.source, action_items.source_key, action_items.tracking, action_items.auto_reason, action_items.auto_ref, action_items.auto_at, action_items.detected_at, action_items.tracked_at, action_items.kind, action_items.event_title, action_items.event_start_at, action_items.event_end_at, action_items.parent_id, action_items.importance FROM action_items
 WHERE action_items.user_id = $1 AND action_items.status = $2
 AND (action_items.parent_id IS NULL OR NOT EXISTS (SELECT 1 FROM action_items p WHERE p.user_id = action_items.user_id AND p.id = action_items.parent_id AND p.status = $3))
 AND (action_items.created_at < $4 OR (action_items.created_at = $5 AND action_items.id < $6))
@@ -3465,6 +3481,7 @@ func (q *Queries) ListTopActionItemsByStatus(ctx context.Context, arg ListTopAct
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -3480,7 +3497,7 @@ func (q *Queries) ListTopActionItemsByStatus(ctx context.Context, arg ListTopAct
 }
 
 const listTrackedActionItems = `-- name: ListTrackedActionItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND source = $2 AND tracking = 1 AND status IN ('open','candidate')
 ORDER BY COALESCE(tracked_at, 0), id LIMIT $3
 `
@@ -3524,6 +3541,7 @@ func (q *Queries) ListTrackedActionItems(ctx context.Context, arg ListTrackedAct
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -3539,7 +3557,7 @@ func (q *Queries) ListTrackedActionItems(ctx context.Context, arg ListTrackedAct
 }
 
 const listTrackedSourcePrefixItems = `-- name: ListTrackedSourcePrefixItems :many
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND source = $2 AND substr(source_key, 1, length($3::text)) = $3::text AND tracking = 1 AND status IN ('open','candidate')
 ORDER BY COALESCE(tracked_at, 0), id LIMIT $4
 `
@@ -3589,6 +3607,7 @@ func (q *Queries) ListTrackedSourcePrefixItems(ctx context.Context, arg ListTrac
 			&i.EventStartAt,
 			&i.EventEndAt,
 			&i.ParentID,
+			&i.Importance,
 		); err != nil {
 			return nil, err
 		}
@@ -3662,7 +3681,7 @@ func (q *Queries) LockAISettings(ctx context.Context, userID string) (AiSetting,
 }
 
 const lockActionItem = `-- name: LockActionItem :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE id = $1 AND user_id = $2 FOR UPDATE
 `
 
@@ -3698,12 +3717,13 @@ func (q *Queries) LockActionItem(ctx context.Context, arg LockActionItemParams) 
 		&i.EventStartAt,
 		&i.EventEndAt,
 		&i.ParentID,
+		&i.Importance,
 	)
 	return i, err
 }
 
 const lockActionItemBySourceKey = `-- name: LockActionItemBySourceKey :one
-SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id FROM action_items
+SELECT id, user_id, content, status, note, due_at, refs, version, created_at, updated_at, source, source_key, tracking, auto_reason, auto_ref, auto_at, detected_at, tracked_at, kind, event_title, event_start_at, event_end_at, parent_id, importance FROM action_items
 WHERE user_id = $1 AND source_key = $2 FOR UPDATE
 `
 
@@ -3739,6 +3759,7 @@ func (q *Queries) LockActionItemBySourceKey(ctx context.Context, arg LockActionI
 		&i.EventStartAt,
 		&i.EventEndAt,
 		&i.ParentID,
+		&i.Importance,
 	)
 	return i, err
 }
@@ -4692,8 +4713,8 @@ func (q *Queries) UpdateAISettingsStatus(ctx context.Context, arg UpdateAISettin
 }
 
 const updateActionItem = `-- name: UpdateActionItem :execrows
-UPDATE action_items SET content = $1, status = $2, note = $3, due_at = $4, refs = $5, source = $6, source_key = $7, tracking = $8, auto_reason = $9, auto_ref = $10, auto_at = $11, detected_at = $12, tracked_at = $13, kind = $14, event_title = $15, event_start_at = $16, event_end_at = $17, parent_id = $18, version = $19, updated_at = $20
-WHERE id = $21 AND user_id = $22 AND version = $23
+UPDATE action_items SET content = $1, status = $2, note = $3, due_at = $4, refs = $5, source = $6, source_key = $7, tracking = $8, auto_reason = $9, auto_ref = $10, auto_at = $11, detected_at = $12, tracked_at = $13, kind = $14, event_title = $15, event_start_at = $16, event_end_at = $17, parent_id = $18, importance = $19, version = $20, updated_at = $21
+WHERE id = $22 AND user_id = $23 AND version = $24
 `
 
 type UpdateActionItemParams struct {
@@ -4715,6 +4736,7 @@ type UpdateActionItemParams struct {
 	EventStartAt   sql.NullInt64
 	EventEndAt     sql.NullInt64
 	ParentID       sql.NullString
+	Importance     string
 	NewVersion     int64
 	UpdatedAt      int64
 	ID             string
@@ -4742,6 +4764,7 @@ func (q *Queries) UpdateActionItem(ctx context.Context, arg UpdateActionItemPara
 		arg.EventStartAt,
 		arg.EventEndAt,
 		arg.ParentID,
+		arg.Importance,
 		arg.NewVersion,
 		arg.UpdatedAt,
 		arg.ID,

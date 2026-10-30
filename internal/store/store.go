@@ -80,6 +80,10 @@ type ActionItem struct {
 	// most two levels: a parent has no parent, and an item with subtasks has
 	// no parent. The store keeps these rules; see lockParent.
 	ParentID sql.NullString
+	// Importance is ImportanceHigh, ImportanceNormal or ImportanceLow. A
+	// high item is notified on detection even when immediate notifications
+	// are off.
+	Importance string
 }
 
 // Kinds of action items. Items are created as KindTask unless the caller
@@ -96,11 +100,28 @@ const (
 	ReasonEventPassed      = "event.passed"
 )
 
-// withKind returns item with an empty Kind set to KindTask. The INSERT
-// statements list every column, so the column default does not apply.
-func withKind(item ActionItem) ActionItem {
+// Importance levels of action items. Items are created as ImportanceNormal
+// unless the caller sets another level.
+const (
+	ImportanceHigh   = "high"
+	ImportanceNormal = "normal"
+	ImportanceLow    = "low"
+)
+
+// ValidImportance reports whether v is one of the importance levels.
+func ValidImportance(v string) bool {
+	return v == ImportanceHigh || v == ImportanceNormal || v == ImportanceLow
+}
+
+// withDefaults returns item with an empty Kind set to KindTask and an empty
+// Importance set to ImportanceNormal. The INSERT statements list every
+// column, so the column defaults do not apply.
+func withDefaults(item ActionItem) ActionItem {
 	if item.Kind == "" {
 		item.Kind = KindTask
+	}
+	if item.Importance == "" {
+		item.Importance = ImportanceNormal
 	}
 	return item
 }
@@ -341,7 +362,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM gmail_accounts LIMIT 0", "SELECT state_hash,user_id,verifier_sealed,expires_at,created_at FROM google_auth_states LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM gmail_accounts LIMIT 0", "SELECT state_hash,user_id,verifier_sealed,expires_at,created_at FROM google_auth_states LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at FROM notifications LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -602,7 +623,7 @@ func (s *Store) Authenticated(ctx context.Context, uid, sid string, now int64) (
 // transaction that first locks the parent and checks the nesting rules
 // (ErrInvalidParent), and synchronizes the parent after the insert.
 func (s *Store) CreateActionItem(ctx context.Context, item ActionItem) error {
-	item = withKind(item)
+	item = withDefaults(item)
 	if !item.ParentID.Valid {
 		return s.q.createActionItem(ctx, item)
 	}

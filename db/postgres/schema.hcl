@@ -192,6 +192,11 @@ table "action_items" {
     type = text
     null = true
   }
+  column "importance" {
+    type    = text
+    null    = false
+    default = "normal"
+  }
   primary_key {
     columns = [column.id]
   }

@@ -466,3 +466,25 @@ func TestNotifications(t *testing.T) {
 		}
 	})
 }
+
+// While immediate notifications are off, an open task of high importance is
+// still notified, with 【重要】 in the title.
+func TestImportanceNotification(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		st := newSyncTest(t, driver)
+		st.settings(store.ChatworkSettings{ImmediateNotify: boolPtr(false)})
+		st.cw.room("2", "Team", "group")
+		urgent := st.say("2", bob, "[To:101]本番障害です。至急見てください", 2*time.Minute)
+		later := st.say("2", bob, "[To:101]来週レビューしてください", time.Minute)
+		// Newest first.
+		st.ai.set(aiJudgedImportance(ai.ImportanceNormal, ai.DecisionTask, "レビューする", "s", "", "", ""), aiJudgedImportance(ai.ImportanceHigh, ai.DecisionTask, "本番障害を調査する", "s", "", "", ""))
+		st.sync()
+		high, normal := st.mustItem(mentionKey("2", urgent)), st.mustItem(mentionKey("2", later))
+		if high.Importance != store.ImportanceHigh || normal.Importance != store.ImportanceNormal {
+			t.Fatalf("items: %+v %+v", high, normal)
+		}
+		if p := st.pending(); len(p) != 1 || p[0].ActionItemID.String != high.ID || p[0].Title != "【重要】Chatwork: TO" {
+			t.Fatalf("notifications: %+v", p)
+		}
+	})
+}

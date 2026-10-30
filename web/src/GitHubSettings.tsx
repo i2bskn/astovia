@@ -153,9 +153,10 @@ export default function GitHubSettings() {
         <div><dt>最終同期</dt><dd>{state.last_synced_at ? formatDate(state.last_synced_at) : 'まだ同期していません'}</dd></div>
       </dl>
       <div className="toggle-field">
-        <input id={toggleID} type="checkbox" checked={state.immediate_notify} disabled={busy} onChange={(e) => { void toggle(e.target.checked); }} />
+        <input id={toggleID} type="checkbox" checked={state.immediate_notify} disabled={busy} onChange={(e) => { void toggle(e.target.checked); }} aria-describedby={`${toggleID}-hint`} />
         <label htmlFor={toggleID}>検出したらすぐ通知する</label>
       </div>
+      <p id={`${toggleID}-hint`} className="field-hint">重要度が高いものは、オフでも通知します。</p>
       {replacing ? <TokenForm submitLabel="トークンを更新" busy={busy} error={formError} onSubmit={(token) => { void connect(token); }} onCancel={() => { setReplacing(false); setFormError(null); }} /> : <div className="form-actions">
         <button className="button secondary" type="button" disabled={busy} onClick={() => setReplacing(true)}>トークンを更新</button>
         <button className="button secondary danger" type="button" disabled={busy} onClick={() => { void disconnect(); }}>GitHub との接続を解除</button>

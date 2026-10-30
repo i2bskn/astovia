@@ -141,12 +141,13 @@ func (s *Server) newMCPServer(userID string) *mcp.Server {
 		Name:        "action_items_create",
 		Description: "Save a new action item for the user. Include refs to the source conversation when known. Give parent_id to make it a subtask; items nest at most two levels.",
 		InputSchema: objectSchema([]string{"content"}, map[string]any{
-			"content":   stringProp("Short description of what needs to be done (1-500 characters)."),
-			"status":    statusProp(),
-			"note":      nullableStringProp("Optional free-form note (up to 4000 characters)."),
-			"due_at":    dueAtProp(),
-			"refs":      refsProp(),
-			"parent_id": nullableStringProp("Optional ID of the parent item, which must have no parent itself (two levels at most). null means no parent."),
+			"content":    stringProp("Short description of what needs to be done (1-500 characters)."),
+			"status":     statusProp(),
+			"note":       nullableStringProp("Optional free-form note (up to 4000 characters)."),
+			"due_at":     dueAtProp(),
+			"refs":       refsProp(),
+			"parent_id":  nullableStringProp("Optional ID of the parent item, which must have no parent itself (two levels at most). null means no parent."),
+			"importance": importanceProp(),
 		}),
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &f, OpenWorldHint: &f},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -248,16 +249,17 @@ func (s *Server) newMCPServer(userID string) *mcp.Server {
 	})
 	server.AddTool(&mcp.Tool{
 		Name:        "action_items_update",
-		Description: "Update one of the user's action items: change its status (open, candidate, done, dismissed; candidate is an unconfirmed candidate found by the AI), details or parent. Only the given fields change. Items nest at most two levels.",
+		Description: "Update one of the user's action items: change its status (open, candidate, done, dismissed; candidate is an unconfirmed candidate found by the AI), details, importance or parent. Only the given fields change. Items nest at most two levels.",
 		InputSchema: objectSchema([]string{"id"}, map[string]any{
-			"id":        stringProp("Action item ID."),
-			"content":   stringProp("Short description of what needs to be done (1-500 characters)."),
-			"status":    statusProp(),
-			"note":      nullableStringProp("Optional free-form note (up to 4000 characters). null clears it."),
-			"due_at":    dueAtProp(),
-			"refs":      refsProp(),
-			"parent_id": nullableStringProp("ID of the parent item, which must have no parent itself; an item with subtasks cannot get a parent. null removes the parent."),
-			"version":   map[string]any{"type": "integer", "minimum": 1, "description": "If given, the update fails when the item's current version differs."},
+			"id":         stringProp("Action item ID."),
+			"content":    stringProp("Short description of what needs to be done (1-500 characters)."),
+			"status":     statusProp(),
+			"note":       nullableStringProp("Optional free-form note (up to 4000 characters). null clears it."),
+			"due_at":     dueAtProp(),
+			"refs":       refsProp(),
+			"parent_id":  nullableStringProp("ID of the parent item, which must have no parent itself; an item with subtasks cannot get a parent. null removes the parent."),
+			"importance": importanceProp(),
+			"version":    map[string]any{"type": "integer", "minimum": 1, "description": "If given, the update fails when the item's current version differs."},
 		}),
 		Annotations: &mcp.ToolAnnotations{DestructiveHint: &f, IdempotentHint: false, OpenWorldHint: &f},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -351,6 +353,10 @@ func nullableStringProp(description string) map[string]any {
 
 func statusProp() map[string]any {
 	return map[string]any{"type": "string", "enum": []string{"open", "candidate", "done", "dismissed"}, "description": "open, candidate (an unconfirmed candidate found by the AI), done or dismissed."}
+}
+
+func importanceProp() map[string]any {
+	return map[string]any{"type": "string", "enum": []string{"high", "normal", "low"}, "description": "Importance of the item: high, normal or low. Omitted on create means normal."}
 }
 
 func dueAtProp() map[string]any {

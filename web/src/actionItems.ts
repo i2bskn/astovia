@@ -8,6 +8,10 @@ export type ActionItemStatus = 'open' | 'candidate' | 'done' | 'dismissed';
 // task is a plain item; event asks the user to add a meeting to the calendar.
 export type ActionItemKind = 'task' | 'event';
 
+// high items are notified on detection even when immediate notifications
+// are off.
+export type ActionItemImportance = 'high' | 'normal' | 'low';
+
 export interface ActionItemRef {
   service: string;
   account?: string;
@@ -54,6 +58,7 @@ export interface ActionItem {
   id: string;
   content: string;
   status: ActionItemStatus;
+  importance: ActionItemImportance;
   note: string | null;
   due_at: string | null;
   refs: ActionItemRef[];
@@ -86,10 +91,12 @@ export interface ActionItemPatch {
   refs?: ActionItemRef[];
   // null removes the parent.
   parent_id?: string | null;
+  importance?: ActionItemImportance;
   version?: number;
 }
 
 const statuses: readonly string[] = ['open', 'candidate', 'done', 'dismissed'];
+const importances: readonly string[] = ['high', 'normal', 'low'];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -150,6 +157,7 @@ function isActionItem(value: unknown): value is ActionItem {
     typeof value.id === 'string' && value.id !== '' &&
     typeof value.content === 'string' &&
     typeof value.status === 'string' && statuses.includes(value.status) &&
+    typeof value.importance === 'string' && importances.includes(value.importance) &&
     (value.note === null || typeof value.note === 'string') &&
     (value.due_at === null || typeof value.due_at === 'string') &&
     Array.isArray(value.refs) && value.refs.every(isRef) &&

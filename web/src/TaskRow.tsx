@@ -1,7 +1,7 @@
 import { useId } from 'react';
 import { Link } from 'react-router';
 import { calendarURL } from './actionItems';
-import type { ActionItem, ActionItemStatus } from './actionItems';
+import type { ActionItem, ActionItemImportance, ActionItemStatus } from './actionItems';
 import { autoOutcome, autoReasonLabel, httpsURL } from './automation';
 import { dueLabel, eventRange, fullDateTime, happenedAt } from './format';
 import { CalendarIcon, CheckIcon, ClockIcon, DismissIcon, ExternalIcon, SparkleIcon, UndoIcon } from './icons';
@@ -20,6 +20,17 @@ const statusMessages: Record<ActionItemStatus, string> = {
 // task rather than coming back.
 export function toastMessage(previous: ActionItemStatus, status: ActionItemStatus): string {
   return previous === 'candidate' && status === 'open' ? 'タスクにしました' : statusMessages[status];
+}
+
+// importanceLabels name the importance levels; importanceChips are shown
+// only for the levels other than normal.
+export const importanceLabels: Record<ActionItemImportance, string> = { high: '高', normal: '中', low: '低' };
+const importanceChips: Partial<Record<ActionItemImportance, string>> = { high: 'chip-importance-high', low: 'chip-importance-low' };
+
+// ImportanceChip shows the importance of an item that is not normal.
+export function ImportanceChip({ item }: { item: ActionItem }) {
+  const chip = importanceChips[item.importance];
+  return chip ? <span className={`chip ${chip}`}>重要度: {importanceLabels[item.importance]}</span> : null;
 }
 
 // statusLabels name the closed statuses of a subtask on the detail screen.
@@ -55,6 +66,7 @@ export default function TaskRow({ item, busy, now, index, onChange, onLeave }: {
       <p className="task-title" id={titleID}><Link className="task-link" to={taskPath(item.id)}><Phrased text={item.content} /></Link></p>
       {item.note ? <p className="task-note"><Phrased text={item.note} /></p> : null}
       <div className="task-meta">
+        <ImportanceChip item={item} />
         {event ? <span className="chip chip-event" title={`予定: ${event.title}（${fullDateTime(event.start_at)}）`}><CalendarIcon size={12} />{eventRange(event.start_at, event.end_at, now)}</span> : null}
         {due ? <span className={`chip due due-${due.tone}`} title={`関連日時: ${fullDateTime(item.due_at ?? '')}`}><ClockIcon size={12} />期限 {due.text}{due.tone === 'past' ? '（超過）' : ''}</span> : null}
         {progress ? <span className="chip chip-progress" title={`子タスク ${progress.total}件中 ${progress.done}件完了`}><span className="sr-only">子タスクの完了 </span>{progress.done}/{progress.total}</span> : null}
