@@ -9,6 +9,8 @@ import { createIntegrationsClient } from './integrations';
 import type { GmailAccount, GmailState } from './integrations';
 import Phrased from './Phrased';
 
+const GMAIL_DOCS_URL = 'https://astovia.dev/guides/gmail/';
+
 const client = createIntegrationsClient(request);
 const ai = createAIClient(request);
 
@@ -148,7 +150,7 @@ export default function GmailSettings() {
       <div className="copy-stack">
         <CopyField label="承認済みのリダイレクト URI" value={state.redirect_uri} />
       </div>
-      <p className="field-hint">詳しくは README の「メール連携（Gmail・Google Workspace）」を参照してください。</p>
+      <p className="field-hint">詳しくは<a href={GMAIL_DOCS_URL} rel="noopener noreferrer" target="_blank">ドキュメントの「メール連携（Gmail・Google Workspace）」</a>を参照してください。</p>
     </> : null}
     {!loading && state && state.accounts.length > 0 ? <ul className="action-list token-list">
       {state.accounts.map((account) => <AccountRow key={account.id} account={account} busy={busy} confirming={confirmingID === account.id}
