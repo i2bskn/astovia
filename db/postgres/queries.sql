@@ -424,9 +424,14 @@ SELECT COUNT(*) FROM web_push_subscriptions WHERE user_id = sqlc.arg(user_id);
 -- name: ListPushSubscriptions :many
 SELECT id, user_id, endpoint, p256dh, auth, label, created_at, last_used_at FROM web_push_subscriptions
 WHERE user_id = sqlc.arg(user_id) ORDER BY created_at DESC, id DESC;
--- name: ListPushUserIDs :many
-SELECT DISTINCT user_id FROM web_push_subscriptions
-WHERE user_id IN (SELECT id FROM users WHERE disabled = 0) ORDER BY user_id;
+-- name: ListNotificationUserIDs :many
+SELECT user_id FROM web_push_subscriptions
+WHERE user_id IN (SELECT id FROM users WHERE disabled = 0)
+UNION
+SELECT user_id FROM notification_channels
+WHERE ((slack_kinds <> '' AND slack_webhook_sealed IS NOT NULL AND slack_last_error IS NULL) OR email_kinds <> '')
+AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY user_id;
 -- name: TouchPushSubscription :exec
 UPDATE web_push_subscriptions SET last_used_at = sqlc.arg(last_used_at) WHERE id = sqlc.arg(id);
 -- name: DeletePushSubscription :execrows
@@ -449,16 +454,16 @@ INSERT INTO notification_settings (user_id,timezone,digest_hour,stale_days,updat
 VALUES (sqlc.arg(user_id),sqlc.arg(timezone),sqlc.arg(digest_hour),sqlc.arg(stale_days),sqlc.arg(updated_at),sqlc.arg(candidate_expire_days))
 ON CONFLICT (user_id) DO NOTHING;
 -- name: EnqueueNotification :execrows
-INSERT INTO notifications (id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at)
-VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(kind),sqlc.arg(action_item_id),sqlc.arg(dedupe_key),sqlc.arg(title),sqlc.arg(body),sqlc.arg(url),sqlc.arg(scheduled_at),sqlc.arg(sent_at),sqlc.arg(attempts),sqlc.arg(last_error),sqlc.arg(created_at))
-ON CONFLICT (user_id, dedupe_key) DO NOTHING;
+INSERT INTO notifications (id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at,channel)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(kind),sqlc.arg(action_item_id),sqlc.arg(dedupe_key),sqlc.arg(title),sqlc.arg(body),sqlc.arg(url),sqlc.arg(scheduled_at),sqlc.arg(sent_at),sqlc.arg(attempts),sqlc.arg(last_error),sqlc.arg(created_at),sqlc.arg(channel))
+ON CONFLICT (user_id, dedupe_key, channel) DO NOTHING;
 -- name: CountNotificationsByDedupeKey :one
 SELECT COUNT(*) FROM notifications WHERE user_id = sqlc.arg(user_id) AND dedupe_key = sqlc.arg(dedupe_key);
 -- name: LatestNotificationCreatedAt :one
 SELECT created_at FROM notifications WHERE user_id = sqlc.arg(user_id) AND kind = sqlc.arg(kind)
 ORDER BY created_at DESC LIMIT 1;
 -- name: ListDueNotifications :many
-SELECT id, user_id, kind, action_item_id, dedupe_key, title, body, url, scheduled_at, sent_at, attempts, last_error, created_at FROM notifications
+SELECT id, user_id, kind, action_item_id, dedupe_key, title, body, url, scheduled_at, sent_at, attempts, last_error, created_at, channel FROM notifications
 WHERE sent_at IS NULL AND scheduled_at <= sqlc.arg(now) AND user_id IN (SELECT id FROM users WHERE disabled = 0)
 ORDER BY scheduled_at, id LIMIT sqlc.arg(page_size);
 -- name: UpdateNotificationResult :exec
@@ -473,6 +478,23 @@ DELETE FROM notifications WHERE notifications.user_id = sqlc.arg(user_id) AND no
 AND notifications.action_item_id IN (SELECT action_items.id FROM action_items WHERE action_items.user_id = sqlc.arg(item_user_id) AND action_items.source = sqlc.arg(source));
 -- name: DeleteSentNotificationsBefore :exec
 DELETE FROM notifications WHERE sent_at IS NOT NULL AND sent_at < sqlc.arg(before);
+-- name: GetNotificationChannels :one
+SELECT user_id, webpush_kinds, slack_kinds, email_kinds, slack_webhook_sealed, slack_last_error, updated_at FROM notification_channels
+WHERE user_id = sqlc.arg(user_id);
+-- name: UpsertNotificationRoutes :exec
+INSERT INTO notification_channels (user_id,webpush_kinds,slack_kinds,email_kinds,slack_webhook_sealed,slack_last_error,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(webpush_kinds),sqlc.arg(slack_kinds),sqlc.arg(email_kinds),NULL,NULL,sqlc.arg(updated_at))
+ON CONFLICT (user_id) DO UPDATE SET webpush_kinds = excluded.webpush_kinds, slack_kinds = excluded.slack_kinds, email_kinds = excluded.email_kinds, updated_at = excluded.updated_at;
+-- name: UpsertSlackWebhook :exec
+INSERT INTO notification_channels (user_id,slack_webhook_sealed,slack_last_error,updated_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(slack_webhook_sealed),NULL,sqlc.arg(updated_at))
+ON CONFLICT (user_id) DO UPDATE SET slack_webhook_sealed = excluded.slack_webhook_sealed, slack_last_error = NULL, updated_at = excluded.updated_at;
+-- name: ClearSlackWebhook :exec
+UPDATE notification_channels SET slack_webhook_sealed = NULL, slack_last_error = NULL, updated_at = sqlc.arg(updated_at)
+WHERE user_id = sqlc.arg(user_id);
+-- name: MarkSlackWebhookInvalid :execrows
+UPDATE notification_channels SET slack_last_error = sqlc.arg(slack_last_error)
+WHERE user_id = sqlc.arg(user_id) AND slack_webhook_sealed = sqlc.arg(slack_webhook_sealed);
 -- name: GetInstanceSecret :one
 SELECT name, value, created_at, updated_at FROM instance_secrets WHERE name = sqlc.arg(name);
 -- name: CreateInstanceSecret :execrows

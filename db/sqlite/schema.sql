@@ -331,18 +331,31 @@ CREATE TABLE "notifications" (
   "attempts" integer NOT NULL DEFAULT 0,
   "last_error" text NULL,
   "created_at" integer NOT NULL,
+  "channel" text NOT NULL DEFAULT 'webpush',
   PRIMARY KEY ("id"),
   CONSTRAINT "notifications_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id"),
   CONSTRAINT "notifications_action_item_id_fk" FOREIGN KEY ("action_item_id") REFERENCES "action_items" ("id")
 );
 -- Create index "notifications_user_dedupe_key" to table: "notifications"
-CREATE UNIQUE INDEX "notifications_user_dedupe_key" ON "notifications" ("user_id", "dedupe_key");
+CREATE UNIQUE INDEX "notifications_user_dedupe_key" ON "notifications" ("user_id", "dedupe_key", "channel");
 -- Create index "notifications_sent_scheduled_idx" to table: "notifications"
 CREATE INDEX "notifications_sent_scheduled_idx" ON "notifications" ("sent_at", "scheduled_at");
 -- Create index "notifications_action_item_idx" to table: "notifications"
 CREATE INDEX "notifications_action_item_idx" ON "notifications" ("action_item_id");
 -- Create index "notifications_user_kind_created_idx" to table: "notifications"
 CREATE INDEX "notifications_user_kind_created_idx" ON "notifications" ("user_id", "kind", "created_at");
+-- Create "notification_channels" table
+CREATE TABLE "notification_channels" (
+  "user_id" text NOT NULL,
+  "webpush_kinds" text NOT NULL DEFAULT 'detected,stale,due_soon,overdue,digest',
+  "slack_kinds" text NOT NULL DEFAULT '',
+  "email_kinds" text NOT NULL DEFAULT '',
+  "slack_webhook_sealed" text NULL,
+  "slack_last_error" text NULL,
+  "updated_at" integer NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "notification_channels_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
 -- Create "instance_secrets" table
 CREATE TABLE "instance_secrets" (
   "name" text NOT NULL,

@@ -168,6 +168,14 @@ sql:
             go_type:
               import: database/sql
               type: NullString
+          - column: notification_channels.slack_webhook_sealed
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: notification_channels.slack_last_error
+            go_type:
+              import: database/sql
+              type: NullString
           - column: invitations.accepted_at
             go_type:
               import: database/sql

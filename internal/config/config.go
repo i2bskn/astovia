@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net"
+	"net/mail"
 	"net/netip"
 	"net/url"
 	"os"
@@ -26,7 +27,29 @@ type Config struct {
 	// AIAllowPrivateEndpoints lets OpenAI-compatible AI endpoints use http
 	// and non-public addresses (ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS).
 	AIAllowPrivateEndpoints bool
+	// Mail is the service that sends notification mail, or nil when
+	// ASTOVIA_MAIL_PROVIDER is not set (no e-mail notifications).
+	Mail *MailConfig
 }
+
+// MailConfig is the service that sends notification mail, chosen by the
+// operator. The API key is never logged or put in an error.
+type MailConfig struct {
+	Provider  string // "cloudflare" or "resend"
+	APIKey    string
+	AccountID string // Cloudflare only
+	From      string // bare address
+	FromName  string // optional; used by Resend only
+}
+
+// Mail providers of ASTOVIA_MAIL_PROVIDER.
+const (
+	MailCloudflare = "cloudflare"
+	MailResend     = "resend"
+)
+
+// cloudflareAccountIDPattern is the format of a Cloudflare account ID.
+var cloudflareAccountIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // AccessClient identifies the Cloudflare Access SaaS application (OIDC)
 // whose relying party Astovia is. Issuer and RedirectURI are derived from
@@ -86,6 +109,9 @@ func Load(requireSecret bool) (Config, error) {
 		return c, err
 	}
 	if c.AIAllowPrivateEndpoints, err = boolEnv("ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS"); err != nil {
+		return c, err
+	}
+	if c.Mail, err = mailConfig(); err != nil {
 		return c, err
 	}
 	if requireSecret {
@@ -190,6 +216,65 @@ func validAccessSecret(v string) bool {
 		}
 	}
 	return true
+}
+
+// mailConfig reads the mail service. An empty ASTOVIA_MAIL_PROVIDER
+// disables e-mail notifications; any other mail variable set without it is
+// an error, so that a forgotten provider is noticed. Values are trimmed.
+func mailConfig() (*MailConfig, error) {
+	get := func(k string) string { return strings.TrimSpace(os.Getenv(k)) }
+	provider, key, from, name, account := strings.ToLower(get("ASTOVIA_MAIL_PROVIDER")), get("ASTOVIA_MAIL_API_KEY"), get("ASTOVIA_MAIL_FROM"), get("ASTOVIA_MAIL_FROM_NAME"), get("ASTOVIA_CLOUDFLARE_ACCOUNT_ID")
+	if provider == "" {
+		if key != "" || from != "" || name != "" || account != "" {
+			return nil, errors.New("ASTOVIA_MAIL_PROVIDER is required when ASTOVIA_MAIL_API_KEY, ASTOVIA_MAIL_FROM, ASTOVIA_MAIL_FROM_NAME or ASTOVIA_CLOUDFLARE_ACCOUNT_ID is set")
+		}
+		return nil, nil
+	}
+	if provider != MailCloudflare && provider != MailResend {
+		return nil, errors.New("ASTOVIA_MAIL_PROVIDER must be cloudflare or resend")
+	}
+	if !validMailKey(key) {
+		return nil, errors.New("ASTOVIA_MAIL_API_KEY must be 1 to 512 printable ASCII characters")
+	}
+	if a, err := mail.ParseAddress(from); err != nil || a.Name != "" || a.Address != from {
+		return nil, errors.New("ASTOVIA_MAIL_FROM must be a bare e-mail address such as notify@example.com")
+	}
+	if name != "" && !validMailFromName(name) {
+		return nil, errors.New(`ASTOVIA_MAIL_FROM_NAME must be 1 to 100 characters without control characters or "(),:;<>@[\]`)
+	}
+	switch {
+	case provider == MailCloudflare && !cloudflareAccountIDPattern.MatchString(account):
+		return nil, errors.New("ASTOVIA_CLOUDFLARE_ACCOUNT_ID must be the 32 hexadecimal characters of the Cloudflare account ID")
+	case provider == MailResend && account != "":
+		return nil, errors.New("ASTOVIA_CLOUDFLARE_ACCOUNT_ID is used only with ASTOVIA_MAIL_PROVIDER=cloudflare")
+	}
+	return &MailConfig{Provider: provider, APIKey: key, AccountID: account, From: from, FromName: name}, nil
+}
+
+// validMailKey accepts 1-512 bytes of printable ASCII.
+func validMailKey(v string) bool {
+	if len(v) == 0 || len(v) > 512 {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// validMailFromName accepts 1-100 characters without control characters
+// and the characters that would need quoting in a mail header.
+func validMailFromName(v string) bool {
+	n := 0
+	for _, c := range v {
+		n++
+		if c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xa0) || strings.ContainsRune(`"(),:;<>@[\]`, c) {
+			return false
+		}
+	}
+	return n >= 1 && n <= 100
 }
 
 // boolEnv reads a boolean variable: true or 1 is true, and unset, empty,

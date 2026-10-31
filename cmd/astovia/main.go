@@ -16,6 +16,7 @@ import (
 	"github.com/i2bskn/astovia/internal/gmailsync"
 	"github.com/i2bskn/astovia/internal/google"
 	"github.com/i2bskn/astovia/internal/httpserver"
+	"github.com/i2bskn/astovia/internal/mail"
 	"github.com/i2bskn/astovia/internal/notify"
 	"github.com/i2bskn/astovia/internal/openai"
 	"github.com/i2bskn/astovia/internal/secretbox"
@@ -129,7 +130,15 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 	engine := &notify.Engine{Store: s, Now: now}
 	sweeper := &notify.Sweeper{Store: s, Now: now}
 	vapid := &notify.VAPID{Store: s, Box: box, Now: now}
-	dispatcher := &notify.Dispatcher{Store: s, Channel: notify.NewWebPush(s, vapid, c.PublicURL, now), Now: now}
+	channels := map[string]notify.Channel{
+		store.ChannelWebPush: notify.NewWebPush(s, vapid, c.PublicURL, now),
+		store.ChannelSlack:   notify.NewSlack(s, box, c.PublicURL),
+	}
+	// Without a mail service, e-mail notifications end as no_subscription.
+	if c.Mail != nil {
+		channels[store.ChannelEmail] = &notify.Email{Store: s, Sender: mail.New(c.Mail), PublicURL: c.PublicURL}
+	}
+	dispatcher := &notify.Dispatcher{Store: s, Channels: channels, Now: now}
 	var wg sync.WaitGroup
 	for _, l := range []struct {
 		name     string

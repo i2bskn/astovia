@@ -66,7 +66,8 @@ type Server struct {
 	// OpenAI client (with the host ID) for its authorizations; it is the
 	// one the synchronizations use, so that refreshes are serialized.
 	tokens *aicred.Tokens
-	// pushTestLimiter limits test notifications per user.
+	// pushTestLimiter limits test notifications per user, on every
+	// channel together.
 	pushTestLimiter *loginLimiter
 	// aiTryLimiter limits the tries of AI instructions per user; the reads
 	// of the integrations are limited by their own limiters as well.
@@ -286,6 +287,15 @@ func (s *Server) handler() http.Handler {
 	}))
 	mux.Handle("/api/v1/push/subscriptions/{id}", allow(http.MethodDelete, s.requireUser(http.HandlerFunc(s.handleDeletePushSubscription))))
 	mux.Handle("/api/v1/push/test", allow(http.MethodPost, s.requireUser(http.HandlerFunc(s.handlePushTest))))
+	mux.Handle("/api/v1/notification-channels", allowMethods(map[string]http.Handler{
+		http.MethodGet: s.requireUser(http.HandlerFunc(s.handleGetNotificationChannels)),
+		http.MethodPut: s.requireUser(requireJSON(http.HandlerFunc(s.handlePutNotificationChannels))),
+	}))
+	mux.Handle("/api/v1/notification-channels/slack-webhook", allowMethods(map[string]http.Handler{
+		http.MethodPut:    s.requireUser(requireJSON(http.HandlerFunc(s.handlePutSlackWebhook))),
+		http.MethodDelete: s.requireUser(http.HandlerFunc(s.handleDeleteSlackWebhook)),
+	}))
+	mux.Handle("/api/v1/notification-channels/test", allow(http.MethodPost, s.requireUser(requireJSON(http.HandlerFunc(s.handleChannelTest)))))
 	mux.Handle("/api/v1/notification-settings", allowMethods(map[string]http.Handler{
 		http.MethodGet: s.requireUser(http.HandlerFunc(s.handleGetNotificationSettings)),
 		http.MethodPut: s.requireUser(requireJSON(http.HandlerFunc(s.handlePutNotificationSettings))),

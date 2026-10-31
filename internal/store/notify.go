@@ -68,6 +68,23 @@ type Notification struct {
 	Attempts         int64
 	LastError        sql.NullString
 	CreatedAt        int64
+	// Channel is ChannelWebPush, ChannelSlack or ChannelEmail. Each channel
+	// of a notification is a row of its own with the same DedupeKey.
+	Channel string
+}
+
+// errEmptyChannel is returned when a notification without a channel would be
+// stored.
+var errEmptyChannel = errors.New("store: notification channel is empty")
+
+// insertNotification stores n unless the user already has a notification
+// with its dedupe key on its channel. Every notification is written through
+// it, so that no row is stored without a channel.
+func insertNotification(ctx context.Context, q queries, n Notification) (int64, error) {
+	if n.Channel == "" {
+		return 0, errEmptyChannel
+	}
+	return q.enqueueNotification(ctx, n)
 }
 
 // InstanceSecret is a value shared by the whole instance, such as the VAPID
@@ -160,9 +177,11 @@ func (s *Store) TouchPushSubscription(ctx context.Context, id string, now int64)
 	return s.q.touchPushSubscription(ctx, id, now)
 }
 
-// PushUserIDs returns the enabled users that have at least one subscription.
-func (s *Store) PushUserIDs(ctx context.Context) ([]string, error) {
-	return s.q.listPushUserIDs(ctx)
+// NotificationUserIDs returns the enabled users that can receive a
+// notification: users with a push subscription, users that send some kind
+// to a usable Slack webhook and users that send some kind by e-mail.
+func (s *Store) NotificationUserIDs(ctx context.Context) ([]string, error) {
+	return s.q.listNotificationUserIDs(ctx)
 }
 
 // NotificationSettings returns the user's settings, or the defaults when the
@@ -180,30 +199,48 @@ func (s *Store) SaveNotificationSettings(ctx context.Context, n NotificationSett
 	return s.q.upsertNotificationSettings(ctx, n)
 }
 
-// CreateTestNotification queues n for the user of the browser session, or
-// returns ErrNoSubscription when the user has no subscription.
+// CreateTestNotification queues n for the user of the browser session on
+// n.Channel, without routing. It returns ErrNoSubscription when the user has
+// no push subscription (Web Push), or no usable Slack webhook (Slack).
+// Whether the server can send e-mail is checked by the caller.
 func (s *Store) CreateTestNotification(ctx context.Context, n Notification, sessionID string, now int64) error {
 	return s.transaction(ctx, func(q queries) error {
+		// Lock order: users, then the unlocked reads of
+		// web_push_subscriptions and notification_channels.
 		if e := lockActiveUser(ctx, q, n.UserID, sessionID, now); e != nil {
 			return e
 		}
-		count, e := q.countPushSubscriptions(ctx, n.UserID)
-		if e != nil {
-			return e
+		switch n.Channel {
+		case ChannelWebPush:
+			count, e := q.countPushSubscriptions(ctx, n.UserID)
+			if e != nil {
+				return e
+			}
+			if count == 0 {
+				return ErrNoSubscription
+			}
+		case ChannelSlack:
+			c, e := readNotificationChannels(ctx, q, n.UserID)
+			if e != nil {
+				return e
+			}
+			if !c.SlackReady() {
+				return ErrNoSubscription
+			}
 		}
-		if count == 0 {
-			return ErrNoSubscription
-		}
-		_, e = q.enqueueNotification(ctx, n)
+		_, e := insertNotification(ctx, q, n)
 		return e
 	})
 }
 
-// EnqueueNotifications queues the notifications of an enabled user that has
-// a subscription; otherwise nothing is stored. Notifications whose dedupe key
-// the user already has are skipped.
+// EnqueueNotifications queues the notifications of an enabled user, one row
+// per channel the user chose for the kind and can receive on (see
+// enqueueRouted); nothing is stored for a disabled user. Rows whose dedupe
+// key the user already has on the channel are skipped.
 func (s *Store) EnqueueNotifications(ctx context.Context, userID string, list []Notification) error {
 	return s.transaction(ctx, func(q queries) error {
+		// Lock order: users, then the unlocked reads of
+		// notification_channels and web_push_subscriptions.
 		u, e := q.lockUser(ctx, userID)
 		if errors.Is(e, sql.ErrNoRows) {
 			return nil
@@ -214,13 +251,12 @@ func (s *Store) EnqueueNotifications(ctx context.Context, userID string, list []
 		if u.Disabled != 0 {
 			return nil
 		}
-		count, e := q.countPushSubscriptions(ctx, userID)
-		if e != nil || count == 0 {
+		routes, e := readRouting(ctx, q, userID)
+		if e != nil {
 			return e
 		}
 		for _, n := range list {
-			n.UserID = userID
-			if _, e = q.enqueueNotification(ctx, n); e != nil {
+			if e = enqueueRouted(ctx, q, userID, routes, n); e != nil {
 				return e
 			}
 		}
@@ -229,7 +265,7 @@ func (s *Store) EnqueueNotifications(ctx context.Context, userID string, list []
 }
 
 // HasNotification reports whether the user has a notification with the
-// dedupe key, sent or not.
+// dedupe key on any channel, sent or not.
 func (s *Store) HasNotification(ctx context.Context, userID, dedupeKey string) (bool, error) {
 	n, err := s.q.countNotificationsByDedupeKey(ctx, userID, dedupeKey)
 	return n > 0, err

@@ -201,6 +201,11 @@ func newSyncTest(t *testing.T, driver string, immediate bool) *syncTest {
 	if err := s.Login(ctx, u, store.Session{ID: "sid", UserID: u.ID, ExpiresAt: st.now.Unix() + 86400*30, CreatedAt: st.now.Unix()}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: st.now.Unix()}); err != nil {
 		t.Fatal(err)
 	}
+	// Detection notifications are stored only for users who can receive
+	// them.
+	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", "sid", st.now.Unix()); err != nil {
+		t.Fatal(err)
+	}
 	st.gh = &fakeGitHub{pulls: map[string]pullState{}, issues: map[string]issueState{}, reviews: map[string][]reviewState{}, comments: map[string][]commentState{}, search: map[string][]searchItem{}, forced: map[string]int{}, headers: map[string]map[string]string{}, threads: []map[string]any{}}
 	srv := httptest.NewServer(st.gh)
 	t.Cleanup(srv.Close)
@@ -393,6 +398,40 @@ func TestNotificationDetection(t *testing.T) {
 		}
 		if len(titles) != 3 || !titles["レビュー依頼: o/r#1|Add feature"] || !titles["割り当て: o/r#4|Bug"] || !titles["割り当て: o/r#5|PR assigned"] {
 			t.Fatalf("notifications: %v", titles)
+		}
+	})
+}
+
+// TestNotificationDetectionChannels checks that a detection goes to every
+// channel the user chose, with the same dedupe key.
+func TestNotificationDetectionChannels(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		st := newSyncTest(t, driver, true)
+		ctx := context.Background()
+		if err := st.s.SaveNotificationRoutes(ctx, "alice-id", "sid", store.RoutableKinds, []string{store.NotificationDetected}, []string{store.NotificationDetected}, st.now.Unix()); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.s.SetSlackWebhook(ctx, "alice-id", "sid", "sealed", st.now.Unix()); err != nil {
+			t.Fatal(err)
+		}
+		st.sync() // initial import with no results
+		b := st.gh.base
+		st.gh.set(func(f *fakeGitHub) {
+			f.pulls["o/r/pulls/1"] = pullState{State: "open", Title: "Add feature", HTMLURL: "https://github.com/o/r/pull/1", RequestedReviewers: []string{"octocat"}}
+			f.threads = []map[string]any{st.thread("review_requested", "PullRequest", b+"/repos/o/r/pulls/1")}
+		})
+		st.advance(time.Minute)
+		st.sync()
+		st.sync()
+		channels := map[string]string{}
+		for _, n := range st.pending() {
+			if _, ok := channels[n.Channel]; ok {
+				t.Fatalf("duplicate channel: %+v", n)
+			}
+			channels[n.Channel] = n.DedupeKey
+		}
+		if len(channels) != 3 || channels[store.ChannelWebPush] == "" || channels[store.ChannelWebPush] != channels[store.ChannelSlack] || channels[store.ChannelSlack] != channels[store.ChannelEmail] {
+			t.Fatalf("channels: %v", channels)
 		}
 	})
 }

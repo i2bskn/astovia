@@ -28,12 +28,14 @@ type fixture struct {
 	s   *store.Store
 	now time.Time
 	box *secretbox.Box
+	// driver and dsn open the database directly (raw).
+	driver, dsn string
 }
 
 func newFixture(t *testing.T, driver string, users ...string) *fixture {
 	t.Helper()
-	s, _ := testutil.Database(t, driver)
-	f := &fixture{t: t, s: s, now: time.Date(2026, 10, 24, 0, 30, 0, 0, time.UTC), box: secretbox.New([]byte(strings.Repeat("s", 32)))}
+	s, dsn := testutil.Database(t, driver)
+	f := &fixture{t: t, s: s, now: time.Date(2026, 10, 24, 0, 30, 0, 0, time.UTC), box: secretbox.New([]byte(strings.Repeat("s", 32))), driver: driver, dsn: dsn}
 	for _, name := range users {
 		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: "x", Role: store.RoleOwner}
 		if err := s.CreateUser(context.Background(), u); err != nil {
@@ -476,7 +478,7 @@ func TestDispatcher(t *testing.T) {
 		ctx := context.Background()
 		f.subscribe("alice", "s", "https://push.example/a")
 		ch := &fakeChannel{}
-		d := &Dispatcher{Store: f.s, Channel: ch, Now: f.clock}
+		d := &Dispatcher{Store: f.s, Channels: map[string]Channel{store.ChannelWebPush: ch}, Now: f.clock}
 		now := f.now.Unix()
 		f.item("alice", "open", "open", now)
 		f.item("alice", "done", "done", now)

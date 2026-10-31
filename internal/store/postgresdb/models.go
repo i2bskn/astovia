@@ -170,6 +170,17 @@ type Notification struct {
 	Attempts     int64
 	LastError    sql.NullString
 	CreatedAt    int64
+	Channel      string
+}
+
+type NotificationChannel struct {
+	UserID             string
+	WebpushKinds       string
+	SlackKinds         string
+	EmailKinds         string
+	SlackWebhookSealed sql.NullString
+	SlackLastError     sql.NullString
+	UpdatedAt          int64
 }
 
 type NotificationSetting struct {

@@ -37,6 +37,10 @@ func TestSlackConnections(t *testing.T) {
 func testSlackConnections(t *testing.T, driver string) {
 	ctx := context.Background()
 	s, _ := apiTokenFixture(t, driver)
+	// Detection notifications are stored only for users who can receive
+	// them.
+	subscribe(t, s, "alice")
+	subscribe(t, s, "bob")
 	if _, err := s.SlackConnection(ctx, "alice-id"); !errors.Is(err, store.ErrConnectionNotFound) {
 		t.Fatalf("missing: %v", err)
 	}

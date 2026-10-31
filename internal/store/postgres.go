@@ -617,8 +617,8 @@ func (q postgresQueries) listPushSubscriptions(ctx context.Context, userID strin
 	}
 	return out, nil
 }
-func (q postgresQueries) listPushUserIDs(ctx context.Context) ([]string, error) {
-	ids, err := q.q.ListPushUserIDs(ctx)
+func (q postgresQueries) listNotificationUserIDs(ctx context.Context) ([]string, error) {
+	ids, err := q.q.ListNotificationUserIDs(ctx)
 	if ids == nil {
 		ids = []string{}
 	}
@@ -650,7 +650,7 @@ func (q postgresQueries) createNotificationSettingsIfMissing(ctx context.Context
 	return q.q.CreateNotificationSettingsIfMissing(ctx, db.CreateNotificationSettingsIfMissingParams(n))
 }
 func (q postgresQueries) enqueueNotification(ctx context.Context, n Notification) (int64, error) {
-	return q.q.EnqueueNotification(ctx, db.EnqueueNotificationParams{ID: n.ID, UserID: n.UserID, Kind: n.Kind, ActionItemID: n.ActionItemID, DedupeKey: n.DedupeKey, Title: n.Title, Body: n.Body, Url: n.URL, ScheduledAt: n.ScheduledAt, SentAt: n.SentAt, Attempts: n.Attempts, LastError: n.LastError, CreatedAt: n.CreatedAt})
+	return q.q.EnqueueNotification(ctx, db.EnqueueNotificationParams{ID: n.ID, UserID: n.UserID, Kind: n.Kind, ActionItemID: n.ActionItemID, DedupeKey: n.DedupeKey, Title: n.Title, Body: n.Body, Url: n.URL, ScheduledAt: n.ScheduledAt, SentAt: n.SentAt, Attempts: n.Attempts, LastError: n.LastError, CreatedAt: n.CreatedAt, Channel: n.Channel})
 }
 func (q postgresQueries) countNotificationsByDedupeKey(ctx context.Context, userID, dedupeKey string) (int64, error) {
 	return q.q.CountNotificationsByDedupeKey(ctx, db.CountNotificationsByDedupeKeyParams{UserID: userID, DedupeKey: dedupeKey})
@@ -665,7 +665,7 @@ func (q postgresQueries) listDueNotifications(ctx context.Context, now int64, li
 	}
 	out := make([]Notification, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, Notification{ID: row.ID, UserID: row.UserID, Kind: row.Kind, ActionItemID: row.ActionItemID, DedupeKey: row.DedupeKey, Title: row.Title, Body: row.Body, URL: row.Url, ScheduledAt: row.ScheduledAt, SentAt: row.SentAt, Attempts: row.Attempts, LastError: row.LastError, CreatedAt: row.CreatedAt})
+		out = append(out, Notification{ID: row.ID, UserID: row.UserID, Kind: row.Kind, ActionItemID: row.ActionItemID, DedupeKey: row.DedupeKey, Title: row.Title, Body: row.Body, URL: row.Url, ScheduledAt: row.ScheduledAt, SentAt: row.SentAt, Attempts: row.Attempts, LastError: row.LastError, CreatedAt: row.CreatedAt, Channel: row.Channel})
 	}
 	return out, nil
 }
@@ -683,6 +683,22 @@ func (q postgresQueries) deleteUserPendingNotificationsBySource(ctx context.Cont
 }
 func (q postgresQueries) deleteSentNotificationsBefore(ctx context.Context, before int64) error {
 	return q.q.DeleteSentNotificationsBefore(ctx, sql.NullInt64{Int64: before, Valid: true})
+}
+func (q postgresQueries) notificationChannels(ctx context.Context, userID string) (notificationChannelsRow, error) {
+	row, err := q.q.GetNotificationChannels(ctx, userID)
+	return notificationChannelsRow(row), err
+}
+func (q postgresQueries) upsertNotificationRoutes(ctx context.Context, r notificationChannelsRow) error {
+	return q.q.UpsertNotificationRoutes(ctx, db.UpsertNotificationRoutesParams{UserID: r.UserID, WebpushKinds: r.WebpushKinds, SlackKinds: r.SlackKinds, EmailKinds: r.EmailKinds, UpdatedAt: r.UpdatedAt})
+}
+func (q postgresQueries) upsertSlackWebhook(ctx context.Context, userID, sealed string, now int64) error {
+	return q.q.UpsertSlackWebhook(ctx, db.UpsertSlackWebhookParams{UserID: userID, SlackWebhookSealed: sql.NullString{String: sealed, Valid: true}, UpdatedAt: now})
+}
+func (q postgresQueries) clearSlackWebhook(ctx context.Context, userID string, now int64) error {
+	return q.q.ClearSlackWebhook(ctx, db.ClearSlackWebhookParams{UpdatedAt: now, UserID: userID})
+}
+func (q postgresQueries) markSlackWebhookInvalid(ctx context.Context, userID, sealed, code string) (int64, error) {
+	return q.q.MarkSlackWebhookInvalid(ctx, db.MarkSlackWebhookInvalidParams{SlackLastError: sql.NullString{String: code, Valid: true}, UserID: userID, SlackWebhookSealed: sql.NullString{String: sealed, Valid: true}})
 }
 func (q postgresQueries) instanceSecret(ctx context.Context, name string) (InstanceSecret, error) {
 	row, err := q.q.GetInstanceSecret(ctx, name)

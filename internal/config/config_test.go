@@ -242,3 +242,67 @@ func TestAIAllowPrivateEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestMailConfig(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://example.com")
+	vars := []string{"ASTOVIA_MAIL_PROVIDER", "ASTOVIA_MAIL_API_KEY", "ASTOVIA_MAIL_FROM", "ASTOVIA_MAIL_FROM_NAME", "ASTOVIA_CLOUDFLARE_ACCOUNT_ID"}
+	set := func(values map[string]string) {
+		for _, k := range vars {
+			t.Setenv(k, values[k])
+		}
+	}
+	account := "0123456789abcdef0123456789abcdef"
+	cloudflare := map[string]string{"ASTOVIA_MAIL_PROVIDER": "Cloudflare", "ASTOVIA_MAIL_API_KEY": " cf-token ", "ASTOVIA_MAIL_FROM": "notify@example.com", "ASTOVIA_CLOUDFLARE_ACCOUNT_ID": account}
+	resend := map[string]string{"ASTOVIA_MAIL_PROVIDER": "resend", "ASTOVIA_MAIL_API_KEY": "re_key", "ASTOVIA_MAIL_FROM": "notify@example.com", "ASTOVIA_MAIL_FROM_NAME": "Astovia 通知"}
+	with := func(base map[string]string, k, v string) map[string]string {
+		out := map[string]string{}
+		for key, value := range base {
+			out[key] = value
+		}
+		out[k] = v
+		return out
+	}
+
+	set(nil)
+	if c, err := Load(false); err != nil || c.Mail != nil {
+		t.Fatalf("unset: %+v %v", c.Mail, err)
+	}
+	set(cloudflare)
+	if c, err := Load(false); err != nil || *c.Mail != (MailConfig{Provider: "cloudflare", APIKey: "cf-token", AccountID: account, From: "notify@example.com"}) {
+		t.Fatalf("cloudflare: %+v %v", c.Mail, err)
+	}
+	set(resend)
+	if c, err := Load(false); err != nil || *c.Mail != (MailConfig{Provider: "resend", APIKey: "re_key", From: "notify@example.com", FromName: "Astovia 通知"}) {
+		t.Fatalf("resend: %+v %v", c.Mail, err)
+	}
+	for name, values := range map[string]map[string]string{
+		"unknown provider":         with(resend, "ASTOVIA_MAIL_PROVIDER", "sendgrid"),
+		"no key":                   with(resend, "ASTOVIA_MAIL_API_KEY", ""),
+		"key not ASCII":            with(resend, "ASTOVIA_MAIL_API_KEY", "キー"),
+		"long key":                 with(resend, "ASTOVIA_MAIL_API_KEY", strings.Repeat("k", 513)),
+		"no from":                  with(resend, "ASTOVIA_MAIL_FROM", ""),
+		"from with a name":         with(resend, "ASTOVIA_MAIL_FROM", "Astovia <notify@example.com>"),
+		"invalid from":             with(resend, "ASTOVIA_MAIL_FROM", "notify"),
+		"from name with <":         with(resend, "ASTOVIA_MAIL_FROM_NAME", "a<b"),
+		"from name with a quote":   with(resend, "ASTOVIA_MAIL_FROM_NAME", `a"b`),
+		"from name with a control": with(resend, "ASTOVIA_MAIL_FROM_NAME", "a\x01b"),
+		"long from name":           with(resend, "ASTOVIA_MAIL_FROM_NAME", strings.Repeat("あ", 101)),
+		"cloudflare no account":    with(cloudflare, "ASTOVIA_CLOUDFLARE_ACCOUNT_ID", ""),
+		"cloudflare bad account":   with(cloudflare, "ASTOVIA_CLOUDFLARE_ACCOUNT_ID", strings.ToUpper(account)),
+		"resend with account":      with(resend, "ASTOVIA_CLOUDFLARE_ACCOUNT_ID", account),
+		"no provider with key":     {"ASTOVIA_MAIL_API_KEY": "re_key"},
+		"no provider with from":    {"ASTOVIA_MAIL_FROM": "notify@example.com"},
+		"no provider with account": {"ASTOVIA_CLOUDFLARE_ACCOUNT_ID": account},
+	} {
+		set(values)
+		_, err := Load(false)
+		if err == nil {
+			t.Fatalf("%s accepted", name)
+		}
+		if key := values["ASTOVIA_MAIL_API_KEY"]; key != "" && strings.Contains(err.Error(), key) {
+			t.Fatalf("%s: key in error: %v", name, err)
+		}
+	}
+}

@@ -28,9 +28,10 @@ const (
 
 // Engine decides which notifications to queue: stale open items, tasks
 // near or past their deadline and the daily digest. Detection
-// notifications are queued by the GitHub synchronization. Only enabled
-// users with a push subscription are considered, so nothing piles up for
-// users who cannot receive it.
+// notifications are queued by the synchronizations. Only enabled users
+// that can receive a notification (a push subscription, a usable Slack
+// webhook with some kind chosen, or some kind chosen for e-mail) are
+// considered, so nothing piles up for users who cannot receive it.
 type Engine struct {
 	Store *store.Store
 	Now   func() time.Time
@@ -38,7 +39,7 @@ type Engine struct {
 
 // RunOnce queues the notifications due now.
 func (e *Engine) RunOnce(ctx context.Context) {
-	users, err := e.Store.PushUserIDs(ctx)
+	users, err := e.Store.NotificationUserIDs(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("notification engine: list users: %v", err)

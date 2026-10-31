@@ -277,6 +277,10 @@ func TestGmailDelete(t *testing.T) {
 func testGmailDelete(t *testing.T, driver string) {
 	ctx := context.Background()
 	s, _ := apiTokenFixture(t, driver)
+	// Detection notifications are stored only for users who can receive
+	// them.
+	subscribe(t, s, "alice")
+	subscribe(t, s, "bob")
 	// The addresses contain the LIKE wildcards; the other accounts' keys
 	// would match them as patterns.
 	target := saveGmail(t, s, "alice-id", "a_b%c@example.com", tokenTestNow)

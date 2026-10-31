@@ -4,6 +4,7 @@ import { APIError, request } from './auth';
 import { dateTime } from './format';
 import { createIntegrationsClient } from './integrations';
 import type { PushDevice } from './integrations';
+import NotificationChannelsSettings from './NotificationChannelsSettings';
 import { base64URLToBytes, bytesToBase64URL, deviceLabel, isIOS, pushSupport, sameKey } from './notifications';
 import type { PushSupport } from './notifications';
 import Phrased from './Phrased';
@@ -131,8 +132,9 @@ function DeviceRow({ device, busy, onDelete }: { device: PushDevice; busy: boole
   </li>;
 }
 
-// NotificationSettings registers this device for Web Push and edits when
-// notifications are sent.
+// NotificationSettings registers this device for Web Push, chooses the
+// channels of each kind of notification and edits when notifications are
+// sent.
 export default function NotificationSettings() {
   const [support, setSupport] = useState<PushSupport>(() => currentSupport());
   const [devices, setDevices] = useState<PushDevice[]>([]);
@@ -249,7 +251,7 @@ export default function NotificationSettings() {
 
   return <section className="action-panel settings-panel" id="notifications" aria-labelledby={headingID}>
     <h2 id={headingID}>通知</h2>
-    <p className="intro"><Phrased text="新しく見つけたタスク、未対応が続いているタスク、朝のまとめをこの端末に通知します。" /></p>
+    <p className="intro"><Phrased text="新しく見つけたタスク、未対応が続いているタスク、期限、朝のまとめを通知します。送り先はこの端末（Web Push）、Slack、メールから選べます。" /></p>
     {support === 'supported'
       ? <div className="form-actions"><button className="button primary add-button" type="button" disabled={busy} onClick={() => { void enable(); }}>この端末で通知を受け取る</button></div>
       : <p className={support === 'denied' ? 'notice warning' : 'notice'} role={support === 'denied' ? 'alert' : undefined}><SupportMessage text={supportMessages[support]} /></p>}
@@ -263,6 +265,7 @@ export default function NotificationSettings() {
     {!loading && devices.length === 0 ? <p className="action-empty">登録された端末はありません。{support === 'supported' ? '上の「この端末で通知を受け取る」から登録できます。' : null}</p> : null}
     {loading ? <p className="action-loading" aria-live="polite">読み込んでいます…</p> : null}
     {devices.length > 0 ? <div className="form-actions"><button className="button secondary" type="button" disabled={busy} onClick={() => { void test(); }}>テスト通知を送る</button></div> : null}
+    <NotificationChannelsSettings />
     <h3 className="settings-subheading">通知のタイミング</h3>
     <form className="action-form settings-form" onSubmit={(event) => { void save(event); }} aria-busy={saving}>
       <div className="field-grid">

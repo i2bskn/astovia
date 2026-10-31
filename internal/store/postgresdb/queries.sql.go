@@ -35,6 +35,21 @@ func (q *Queries) AcceptInvitation(ctx context.Context, arg AcceptInvitationPara
 	return result.RowsAffected()
 }
 
+const clearSlackWebhook = `-- name: ClearSlackWebhook :exec
+UPDATE notification_channels SET slack_webhook_sealed = NULL, slack_last_error = NULL, updated_at = $1
+WHERE user_id = $2
+`
+
+type ClearSlackWebhookParams struct {
+	UpdatedAt int64
+	UserID    string
+}
+
+func (q *Queries) ClearSlackWebhook(ctx context.Context, arg ClearSlackWebhookParams) error {
+	_, err := q.db.ExecContext(ctx, clearSlackWebhook, arg.UpdatedAt, arg.UserID)
+	return err
+}
+
 const consumeRefresh = `-- name: ConsumeRefresh :execrows
 UPDATE refresh_tokens SET consumed_at = $1 WHERE hash = $2 AND consumed_at IS NULL
 `
@@ -1239,9 +1254,9 @@ func (q *Queries) EnableUser(ctx context.Context, id string) error {
 }
 
 const enqueueNotification = `-- name: EnqueueNotification :execrows
-INSERT INTO notifications (id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-ON CONFLICT (user_id, dedupe_key) DO NOTHING
+INSERT INTO notifications (id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at,channel)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+ON CONFLICT (user_id, dedupe_key, channel) DO NOTHING
 `
 
 type EnqueueNotificationParams struct {
@@ -1258,6 +1273,7 @@ type EnqueueNotificationParams struct {
 	Attempts     int64
 	LastError    sql.NullString
 	CreatedAt    int64
+	Channel      string
 }
 
 func (q *Queries) EnqueueNotification(ctx context.Context, arg EnqueueNotificationParams) (int64, error) {
@@ -1275,6 +1291,7 @@ func (q *Queries) EnqueueNotification(ctx context.Context, arg EnqueueNotificati
 		arg.Attempts,
 		arg.LastError,
 		arg.CreatedAt,
+		arg.Channel,
 	)
 	if err != nil {
 		return 0, err
@@ -1709,6 +1726,26 @@ func (q *Queries) GetInvitationByTokenHash(ctx context.Context, tokenHash string
 		&i.AcceptedAt,
 		&i.AcceptedUserID,
 		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const getNotificationChannels = `-- name: GetNotificationChannels :one
+SELECT user_id, webpush_kinds, slack_kinds, email_kinds, slack_webhook_sealed, slack_last_error, updated_at FROM notification_channels
+WHERE user_id = $1
+`
+
+func (q *Queries) GetNotificationChannels(ctx context.Context, userID string) (NotificationChannel, error) {
+	row := q.db.QueryRowContext(ctx, getNotificationChannels, userID)
+	var i NotificationChannel
+	err := row.Scan(
+		&i.UserID,
+		&i.WebpushKinds,
+		&i.SlackKinds,
+		&i.EmailKinds,
+		&i.SlackWebhookSealed,
+		&i.SlackLastError,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -3179,7 +3216,7 @@ func (q *Queries) ListDueGmailAccounts(ctx context.Context, arg ListDueGmailAcco
 }
 
 const listDueNotifications = `-- name: ListDueNotifications :many
-SELECT id, user_id, kind, action_item_id, dedupe_key, title, body, url, scheduled_at, sent_at, attempts, last_error, created_at FROM notifications
+SELECT id, user_id, kind, action_item_id, dedupe_key, title, body, url, scheduled_at, sent_at, attempts, last_error, created_at, channel FROM notifications
 WHERE sent_at IS NULL AND scheduled_at <= $1 AND user_id IN (SELECT id FROM users WHERE disabled = 0)
 ORDER BY scheduled_at, id LIMIT $2
 `
@@ -3212,6 +3249,7 @@ func (q *Queries) ListDueNotifications(ctx context.Context, arg ListDueNotificat
 			&i.Attempts,
 			&i.LastError,
 			&i.CreatedAt,
+			&i.Channel,
 		); err != nil {
 			return nil, err
 		}
@@ -3397,6 +3435,39 @@ func (q *Queries) ListGoogleAuthStateHashes(ctx context.Context, userID string) 
 	return items, nil
 }
 
+const listNotificationUserIDs = `-- name: ListNotificationUserIDs :many
+SELECT user_id FROM web_push_subscriptions
+WHERE user_id IN (SELECT id FROM users WHERE disabled = 0)
+UNION
+SELECT user_id FROM notification_channels
+WHERE ((slack_kinds <> '' AND slack_webhook_sealed IS NOT NULL AND slack_last_error IS NULL) OR email_kinds <> '')
+AND user_id IN (SELECT id FROM users WHERE disabled = 0)
+ORDER BY user_id
+`
+
+func (q *Queries) ListNotificationUserIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listNotificationUserIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var user_id string
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listOAuthGrants = `-- name: ListOAuthGrants :many
 SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
 WHERE user_id = $1 AND code_used_at IS NOT NULL AND expires_at > $2
@@ -3473,34 +3544,6 @@ func (q *Queries) ListPushSubscriptions(ctx context.Context, userID string) ([]W
 			return nil, err
 		}
 		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listPushUserIDs = `-- name: ListPushUserIDs :many
-SELECT DISTINCT user_id FROM web_push_subscriptions
-WHERE user_id IN (SELECT id FROM users WHERE disabled = 0) ORDER BY user_id
-`
-
-func (q *Queries) ListPushUserIDs(ctx context.Context) ([]string, error) {
-	rows, err := q.db.QueryContext(ctx, listPushUserIDs)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var user_id string
-		if err := rows.Scan(&user_id); err != nil {
-			return nil, err
-		}
-		items = append(items, user_id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -4399,6 +4442,25 @@ type MarkOAuthCodeUsedParams struct {
 
 func (q *Queries) MarkOAuthCodeUsed(ctx context.Context, arg MarkOAuthCodeUsedParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markOAuthCodeUsed, arg.CodeUsedAt, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const markSlackWebhookInvalid = `-- name: MarkSlackWebhookInvalid :execrows
+UPDATE notification_channels SET slack_last_error = $1
+WHERE user_id = $2 AND slack_webhook_sealed = $3
+`
+
+type MarkSlackWebhookInvalidParams struct {
+	SlackLastError     sql.NullString
+	UserID             string
+	SlackWebhookSealed sql.NullString
+}
+
+func (q *Queries) MarkSlackWebhookInvalid(ctx context.Context, arg MarkSlackWebhookInvalidParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markSlackWebhookInvalid, arg.SlackLastError, arg.UserID, arg.SlackWebhookSealed)
 	if err != nil {
 		return 0, err
 	}
@@ -5410,6 +5472,31 @@ func (q *Queries) UpsertCIMDClient(ctx context.Context, arg UpsertCIMDClientPara
 	return err
 }
 
+const upsertNotificationRoutes = `-- name: UpsertNotificationRoutes :exec
+INSERT INTO notification_channels (user_id,webpush_kinds,slack_kinds,email_kinds,slack_webhook_sealed,slack_last_error,updated_at)
+VALUES ($1,$2,$3,$4,NULL,NULL,$5)
+ON CONFLICT (user_id) DO UPDATE SET webpush_kinds = excluded.webpush_kinds, slack_kinds = excluded.slack_kinds, email_kinds = excluded.email_kinds, updated_at = excluded.updated_at
+`
+
+type UpsertNotificationRoutesParams struct {
+	UserID       string
+	WebpushKinds string
+	SlackKinds   string
+	EmailKinds   string
+	UpdatedAt    int64
+}
+
+func (q *Queries) UpsertNotificationRoutes(ctx context.Context, arg UpsertNotificationRoutesParams) error {
+	_, err := q.db.ExecContext(ctx, upsertNotificationRoutes,
+		arg.UserID,
+		arg.WebpushKinds,
+		arg.SlackKinds,
+		arg.EmailKinds,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
 const upsertNotificationSettings = `-- name: UpsertNotificationSettings :exec
 INSERT INTO notification_settings (user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days)
 VALUES ($1,$2,$3,$4,$5,$6)
@@ -5434,6 +5521,23 @@ func (q *Queries) UpsertNotificationSettings(ctx context.Context, arg UpsertNoti
 		arg.UpdatedAt,
 		arg.CandidateExpireDays,
 	)
+	return err
+}
+
+const upsertSlackWebhook = `-- name: UpsertSlackWebhook :exec
+INSERT INTO notification_channels (user_id,slack_webhook_sealed,slack_last_error,updated_at)
+VALUES ($1,$2,NULL,$3)
+ON CONFLICT (user_id) DO UPDATE SET slack_webhook_sealed = excluded.slack_webhook_sealed, slack_last_error = NULL, updated_at = excluded.updated_at
+`
+
+type UpsertSlackWebhookParams struct {
+	UserID             string
+	SlackWebhookSealed sql.NullString
+	UpdatedAt          int64
+}
+
+func (q *Queries) UpsertSlackWebhook(ctx context.Context, arg UpsertSlackWebhookParams) error {
+	_, err := q.db.ExecContext(ctx, upsertSlackWebhook, arg.UserID, arg.SlackWebhookSealed, arg.UpdatedAt)
 	return err
 }
 

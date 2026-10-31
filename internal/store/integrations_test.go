@@ -159,6 +159,10 @@ func TestDeleteConnectionKeepsOtherSources(t *testing.T) {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
 			s, _ := apiTokenFixture(t, driver)
+			// Detection notifications are stored only for users who can receive
+			// them.
+			subscribe(t, s, "alice")
+			subscribe(t, s, "bob")
 			c := saveConnection(t, s, "alice-id", "octocat", nil)
 			err := s.GitHubSync(ctx, "alice-id", c.Generation, func(tx *store.GitHubTx) error {
 				other := githubItem("slack-item", "slack:T1:m:C1:-:1.000001", 100)
@@ -372,7 +376,7 @@ func testPushSubscriptions(t *testing.T, driver string) {
 	if err = s.TouchPushSubscription(ctx, "s1", tokenTestNow+9); err != nil {
 		t.Fatal(err)
 	}
-	if ids, err := s.PushUserIDs(ctx); err != nil || !reflect.DeepEqual(ids, []string{"alice-id"}) {
+	if ids, err := s.NotificationUserIDs(ctx); err != nil || !reflect.DeepEqual(ids, []string{"alice-id"}) {
 		t.Fatalf("push users: %v %v", ids, err)
 	}
 
@@ -416,7 +420,7 @@ func testNotificationQueue(t *testing.T, driver string) {
 	if err := s.EnqueueNotifications(ctx, "alice-id", []store.Notification{notification("n0", store.NotificationDigest, "digest:x", "", 10)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateTestNotification(ctx, store.Notification{ID: "t0", UserID: "alice-id", Kind: store.NotificationTest, DedupeKey: "test:0", URL: "/", ScheduledAt: 10, CreatedAt: 10}, "alice-session", tokenTestNow); !errors.Is(err, store.ErrNoSubscription) {
+	if err := s.CreateTestNotification(ctx, store.Notification{ID: "t0", UserID: "alice-id", Kind: store.NotificationTest, DedupeKey: "test:0", URL: "/", ScheduledAt: 10, CreatedAt: 10, Channel: store.ChannelWebPush}, "alice-session", tokenTestNow); !errors.Is(err, store.ErrNoSubscription) {
 		t.Fatalf("test without subscription: %v", err)
 	}
 	for _, u := range []string{"alice", "bob"} {
@@ -517,6 +521,23 @@ func testChangeUserIntegrations(t *testing.T, driver string) {
 		}
 	}
 
+	for _, u := range []string{"alice", "bob"} {
+		if err := s.SaveNotificationRoutes(ctx, u+"-id", u+"-session", store.RoutableKinds, []string{store.NotificationDetected}, nil, tokenTestNow); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetSlackWebhook(ctx, u+"-id", u+"-session", "sealed-"+u, tokenTestNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The Slack webhook goes with a password reset and with disabling; the
+	// chosen kinds stay.
+	webhook := func(user string, want bool) {
+		t.Helper()
+		c, err := s.NotificationChannels(ctx, user+"-id")
+		if err != nil || c.SlackWebhookSealed.Valid != want || c.SlackLastError.Valid || !reflect.DeepEqual(c.Slack, []string{store.NotificationDetected}) {
+			t.Fatalf("%s webhook: %+v %v", user, c, err)
+		}
+	}
 	check := func(user string, connection bool, subs int, pending, sent bool) {
 		t.Helper()
 		_, err := s.GitHubConnection(ctx, user+"-id")
@@ -544,11 +565,14 @@ func testChangeUserIntegrations(t *testing.T, driver string) {
 	}
 	check("alice", true, 0, false, true)
 	check("bob", true, 1, true, true)
+	webhook("alice", false)
+	webhook("bob", true)
 	// Disabling removes the connection as well.
 	if err := s.ChangeUser(ctx, "bob@example.com", "", true, tokenTestNow); err != nil {
 		t.Fatal(err)
 	}
 	check("bob", false, 0, false, true)
+	webhook("bob", false)
 	if due, err := s.DueGitHubConnections(ctx, tokenTestNow, 10); err != nil || len(due) != 1 || due[0].UserID != "alice-id" {
 		t.Fatalf("due connections: %+v %v", due, err)
 	}

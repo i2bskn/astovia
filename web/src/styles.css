@@ -399,6 +399,16 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 .toggle-field { display: flex; align-items: center; gap: 10px; margin: 16px 0; }
 .toggle-field input { width: 20px; height: 20px; min-height: 0; padding: 0; flex-shrink: 0; accent-color: var(--accent); }
 .settings-form { margin-top: 0; }
+/* The channels of each kind of notification: a row per kind and a column
+   per channel. It fits 375px; the wrapper scrolls instead of the page if a
+   larger font does not. */
+.route-table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 12px; }
+.route-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.route-table th, .route-table td { padding: 8px 12px; border-top: 1px solid var(--line); text-align: center; }
+.route-table thead th { border-top: 0; color: var(--ink-2); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.route-table tbody th { text-align: left; font-weight: 500; white-space: nowrap; }
+.route-table input { display: block; width: 22px; height: 22px; min-height: 0; margin: 0 auto; padding: 0; accent-color: var(--accent); }
+.route-note { margin: 0 0 8px; }
 .inline-code { font-family: var(--mono); font-size: .9em; background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; overflow-wrap: anywhere; color: var(--ink); }
 
 .action-list { list-style: none; margin: 0 0 12px; padding: 0; border: 1px solid var(--line); border-radius: 12px; overflow: clip; }
@@ -496,6 +506,8 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
   .task-stack .task-time { grid-column: 2 / 4; }
   .task-stack .task-actions { margin: 10px 0 0 -2px; }
   .field-grid { grid-template-columns: minmax(0, 1fr); }
+  .route-table th, .route-table td { padding: 10px 6px; }
+  .route-table tbody th { padding-left: 10px; font-size: 13px; }
   .settings-tabs { display: none; }
   /* The account screen has no list page on phones, so its two tabs stay. */
   .settings-tabs.account-tabs { display: flex; }

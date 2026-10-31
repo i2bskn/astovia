@@ -337,6 +337,11 @@ func newBareSyncTest(t *testing.T, driver string) *syncTest {
 	if err := s.Login(ctx, u, store.Session{ID: "sid", UserID: u.ID, ExpiresAt: st.now.Unix() + 86400*30, CreatedAt: st.now.Unix()}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: st.now.Unix()}); err != nil {
 		t.Fatal(err)
 	}
+	// Detection notifications are stored only for users who can receive
+	// them.
+	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", "sid", st.now.Unix()); err != nil {
+		t.Fatal(err)
+	}
 	st.cw = newFakeChatwork()
 	srv := httptest.NewServer(st.cw)
 	t.Cleanup(srv.Close)

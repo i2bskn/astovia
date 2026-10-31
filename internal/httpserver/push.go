@@ -220,6 +220,9 @@ func (s *Server) handleDeletePushSubscription(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(204)
 }
 
+// pushTestBody is the body of a Web Push test notification.
+const pushTestBody = "この端末で通知を受け取れます。"
+
 func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 	u, ok := userFrom(r.Context())
 	if !ok {
@@ -242,7 +245,7 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.auth.Now().Unix()
-	n := store.Notification{ID: id, UserID: u.ID, Kind: store.NotificationTest, DedupeKey: "test:" + id, Title: "Astovia のテスト通知", Body: "この端末で通知を受け取れます。", URL: "/settings/notifications", ScheduledAt: now, CreatedAt: now}
+	n := store.Notification{ID: id, UserID: u.ID, Kind: store.NotificationTest, DedupeKey: "test:" + id, Title: "Astovia のテスト通知", Body: pushTestBody, URL: "/settings/notifications", ScheduledAt: now, CreatedAt: now, Channel: store.ChannelWebPush}
 	err = s.auth.Store.CreateTestNotification(r.Context(), n, sid, now)
 	switch {
 	case err == nil:

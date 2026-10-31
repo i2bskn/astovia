@@ -262,6 +262,8 @@ type sourceTx struct {
 	ctx    context.Context
 	q      queries
 	userID string
+	// routes is read by the first Enqueue of the transaction.
+	routes *routing
 }
 
 // LockItemBySourceKey locks the user's item with the source key.
@@ -325,12 +327,20 @@ func (t *sourceTx) TouchItem(item ActionItem, now int64) error {
 	return e
 }
 
-// Enqueue adds n to the notifications to send unless the user already has
-// one with its dedupe key.
+// Enqueue adds n to the notifications to send, one row per channel the user
+// chose for its kind (see enqueueRouted), skipping the channels on which the
+// user already has its dedupe key. Lock order: the synchronization holds the
+// lock of the user row; the channels and push subscriptions are read without
+// locks, once per transaction.
 func (t *sourceTx) Enqueue(n Notification) error {
-	n.UserID = t.userID
-	_, e := t.q.enqueueNotification(t.ctx, n)
-	return e
+	if t.routes == nil {
+		r, e := readRouting(t.ctx, t.q, t.userID)
+		if e != nil {
+			return e
+		}
+		t.routes = r
+	}
+	return enqueueRouted(t.ctx, t.q, t.userID, t.routes, n)
 }
 
 // DropPendingNotifications deletes the notifications of the item that were

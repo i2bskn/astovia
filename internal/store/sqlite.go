@@ -615,8 +615,8 @@ func (q sqliteQueries) listPushSubscriptions(ctx context.Context, userID string)
 	}
 	return out, nil
 }
-func (q sqliteQueries) listPushUserIDs(ctx context.Context) ([]string, error) {
-	ids, err := q.q.ListPushUserIDs(ctx)
+func (q sqliteQueries) listNotificationUserIDs(ctx context.Context) ([]string, error) {
+	ids, err := q.q.ListNotificationUserIDs(ctx)
 	if ids == nil {
 		ids = []string{}
 	}
@@ -648,7 +648,7 @@ func (q sqliteQueries) createNotificationSettingsIfMissing(ctx context.Context, 
 	return q.q.CreateNotificationSettingsIfMissing(ctx, db.CreateNotificationSettingsIfMissingParams(n))
 }
 func (q sqliteQueries) enqueueNotification(ctx context.Context, n Notification) (int64, error) {
-	return q.q.EnqueueNotification(ctx, db.EnqueueNotificationParams{ID: n.ID, UserID: n.UserID, Kind: n.Kind, ActionItemID: n.ActionItemID, DedupeKey: n.DedupeKey, Title: n.Title, Body: n.Body, Url: n.URL, ScheduledAt: n.ScheduledAt, SentAt: n.SentAt, Attempts: n.Attempts, LastError: n.LastError, CreatedAt: n.CreatedAt})
+	return q.q.EnqueueNotification(ctx, db.EnqueueNotificationParams{ID: n.ID, UserID: n.UserID, Kind: n.Kind, ActionItemID: n.ActionItemID, DedupeKey: n.DedupeKey, Title: n.Title, Body: n.Body, Url: n.URL, ScheduledAt: n.ScheduledAt, SentAt: n.SentAt, Attempts: n.Attempts, LastError: n.LastError, CreatedAt: n.CreatedAt, Channel: n.Channel})
 }
 func (q sqliteQueries) countNotificationsByDedupeKey(ctx context.Context, userID, dedupeKey string) (int64, error) {
 	return q.q.CountNotificationsByDedupeKey(ctx, db.CountNotificationsByDedupeKeyParams{UserID: userID, DedupeKey: dedupeKey})
@@ -663,7 +663,7 @@ func (q sqliteQueries) listDueNotifications(ctx context.Context, now int64, limi
 	}
 	out := make([]Notification, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, Notification{ID: row.ID, UserID: row.UserID, Kind: row.Kind, ActionItemID: row.ActionItemID, DedupeKey: row.DedupeKey, Title: row.Title, Body: row.Body, URL: row.Url, ScheduledAt: row.ScheduledAt, SentAt: row.SentAt, Attempts: row.Attempts, LastError: row.LastError, CreatedAt: row.CreatedAt})
+		out = append(out, Notification{ID: row.ID, UserID: row.UserID, Kind: row.Kind, ActionItemID: row.ActionItemID, DedupeKey: row.DedupeKey, Title: row.Title, Body: row.Body, URL: row.Url, ScheduledAt: row.ScheduledAt, SentAt: row.SentAt, Attempts: row.Attempts, LastError: row.LastError, CreatedAt: row.CreatedAt, Channel: row.Channel})
 	}
 	return out, nil
 }
@@ -681,6 +681,22 @@ func (q sqliteQueries) deleteUserPendingNotificationsBySource(ctx context.Contex
 }
 func (q sqliteQueries) deleteSentNotificationsBefore(ctx context.Context, before int64) error {
 	return q.q.DeleteSentNotificationsBefore(ctx, sql.NullInt64{Int64: before, Valid: true})
+}
+func (q sqliteQueries) notificationChannels(ctx context.Context, userID string) (notificationChannelsRow, error) {
+	row, err := q.q.GetNotificationChannels(ctx, userID)
+	return notificationChannelsRow(row), err
+}
+func (q sqliteQueries) upsertNotificationRoutes(ctx context.Context, r notificationChannelsRow) error {
+	return q.q.UpsertNotificationRoutes(ctx, db.UpsertNotificationRoutesParams{UserID: r.UserID, WebpushKinds: r.WebpushKinds, SlackKinds: r.SlackKinds, EmailKinds: r.EmailKinds, UpdatedAt: r.UpdatedAt})
+}
+func (q sqliteQueries) upsertSlackWebhook(ctx context.Context, userID, sealed string, now int64) error {
+	return q.q.UpsertSlackWebhook(ctx, db.UpsertSlackWebhookParams{UserID: userID, SlackWebhookSealed: sql.NullString{String: sealed, Valid: true}, UpdatedAt: now})
+}
+func (q sqliteQueries) clearSlackWebhook(ctx context.Context, userID string, now int64) error {
+	return q.q.ClearSlackWebhook(ctx, db.ClearSlackWebhookParams{UpdatedAt: now, UserID: userID})
+}
+func (q sqliteQueries) markSlackWebhookInvalid(ctx context.Context, userID, sealed, code string) (int64, error) {
+	return q.q.MarkSlackWebhookInvalid(ctx, db.MarkSlackWebhookInvalidParams{SlackLastError: sql.NullString{String: code, Valid: true}, UserID: userID, SlackWebhookSealed: sql.NullString{String: sealed, Valid: true}})
 }
 func (q sqliteQueries) instanceSecret(ctx context.Context, name string) (InstanceSecret, error) {
 	row, err := q.q.GetInstanceSecret(ctx, name)

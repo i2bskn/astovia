@@ -103,6 +103,8 @@ docker run --rm -v astovia-data:/data -v "$PWD/backups/<日時>:/restore:ro" alp
 
 Slack連携を追加したバージョンへ更新するときは、`slack_connections`テーブルが増えます。Chatwork連携を追加したバージョンへ更新するときは、`chatwork_connections`テーブルが増えます。メール連携を追加したバージョンへ更新するときは、`gmail_accounts`と`google_auth_states`テーブルが増えます。AIの追加の指示を追加したバージョンへ更新するときは、`ai_instructions`テーブルが増えます。アプリは起動時にこれらのテーブルも確認するため、必ず下の手順どおり、新しいアプリを起動する前にスキーマを適用してください。
 
+通知の送り先（Slack・メール）を追加したバージョンへ更新するときは、`notification_channels`テーブルと`notifications`の`channel`列が増え、一意のインデックス`notifications_user_dedupe_key`が`(user_id, dedupe_key)`から`(user_id, dedupe_key, channel)`に変わります。既存の通知はすべて`channel`が`webpush`になります。スキーマを適用してから新しいアプリをデプロイするまでの間、古いアプリは通知を保存できません（同期の書き込みは取り消され、次の実行でやり直されます）。適用したらすぐにデプロイしてください。下の手順のとおり、アプリを止めてから適用してデプロイするのが安全です。PostgreSQLでは、インデックスを作り直す間`notifications`への書き込みが待たされます（通知は30日で削除するため、表は小さいはずです）。
+
 1. 新しいバージョンのタグから`compose.yaml`、`Caddyfile`、`.env.example`を別名で取得し（例: `curl -fsSL -o compose.yaml.new https://raw.githubusercontent.com/i2bskn/astovia/vX.Y.Z/deploy/compose.yaml`）、手元のファイルとの差分を確認して反映します。必須の環境変数が増えた場合は`.env`にも追加します。
 2. アプリを止めます: `docker compose stop app`
 3. 「バックアップと復元（VPS）」の手順でバックアップを取ります。
@@ -191,6 +193,8 @@ echo "exit code: $?"
 
 Slack連携を追加したバージョンへ更新するときは、`slack_connections`テーブルが増えます。Chatwork連携を追加したバージョンへ更新するときは、`chatwork_connections`テーブルが増えます。メール連携を追加したバージョンへ更新するときは、`gmail_accounts`と`google_auth_states`テーブルが増えます。AIの追加の指示を追加したバージョンへ更新するときは、`ai_instructions`テーブルが増えます。アプリは起動時にこれらのテーブルも確認するため、必ず下の手順どおり、新しいアプリを起動する前にスキーマを適用してください。
 
+通知の送り先（Slack・メール）を追加したバージョンへ更新するときは、`notification_channels`テーブルと`notifications`の`channel`列が増え、一意のインデックス`notifications_user_dedupe_key`が`(user_id, dedupe_key)`から`(user_id, dedupe_key, channel)`に変わります。既存の通知はすべて`channel`が`webpush`になります。スキーマを適用してから新しいアプリをデプロイするまでの間、古いアプリは通知を保存できません（同期の書き込みは取り消され、次の実行でやり直されます）。適用したらすぐにデプロイしてください。下の手順のとおり、アプリを止めてから適用してデプロイするのが安全です。PostgreSQLでは、インデックスを作り直す間`notifications`への書き込みが待たされます（通知は30日で削除するため、表は小さいはずです）。
+
 1. コンテナサービスでアプリを止めます（サービスを無効にする、またはインスタンス数を0にする）。古いアプリが新しいスキーマで動き続けることと、デプロイ中に新旧が並行して動いて通知が重複することを避けるためです。
 2. 「バックアップと復元（外部PostgreSQL）」の手順でバックアップを取ります。
 3. 新しいバージョンのタグから`compose.migrate-postgres.yaml`を取得し、`.env`の`ASTOVIA_VERSION`を新しいバージョンにして、スキーマを適用します（変更計画を確認してから承認してください）。
@@ -229,7 +233,7 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は「PostgreSQLを使用する」の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加、Chatwork連携の`chatwork_connections`テーブルの追加、メール連携の`gmail_accounts`・`google_auth_states`テーブルの追加、`action_items`の`importance`列の追加、AIの追加の指示の`ai_instructions`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加、Chatwork連携の`chatwork_connections`テーブルの追加、メール連携の`gmail_accounts`・`google_auth_states`テーブルの追加、`action_items`の`importance`列の追加、AIの追加の指示の`ai_instructions`テーブルの追加、通知の送り先の`notification_channels`テーブルと`notifications`の`channel`列の追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -317,6 +321,11 @@ Docker起動手順で同じDBとユーザーを作成済みの場合、作成操
 | `ASTOVIA_ACCESS_TEAM_DOMAIN` | なし。`ASTOVIA_ACCESS_CLIENT_ID`、`ASTOVIA_ACCESS_CLIENT_SECRET`と3つとも設定すると、ログインがCloudflare Accessになる（「ログイン方式（パスワード / Cloudflare Access）」を参照） |
 | `ASTOVIA_ACCESS_CLIENT_ID` | なし。Cloudflare AccessのSaaSアプリのClient ID |
 | `ASTOVIA_ACCESS_CLIENT_SECRET` | なし。Cloudflare AccessのSaaSアプリのClient secret。ログに出さない |
+| `ASTOVIA_MAIL_PROVIDER` | なし。`cloudflare`か`resend`（大文字小文字は区別しない）を設定すると、通知をメールでも送れる（「メールでの通知」を参照）。空のまま他の`ASTOVIA_MAIL_*`か`ASTOVIA_CLOUDFLARE_ACCOUNT_ID`を設定すると起動エラー |
+| `ASTOVIA_MAIL_API_KEY` | なし。メールの送信サービスのAPIキー（CloudflareはEmail Serviceの送信の権限を持つAPIトークン）。ログに出さない |
+| `ASTOVIA_MAIL_FROM` | なし。送信元のメールアドレス（表示名を付けない`notify@example.com`の形） |
+| `ASTOVIA_MAIL_FROM_NAME` | なし。送信元の表示名（Resendだけ。100文字まで） |
+| `ASTOVIA_CLOUDFLARE_ACCOUNT_ID` | なし。Cloudflare Email Serviceを使うときのアカウントID（32桁の16進数）。`resend`では設定しない |
 | `ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS` | `false`。`true`（または`1`）にすると、AIのOpenAI互換の接続先に`http`と非公開アドレスを使える（「OpenAI互換の接続先」を参照。リスクを読んでから設定する）。`true`・`1`・`false`・`0`・空以外（大文字小文字は区別しない）は起動エラー |
 
 `compose.yaml`では、署名鍵とGoogleのOAuthクライアント（メール連携）とUID／GIDだけを外部から展開し、待ち受けアドレス・公開URL・SQLite接続先はファイル内の固定値を使用します。Composeの公開URLは`http://localhost:5173`で、直接起動時の既定値とは異なります。
@@ -385,7 +394,7 @@ make user-role USER_EMAIL=alice@example.com USER_ROLE=owner
 
 パスワードは端末の表示を無効にして読み取ります。非対話で実行する場合は`--password-stdin`を指定し、標準入力から1行で渡してください。末尾の改行1つ（`\n`、`\r\n`、`\r`）は除去します。複数行の入力と75バイトを超える入力は拒否します。パスワードをコマンドライン引数には含めません。Composeへパイプで渡す場合は、`docker compose run --rm -T app go run ./cmd/astovia users create --email alice@example.com --password-stdin`のように`-T`を付けて実行します。
 
-メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです（画面の招待・再設定も同じです）。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、AIの設定（登録したAPIキー）とAIの追加の指示、未送信の通知をすべて削除し、そのユーザーが発行した招待と再設定リンク、そのユーザー宛ての再設定リンクを取り消します。ユーザー無効化はGitHub連携とSlack連携とChatwork連携とメール連携のGoogleアカウントも削除します（パスワード再設定では残します。「GitHub連携と通知」「Slack連携」「Chatwork連携」「メール連携（Gmail・Google Workspace）」を参照）。パスワード再設定とユーザー無効化は、途中のGoogleアカウントの接続の手続きも取り消します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
+メールアドレスは前後のASCII空白を除去して小文字に変換します（ローカル部も小文字にします）。ASCIIのみで254文字以内、`@`より前のローカル部は64文字以内です。形式はHTMLの`input type=email`と同じ規則で、`alice@localhost`のようにドットを含まないドメインも受け付けます。国際化ドメイン名はUnicodeのままでは受け付けないため、punycode（`xn--…`）で指定してください。確認メールは送信しません。パスワードはUTF-8で12〜72バイトです（画面の招待・再設定も同じです）。同じメールアドレス（大文字・小文字の違いを含む）の作成は拒否します。パスワード再設定とユーザー無効化は全セッションを失効させ、そのユーザーのAPIトークンと、OAuthで接続したAIクライアント（認可とトークン）、Web Pushの購読（通知を受け取る端末）、Slackへの通知のWebhook、AIの設定（登録したAPIキー）とAIの追加の指示、未送信の通知をすべて削除し（通知の種類ごとの送り先の選択は残します）、そのユーザーが発行した招待と再設定リンク、そのユーザー宛ての再設定リンクを取り消します。ユーザー無効化はGitHub連携とSlack連携とChatwork連携とメール連携のGoogleアカウントも削除します（パスワード再設定では残します。「GitHub連携と通知」「Slack連携」「Chatwork連携」「メール連携（Gmail・Google Workspace）」を参照）。パスワード再設定とユーザー無効化は、途中のGoogleアカウントの接続の手続きも取り消します。再設定によって無効化済みユーザーが再び有効になることはありません。CLIはサーバーと同じDB設定を使い、JWT署名鍵は必要としません。
 
 ## ログイン方式（パスワード / Cloudflare Access）
 
@@ -565,7 +574,7 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 
 ## GitHub連携と通知
 
-GitHubで自分宛てになったレビュー依頼と割り当てを対応事項として取り込み、PR／Issueの状態から完了を確認できたら根拠付きで自動完了にします。レビュー依頼と割り当ての判定はGitHubの通知APIと検索APIに基づく規則だけで行い、AIは使いません。自分へのメンションは、AIの設定がある場合だけ、AIが読んでやることがあるかを判断します（「メンションの検出」と「タスク候補と予定タスク」を参照）。新しく見つけた対応事項、未対応が続いている対応事項、朝のまとめはWeb Pushで通知します。
+GitHubで自分宛てになったレビュー依頼と割り当てを対応事項として取り込み、PR／Issueの状態から完了を確認できたら根拠付きで自動完了にします。レビュー依頼と割り当ての判定はGitHubの通知APIと検索APIに基づく規則だけで行い、AIは使いません。自分へのメンションは、AIの設定がある場合だけ、AIが読んでやることがあるかを判断します（「メンションの検出」と「タスク候補と予定タスク」を参照）。新しく見つけた対応事項、未対応が続いている対応事項、朝のまとめは、Web Push・Slack・メールのうち選んだ送り先に通知します（「通知」を参照）。
 
 ### GitHubトークンを登録する
 
@@ -594,7 +603,17 @@ AIの設定（「AIの設定」を参照）がある場合、GitHubのIssueとPu
 - AIを呼ぶのは1回の同期で3回までです。残りと、AIに一時的につながらなかったもの（混雑・上限・タイムアウト等）は次の同期で読み直します。2時間より古い投稿でAIにつながらなかった場合と、6時間以上読み直しが続いた場合は、「メンションを確認: …」という対応事項にします。通知APIの3ページを超える通知が一度に届いた場合、読み直す前に範囲から外れたメンションは取りこぼすことがあります。
 - APIキーが無効・残高不足・モデルを使えない場合は、その同期のメンションを「メンションを確認: …」にし、以後はAIの設定を直すまでメンションを扱いません。この間のメンションは、キーを直した後も処理されないことがあります。AIの設定が無い間に届いたメンションも、後から処理しません。
 
-### 通知（Web Push）
+### 通知
+
+通知の送り先は、Web Push（登録した端末）、Slack（自分のSlackアプリのIncoming Webhook）、メール（ログインのメールアドレス）の3つです。「設定」の「通知」の「送り先」の表で、通知の種類（タスクの検出、未対応が続く、期限が近い、期限を過ぎた、朝のまとめ）ごとに、どの送り先に送るかを選んで「保存」します。
+
+- 既定では、すべての種類をWeb Pushに送り、Slackとメールには送りません。以前の版から使っている場合も、何も変えなければこれまでどおりWeb Pushだけに届きます。
+- 1つの通知を複数の送り先に送る場合、送り先ごとに別々に送り、失敗したときの再送も送り先ごとに行います。
+- どの送り先にも送れない通知（選んだ送り先がない、Web Pushの端末もSlackのWebhookもない等）は作りません。
+- 送り先を後から増やした場合、今の期間の「未対応が続く」「期限が近い」「期限を過ぎた」の通知は、増やした送り先にも1回送ります。その日の朝のまとめと、既に作ったタスクの検出の通知は、増やした送り先には送りません。
+- 「テスト送信」（Slackとメール）と「テスト通知を送る」（Web Push）で、それぞれの送り先に届くか確認できます。テスト通知は送り先を合わせて1分に3回までです。
+
+#### Web Push
 
 - 「設定」の「通知」で「この端末で通知を受け取る」を押すと、ブラウザの通知許可を求め、この端末を登録します。1ユーザーあたり20台まで登録できます。「テスト通知を送る」で届くか確認できます（1分に3回まで）。
 - Web PushはHTTPSのページでだけ使えます（`localhost`は例外）。iPhone／iPadはiOS 16.4以降で、共有メニューの「ホーム画面に追加」で追加したAstoviaから登録してください。
@@ -604,10 +623,57 @@ AIの設定（「AIの設定」を参照）がある場合、GitHubのIssueとPu
 - VAPIDの鍵は初回に自動で作成し、DB（`instance_secrets`）に暗号化して保存します。VAPIDの連絡先（`sub`）には`ASTOVIA_PUBLIC_URL`がHTTPSならそのURLを、そうでなければ`mailto:webpush@localhost`を使います。後者はローカル開発用で、AppleのPushサービスでは送信に失敗する場合があります。
 - 送信先は、名前解決後のアドレスがグローバルなものだけです（プライベートアドレス、ループバック等には送りません）。送信に失敗した通知は最大4回まで再送し、Pushサービスが購読の終了を返した端末は登録を削除します。送信済みの通知は30日後に削除します。
 
+### Slackへの通知
+
+自分で作ったSlackアプリのIncoming Webhookへ通知を送ります。Slack連携（自分のSlackを読み取る機能）とは別のもので、Slack連携のトークンは送信に使いません。Slack連携をしていなくても使えます。
+
+1. [Slackアプリの管理画面](https://api.slack.com/apps)でアプリを作り（Slack連携で作ったアプリでも構いません）、「Incoming Webhooks」を有効にします。
+2. 「Add New Webhook to Workspace」で通知を送るチャンネル（自分へのDMでも構いません）を選び、作られたWebhook URLをコピーします。
+3. 「設定」の「通知」の「Slack」に貼り付けて「登録」を押し、「送り先」の表でSlackに送る種類を選んで保存します。
+
+- 登録できるのは`https://hooks.slack.com/services/…/…/…`の形のURLだけです。登録のときにはSlackへ送信しません。「テスト送信」で確かめてください。
+- URLは`ASTOVIA_JWT_SECRET`から派生した鍵（AES-256-GCM）で暗号化して保存し、画面・APIには表示しません。
+- 送るのは、通知のタイトル（太字）と本文と、Astoviaの画面を開くリンクです。
+- Slackが「Webhookがない・使えない」（403・404・410）と返した場合と、保存したURLを読み出せない場合は、Slackへの送信を止めて画面に表示します。Webhookを登録し直すと再開します。止まっている間の通知は、Slackには送りません。
+- Slackの流量の制限（429）を受けたときは、そのユーザーのSlackへの送信を1分止めてから再開します。作成から24時間を過ぎても送れなかった通知は送りません。
+
+### メールでの通知
+
+運用者がサーバーにメールの送信サービスを設定すると、通知をメールでも送れます。各ユーザーは「送り先」の表でメールに送る種類を選ぶだけで、宛先はログインのメールアドレスに固定です（別のアドレスは指定できません）。設定していないサーバーでは、表のメールの列は選べません。
+
+| 環境変数 | 内容 |
+| --- | --- |
+| `ASTOVIA_MAIL_PROVIDER` | `cloudflare`（Cloudflare Email Service）か`resend`（Resend） |
+| `ASTOVIA_MAIL_API_KEY` | 送信サービスのAPIキー。CloudflareはEmail Serviceで送信できる権限を持つAPIトークン、Resendは`re_`で始まるAPIキー |
+| `ASTOVIA_MAIL_FROM` | 送信元のメールアドレス（表示名を付けない形） |
+| `ASTOVIA_MAIL_FROM_NAME` | 送信元の表示名（任意。Resendだけで使う） |
+| `ASTOVIA_CLOUDFLARE_ACCOUNT_ID` | CloudflareのアカウントID（`cloudflare`のときだけ必須） |
+
+```sh
+# Cloudflare Email Service
+ASTOVIA_MAIL_PROVIDER=cloudflare
+ASTOVIA_MAIL_API_KEY=<APIトークン>
+ASTOVIA_MAIL_FROM=notify@example.com
+ASTOVIA_CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef
+
+# Resend
+ASTOVIA_MAIL_PROVIDER=resend
+ASTOVIA_MAIL_API_KEY=re_xxxxxxxx
+ASTOVIA_MAIL_FROM=notify@example.com
+ASTOVIA_MAIL_FROM_NAME=Astovia
+```
+
+- 送信元のドメインは、使うサービスで事前に認証（DNSの設定）しておいてください。認証していないドメインからは送れません。
+- 送るのは、通知のタイトルを件名に、通知の本文とAstoviaの画面を開くリンクを本文にしたテキストのメールです。末尾に、送り先を変える画面のURLを書きます。HTMLメールと配信停止のリンクはありません。
+- Cloudflare Email ServiceとResendの違い: 表示名（`ASTOVIA_MAIL_FROM_NAME`）を送るのはResendだけです。重複を防ぐ冪等キー（通知ごとに一意）を送るのもResendだけです。Cloudflareでは、送信が実際には届いていたのに失敗として再送した場合、同じ通知が2通届くことがあります。
+- 送信サービスの流量の制限（429。Resendでは1日・1か月の上限も含みます）を受けたときは、メールの送信を全体で1分止めてから再開します。作成から24時間を過ぎても送れなかった通知は送りません。そのほかの失敗は、Web Pushと同じく最大4回まで再送します。
+- 設定の誤り（`ASTOVIA_MAIL_PROVIDER`が`cloudflare`か`resend`以外、キーや送信元がない・形式が正しくない、Cloudflareでアカウントがない、Resendでアカウントを設定した等）は起動エラーになります。APIキーはログとエラーに出しません。
+- 設定を外すと、メールに送る種類を選んでいたユーザーの通知は、メールには送らずに終えます。画面では、選んでいた種類を外すことだけができます。
+
 ### 運用上の注意
 
 - バックグラウンド処理（GitHubとSlackとChatworkとメールの同期、通知の判定と送信、タスク候補と過ぎた予定タスクの片付け）は`serve`のプロセス内で動きます。**同じDBに対してAstoviaのプロセスを1つだけ起動してください。**複数のプロセスを起動すると、同じ通知を重複して送る場合があります。
-- `ASTOVIA_JWT_SECRET`を変更すると、保存したGitHubとSlackとChatworkのトークン、メール連携のGoogleのトークン、AIのAPIキーとVAPIDの秘密鍵を復号できなくなります。GitHub連携とSlack連携とChatwork連携は「保存したトークンを読み出せません」と表示して止まるため、トークンを登録し直してください。メール連携も同じ表示で止まるため、Googleアカウントを接続し直してください。AIの設定も「保存した API キーを読み出せません」と表示して止まるため、キーを登録し直してください。VAPIDの鍵は自動で作り直し、すべての端末の登録を削除するため、各端末で「この端末で通知を受け取る」をもう一度押してください。
+- `ASTOVIA_JWT_SECRET`を変更すると、保存したGitHubとSlackとChatworkのトークン、メール連携のGoogleのトークン、AIのAPIキーとVAPIDの秘密鍵を復号できなくなります。GitHub連携とSlack連携とChatwork連携は「保存したトークンを読み出せません」と表示して止まるため、トークンを登録し直してください。メール連携も同じ表示で止まるため、Googleアカウントを接続し直してください。AIの設定も「保存した API キーを読み出せません」と表示して止まるため、キーを登録し直してください。Slackへの通知も「保存した Webhook を読み出せません」と表示して止まるため、Webhookを登録し直してください。VAPIDの鍵は自動で作り直し、すべての端末の登録を削除するため、各端末で「この端末で通知を受け取る」をもう一度押してください。
 
 ## Slack連携
 
@@ -946,9 +1012,14 @@ OpenRouter、Ollama、vLLM、LM Studioなど、OpenAIのChat Completions APIと�
 | `GET /api/v1/push/subscriptions` | 通知を受け取る端末の一覧`{subscriptions: [{id, label, created_at, last_used_at}]}`。Access JWTが必要 |
 | `POST /api/v1/push/subscriptions` | 本文`{endpoint, keys: {p256dh, auth}, label?, timezone?}`で端末を登録する。新規は201、登録済みの端末は200。20台に達していると409`too_many_subscriptions`。Access JWTが必要 |
 | `DELETE /api/v1/push/subscriptions/{id}` | 端末の登録を削除し204を返す。他のユーザーの端末と存在しない端末は404。Access JWTが必要 |
-| `POST /api/v1/push/test` | テスト通知を送信待ちに入れ202を返す。端末がなければ409`no_subscription`、1分に4回目以降は429。Access JWTが必要 |
+| `POST /api/v1/push/test` | Web Pushのテスト通知を送信待ちに入れ202を返す。端末がなければ409`no_subscription`、1分に4回目以降は429（`POST /api/v1/notification-channels/test`と合わせて数える）。Access JWTが必要 |
 | `GET /api/v1/notification-settings` | 通知設定`{timezone, digest_hour, stale_days, candidate_expire_days}`。未保存なら既定値（UTC、8、3、3）。Access JWTが必要 |
 | `PUT /api/v1/notification-settings` | 本文`{timezone, digest_hour, stale_days, candidate_expire_days}`（すべて必須。IANAのタイムゾーン名、0〜23、1〜30、0〜30）で保存する。`candidate_expire_days`はタスク候補を自動で対象外にするまでの日数で、0は対象外にしない。Access JWTが必要 |
+| `GET /api/v1/notification-channels` | 通知の送り先`{routes: {webpush, slack, email}, slack: {configured, last_error}, email: {available, provider, address}}`。`routes`の各値は送る種類（`detected`・`stale`・`due_soon`・`overdue`・`digest`）の配列で、未保存なら`webpush`はすべて、他は空。`slack.last_error`は`webhook_invalid`か`webhook_undecryptable`かnull。メールを設定していないサーバーでは`email.available`がfalseで`provider`と`address`はnull。WebhookのURLは返さない。Access JWTが必要 |
+| `PUT /api/v1/notification-channels` | 本文`{routes: {webpush, slack, email}}`（3つとも必須、16KiB以内）で送り先を保存し、GETと同じ形を返す。値は種類の配列で、重複・知らない種類・nullは400`invalid_request`。保存時に表の順に並べ直す。メールを設定していないサーバーで、保存済みにないメールの種類を足すと400`mail_unavailable`（減らすのは可）。Access JWTが必要 |
+| `PUT /api/v1/notification-channels/slack-webhook` | 本文`{url}`でSlackのIncoming Webhookを登録し（暗号化して保存。送信はしない）、GETと同じ形を返す。`https://hooks.slack.com/services/…/…/…`の形でない（512バイトまで）と400`invalid_request`。Access JWTが必要 |
+| `DELETE /api/v1/notification-channels/slack-webhook` | SlackのWebhookを削除し204を返す（なくても204）。種類の選択は残す。Access JWTが必要 |
+| `POST /api/v1/notification-channels/test` | 本文`{channel}`（`webpush`・`slack`・`email`）の送り先にテスト通知を送信待ちに入れ202`{queued: true}`を返す。メールを設定していないサーバーで`email`は409`mail_unavailable`、SlackのWebhookがない・止まっていると409`no_destination`、`webpush`で端末がなければ409`no_subscription`。`POST /api/v1/push/test`と合わせて1分に4回目以降は429。Access JWTが必要 |
 | `GET /.well-known/oauth-protected-resource/mcp` | MCPの保護リソースメタデータ（RFC 9728）。`/.well-known/oauth-protected-resource`も同じ内容 |
 | `GET /.well-known/oauth-authorization-server` | 認可サーバーのメタデータ（RFC 8414） |
 | `POST /oauth/register` | クライアント登録（RFC 7591）。`application/json`、64KiB以内。成功は201 |

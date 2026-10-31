@@ -1062,6 +1062,11 @@ table "notifications" {
     type = bigint
     null = false
   }
+  column "channel" {
+    type    = text
+    null    = false
+    default = "webpush"
+  }
   primary_key {
     columns = [column.id]
   }
@@ -1075,7 +1080,7 @@ table "notifications" {
   }
   index "notifications_user_dedupe_key" {
     unique  = true
-    columns = [column.user_id, column.dedupe_key]
+    columns = [column.user_id, column.dedupe_key, column.channel]
   }
   index "notifications_sent_scheduled_idx" {
     columns = [column.sent_at, column.scheduled_at]
@@ -1085,6 +1090,47 @@ table "notifications" {
   }
   index "notifications_user_kind_created_idx" {
     columns = [column.user_id, column.kind, column.created_at]
+  }
+}
+table "notification_channels" {
+  schema = schema.public
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "webpush_kinds" {
+    type    = text
+    null    = false
+    default = "detected,stale,due_soon,overdue,digest"
+  }
+  column "slack_kinds" {
+    type    = text
+    null    = false
+    default = ""
+  }
+  column "email_kinds" {
+    type    = text
+    null    = false
+    default = ""
+  }
+  column "slack_webhook_sealed" {
+    type = text
+    null = true
+  }
+  column "slack_last_error" {
+    type = text
+    null = true
+  }
+  column "updated_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.user_id]
+  }
+  foreign_key "notification_channels_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
   }
 }
 table "instance_secrets" {
