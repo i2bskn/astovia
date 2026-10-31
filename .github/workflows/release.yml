@@ -1,5 +1,6 @@
-# Publishes the app and migrate images to GHCR for a v* tag on main.
-# No third-party actions are used; the runner's git and docker CLI do the work.
+# Publishes the app and migrate images to GHCR for a v* tag on main, after the
+# tests pass. No third-party actions are used; the runner's git, make and
+# docker CLI do the work.
 name: release
 on:
   push:
@@ -10,7 +11,34 @@ concurrency:
   group: release
   cancel-in-progress: false
 jobs:
+  test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Clone
+        # Anonymous clone; this requires the repository to be public.
+        run: |
+          set -euo pipefail
+          git clone --no-checkout "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" src
+          git -C src checkout --detach "$GITHUB_SHA"
+
+      # The same checks as before a release by hand: the frontend tests and
+      # build, the Go tests against SQLite and PostgreSQL, and go vet.
+      - name: Run make check
+        working-directory: src
+        run: make check
+
+      - name: Clean up the test containers
+        if: always()
+        working-directory: src
+        run: docker compose -f compose.test.yaml down --volumes --remove-orphans
+
   publish:
+    needs: test
     runs-on: ubuntu-24.04
     permissions:
       contents: read
