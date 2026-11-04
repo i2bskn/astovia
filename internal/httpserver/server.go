@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/i2bskn/astovia/internal/access"
 	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/auth"
@@ -15,6 +14,7 @@ import (
 	"github.com/i2bskn/astovia/internal/google"
 	"github.com/i2bskn/astovia/internal/notify"
 	"github.com/i2bskn/astovia/internal/oauth"
+	"github.com/i2bskn/astovia/internal/oidc"
 	"github.com/i2bskn/astovia/internal/openai"
 	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/slack"
@@ -95,9 +95,9 @@ type Server struct {
 	// from the synchronization's.
 	gmailMCPLimiter *loginLimiter
 	gmailTokens     *gmailTokenCache
-	// accessOIDC is the Cloudflare Access client of cfg.Access; it is set
-	// exactly when cfg.Access is. Tests replace it.
-	accessOIDC accessClient
+	// rp is the OIDC relying party of cfg.OIDC; it is set exactly when
+	// cfg.OIDC is. Tests replace it.
+	rp relyingParty
 }
 
 // userResponse is the public representation of the signed-in user.
@@ -161,16 +161,19 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 	if tokens == nil {
 		tokens = &aicred.Tokens{Store: st, Box: box, OpenAI: openai.New(openai.HostID(c.Secret)), Now: now}
 	}
-	var oidc accessClient
-	if c.Access != nil {
-		oidc = access.New(access.ClientConfig{Issuer: c.Access.Issuer, ClientID: c.Access.ClientID, ClientSecret: c.Access.Secret, RedirectURI: c.Access.RedirectURI})
+	var rp relyingParty
+	if c.OIDC != nil {
+		rp = oidc.New(oidc.ClientConfig{Issuer: c.OIDC.Issuer, ClientID: c.OIDC.ClientID, ClientSecret: c.OIDC.Secret, RedirectURI: c.OIDC.RedirectURI})
+		if len(c.OIDC.AllowedEmails) == 0 {
+			log.Printf("oidc: ASTOVIA_ALLOWED_EMAILS is empty; nobody can sign in")
+		}
 	}
 	aiClient := ai.New()
 	if c.AIAllowPrivateEndpoints {
 		aiClient.AllowPrivateEndpoints = true
 		aiClient.Endpoints = ai.NewEndpointClient(true)
 	}
-	return &Server{cfg: c, auth: a, assets: assets, accessOIDC: oidc, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
+	return &Server{cfg: c, auth: a, assets: assets, rp: rp, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
 		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
 			return oauth.FetchCIMD(ctx, cimd, clientID)
 		},
@@ -190,15 +193,15 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/healthz", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})))
-	// With Cloudflare Access the password endpoints answer 409 (passwordAuth)
-	// and the Access sign-in routes exist; without it they are JSON 404s.
+	// With OIDC the password endpoints answer 409 (passwordAuth) and the
+	// OIDC sign-in routes exist; without it they are JSON 404s.
 	mux.Handle("/auth/config", allow(http.MethodGet, http.HandlerFunc(s.handleAuthConfig)))
 	mux.Handle("/auth/login", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleLogin)))))
-	if s.cfg.Access != nil {
+	if s.cfg.OIDC != nil {
 		// No rate limit: behind a proxy every user shares its address, and
-		// the sign-in itself happens at Cloudflare.
-		mux.Handle("/auth/access/login", allow(http.MethodGet, http.HandlerFunc(s.handleAccessLogin)))
-		mux.Handle("/auth/access/callback", allow(http.MethodGet, http.HandlerFunc(s.handleAccessCallback)))
+		// the sign-in itself happens at the provider.
+		mux.Handle("/auth/oidc/login", allow(http.MethodGet, http.HandlerFunc(s.handleOIDCLogin)))
+		mux.Handle(config.OIDCCallbackPath, allow(http.MethodGet, http.HandlerFunc(s.handleOIDCCallback)))
 	}
 	mux.Handle("/auth/refresh", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleRefresh))))
 	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))

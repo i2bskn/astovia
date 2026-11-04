@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -113,103 +114,204 @@ func TestGoogleClient(t *testing.T) {
 	}
 }
 
-func TestAccessClient(t *testing.T) {
+// setOIDC sets the sign-in variables, clearing the Cloudflare Access ones of
+// earlier releases.
+func setOIDC(t *testing.T, mode, issuer, id, secret string) {
+	t.Helper()
+	t.Setenv("ASTOVIA_ACCESS_TEAM_DOMAIN", "")
+	t.Setenv("ASTOVIA_ACCESS_CLIENT_ID", "")
+	t.Setenv("ASTOVIA_ACCESS_CLIENT_SECRET", "")
+	t.Setenv("ASTOVIA_AUTH_MODE", mode)
+	t.Setenv("ASTOVIA_OIDC_ISSUER", issuer)
+	t.Setenv("ASTOVIA_OIDC_CLIENT_ID", id)
+	t.Setenv("ASTOVIA_OIDC_CLIENT_SECRET", secret)
+}
+
+func TestOIDCClient(t *testing.T) {
 	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
 	t.Setenv("ASTOVIA_DB_DSN", "")
 	t.Setenv("ASTOVIA_PUBLIC_URL", "https://Astovia.Example.com:443")
 	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("ASTOVIA_ALLOWED_EMAILS", "")
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
 	const secret = "s3cr3t:with+special/chars%~"
-	set := func(team, id, sec string) {
-		t.Setenv("ASTOVIA_ACCESS_TEAM_DOMAIN", team)
-		t.Setenv("ASTOVIA_ACCESS_CLIENT_ID", id)
-		t.Setenv("ASTOVIA_ACCESS_CLIENT_SECRET", sec)
-	}
+	const issuer, id = "https://accounts.example.com", "client/id+1"
 
-	// None set: password sign-in.
-	set("", "", "")
-	if c, e := Load(true); e != nil || c.Access != nil {
-		t.Fatal(c.Access, e)
-	}
-
-	// All three set, normalized; the CLI reads them too.
-	for _, requireSecret := range []bool{true, false} {
-		set("https://Example.CloudflareAccess.com/", "0123abc._~-", secret)
-		c, e := Load(requireSecret)
-		want := AccessClient{
-			TeamDomain:  "https://example.cloudflareaccess.com",
-			ClientID:    "0123abc._~-",
-			Secret:      secret,
-			Issuer:      "https://example.cloudflareaccess.com/cdn-cgi/access/sso/oidc/0123abc._~-",
-			RedirectURI: "https://astovia.example.com/auth/access/callback",
-		}
-		if e != nil || c.Access == nil || *c.Access != want {
-			t.Fatalf("%v: %+v %v", requireSecret, c.Access, e)
+	// Unset, empty or password: password sign-in. ASTOVIA_ALLOWED_EMAILS and
+	// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED are ignored, even when invalid.
+	for _, mode := range []string{"", "password", " Password "} {
+		setOIDC(t, mode, "", "", "")
+		t.Setenv("ASTOVIA_ALLOWED_EMAILS", "*")
+		t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "1")
+		t.Setenv("ASTOVIA_PUBLIC_URL", "http://localhost:8080")
+		if c, e := Load(true); e != nil || c.OIDC != nil {
+			t.Fatalf("%q: %+v %v", mode, c.OIDC, e)
 		}
 	}
-	set("https://example.cloudflareaccess.com", "id", strings.Repeat("~", 1024))
-	if c, e := Load(false); e != nil || c.Access == nil || c.Access.TeamDomain != "https://example.cloudflareaccess.com" {
-		t.Fatal(c.Access, e)
-	}
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://Astovia.Example.com:443")
+	t.Setenv("ASTOVIA_ALLOWED_EMAILS", "")
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
 
-	// One or two of them set.
-	const team, id = "https://example.cloudflareaccess.com", "client-id"
-	for _, tc := range []struct{ team, id, secret string }{
-		{team, "", ""}, {"", id, ""}, {"", "", secret},
-		{team, id, ""}, {team, "", secret}, {"", id, secret},
+	// ASTOVIA_OIDC_* without ASTOVIA_AUTH_MODE=oidc.
+	for _, tc := range []struct{ mode, issuer, id, secret string }{
+		{"", issuer, "", ""}, {"", "", id, ""}, {"", "", "", secret}, {"password", issuer, id, secret},
 	} {
-		set(tc.team, tc.id, tc.secret)
+		setOIDC(t, tc.mode, tc.issuer, tc.id, tc.secret)
 		for _, requireSecret := range []bool{true, false} {
-			if _, e := Load(requireSecret); e == nil || !strings.Contains(e.Error(), "must be set together") {
+			if _, e := Load(requireSecret); e == nil || !strings.Contains(e.Error(), "ASTOVIA_AUTH_MODE is not oidc") {
 				t.Fatalf("%+v: %v", tc, e)
 			}
 		}
 	}
 
-	// Format violations, never echoed in the error.
-	for _, tc := range []struct{ team, id, secret, variable string }{
-		{"http://example.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com/path", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com//", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com?x=1", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com?", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com#x", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com:443", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com:", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://user:pass@example.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com.", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com.evil.test", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://evil.test", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://ex_ample.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"example.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{" https://example.cloudflareaccess.com", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{"https://example.cloudflareaccess.com ", id, secret, "ASTOVIA_ACCESS_TEAM_DOMAIN"},
-		{team, "client id", secret, "ASTOVIA_ACCESS_CLIENT_ID"},
-		{team, "client/id", secret, "ASTOVIA_ACCESS_CLIENT_ID"},
-		{team, " client-id", secret, "ASTOVIA_ACCESS_CLIENT_ID"},
-		{team, "clïent", secret, "ASTOVIA_ACCESS_CLIENT_ID"},
-		{team, strings.Repeat("a", 257), secret, "ASTOVIA_ACCESS_CLIENT_ID"},
-		{team, id, "with space", "ASTOVIA_ACCESS_CLIENT_SECRET"},
-		{team, id, " " + secret, "ASTOVIA_ACCESS_CLIENT_SECRET"},
-		{team, id, secret + "\n", "ASTOVIA_ACCESS_CLIENT_SECRET"},
-		{team, id, "sécret", "ASTOVIA_ACCESS_CLIENT_SECRET"},
-		{team, id, strings.Repeat("a", 1025), "ASTOVIA_ACCESS_CLIENT_SECRET"},
+	// An unknown mode.
+	for _, mode := range []string{"cloudflare_access", "oauth", "OIDC2"} {
+		setOIDC(t, mode, issuer, id, secret)
+		if _, e := Load(false); e == nil || e.Error() != "ASTOVIA_AUTH_MODE must be password or oidc" {
+			t.Fatalf("%q: %v", mode, e)
+		}
+	}
+
+	// All set; the CLI reads them too. The issuer is kept as it is.
+	for _, requireSecret := range []bool{true, false} {
+		setOIDC(t, " OIDC ", issuer+"/", id, secret)
+		t.Setenv("ASTOVIA_ALLOWED_EMAILS", " Alice@Example.com, ,example.org,,* ")
+		c, e := Load(requireSecret)
+		want := OIDCClient{
+			Issuer:               issuer + "/",
+			ClientID:             id,
+			Secret:               secret,
+			RedirectURI:          "https://astovia.example.com/auth/oidc/callback",
+			AllowedEmails:        []string{"alice@example.com", "example.org", "*"},
+			RequireEmailVerified: true,
+		}
+		if e != nil || c.OIDC == nil || !reflect.DeepEqual(*c.OIDC, want) {
+			t.Fatalf("%v: %+v %v", requireSecret, c.OIDC, e)
+		}
+	}
+	// Ports, IP literals and paths are allowed in the issuer.
+	t.Setenv("ASTOVIA_ALLOWED_EMAILS", "")
+	for _, v := range []string{"https://keycloak.internal:8443/realms/astovia", "https://10.0.0.1/realms/x/", "https://[2001:db8::1]:8443", "https://example.cloudflareaccess.com/cdn-cgi/access/sso/oidc/abc"} {
+		setOIDC(t, "oidc", v, id, secret)
+		if c, e := Load(false); e != nil || c.OIDC == nil || c.OIDC.Issuer != v || len(c.OIDC.AllowedEmails) != 0 || c.OIDC.AllowedEmails == nil {
+			t.Fatalf("%s: %+v %v", v, c.OIDC, e)
+		}
+	}
+	setOIDC(t, "oidc", issuer, strings.Repeat("~", 256), strings.Repeat("~", 1024))
+	if c, e := Load(false); e != nil || c.OIDC == nil {
+		t.Fatal(c.OIDC, e)
+	}
+
+	// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED.
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"", true}, {"true", true}, {" true ", true}, {"false", false}, {" false", false}} {
+		setOIDC(t, "oidc", issuer, id, secret)
+		t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", tc.value)
+		if c, e := Load(false); e != nil || c.OIDC == nil || c.OIDC.RequireEmailVerified != tc.want {
+			t.Fatalf("%q: %+v %v", tc.value, c.OIDC, e)
+		}
+	}
+	for _, v := range []string{"1", "0", "TRUE", "False", "yes"} {
+		t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", v)
+		if _, e := Load(false); e == nil || !strings.Contains(e.Error(), "ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED") {
+			t.Fatalf("%q: %v", v, e)
+		}
+	}
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
+
+	// Missing values and format violations, never echoed in the error.
+	for _, tc := range []struct{ issuer, id, secret, variable string }{
+		{"", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{issuer, "", secret, "ASTOVIA_OIDC_CLIENT_ID"},
+		{issuer, id, "", "ASTOVIA_OIDC_CLIENT_SECRET"},
+		{"http://accounts.example.com", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"accounts.example.com", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://:443", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https:accounts.example.com", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://user:pass@accounts.example.com", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com?x=1", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com?", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com#x", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com#", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com//", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com/realm//", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{" https://accounts.example.com", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com ", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com/a b", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com/\x01", id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{"https://accounts.example.com/" + strings.Repeat("a", 2048), id, secret, "ASTOVIA_OIDC_ISSUER"},
+		{issuer, "client id", secret, "ASTOVIA_OIDC_CLIENT_ID"},
+		{issuer, " client-id", secret, "ASTOVIA_OIDC_CLIENT_ID"},
+		{issuer, "clïent", secret, "ASTOVIA_OIDC_CLIENT_ID"},
+		{issuer, strings.Repeat("a", 257), secret, "ASTOVIA_OIDC_CLIENT_ID"},
+		{issuer, id, "with space", "ASTOVIA_OIDC_CLIENT_SECRET"},
+		{issuer, id, " " + secret, "ASTOVIA_OIDC_CLIENT_SECRET"},
+		{issuer, id, secret + "\n", "ASTOVIA_OIDC_CLIENT_SECRET"},
+		{issuer, id, "sécret", "ASTOVIA_OIDC_CLIENT_SECRET"},
+		{issuer, id, strings.Repeat("a", 1025), "ASTOVIA_OIDC_CLIENT_SECRET"},
 	} {
-		set(tc.team, tc.id, tc.secret)
+		setOIDC(t, "oidc", tc.issuer, tc.id, tc.secret)
 		_, e := Load(false)
 		if e == nil || !strings.Contains(e.Error(), tc.variable) {
 			t.Fatalf("%+v: %v", tc, e)
 		}
-		if strings.Contains(e.Error(), strings.TrimSpace(tc.secret)) {
+		if tc.secret != "" && strings.Contains(e.Error(), strings.TrimSpace(tc.secret)) {
 			t.Fatalf("error contains the secret: %v", e)
 		}
 	}
 
-	// Access needs an https public URL.
-	set(team, id, secret)
+	// OIDC needs an https public URL.
+	setOIDC(t, "oidc", issuer, id, secret)
 	t.Setenv("ASTOVIA_PUBLIC_URL", "http://localhost:8080")
-	if _, e := Load(false); e == nil || !strings.Contains(e.Error(), "ASTOVIA_PUBLIC_URL") {
+	if _, e := Load(false); e == nil || e.Error() != "ASTOVIA_PUBLIC_URL must use https with ASTOVIA_AUTH_MODE=oidc" {
 		t.Fatal(e)
+	}
+}
+
+// The Cloudflare Access variables of earlier releases stop the server and
+// the CLI, whatever the mode, instead of falling back to passwords.
+func TestLegacyAccessVariables(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://astovia.example.com")
+	const secret = "legacy-secret-value"
+	for _, mode := range []string{"", "oidc"} {
+		for _, name := range []string{"ASTOVIA_ACCESS_TEAM_DOMAIN", "ASTOVIA_ACCESS_CLIENT_ID", "ASTOVIA_ACCESS_CLIENT_SECRET"} {
+			setOIDC(t, mode, "", "", "")
+			if mode == "oidc" {
+				setOIDC(t, mode, "https://accounts.example.com", "id", "secret")
+			}
+			t.Setenv(name, secret)
+			for _, requireSecret := range []bool{true, false} {
+				_, e := Load(requireSecret)
+				if e == nil || e.Error() != legacyAccessError {
+					t.Fatalf("%s %q: %v", name, mode, e)
+				}
+				if strings.Contains(e.Error(), secret) {
+					t.Fatalf("error contains the value: %v", e)
+				}
+			}
+		}
+	}
+}
+
+func TestParseAllowedEmails(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{"", []string{}},
+		{" , ,", []string{}},
+		{"Alice@Example.com", []string{"alice@example.com"}},
+		{" example.com , *,bob@x.test ", []string{"example.com", "*", "bob@x.test"}},
+		{"*@example.com", []string{"*@example.com"}},
+	} {
+		if got := ParseAllowedEmails(tc.in); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%q: %v", tc.in, got)
+		}
 	}
 }
 

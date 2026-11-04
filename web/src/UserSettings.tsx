@@ -109,13 +109,13 @@ function InviteSection({ onCreated }: { onCreated: () => void }) {
   </section>;
 }
 
-// AccessJoinSection replaces the invitations when Cloudflare Access signs
-// users in: who can sign in is decided by the Access policy.
-function AccessJoinSection() {
+// OIDCJoinSection replaces the invitations when single sign-on (OIDC) signs
+// users in: who can sign in is decided by the provider and the operator.
+function OIDCJoinSection() {
   const headingID = useId();
   return <section className="action-panel settings-panel" id="invite" aria-labelledby={headingID}>
     <h2 id={headingID}>ユーザーの追加</h2>
-    <p className="intro"><Phrased text="Cloudflare Access のポリシーで許可された人は、初回ログイン時にメンバーとして追加されます。オーナーにするときは、追加された後に下の一覧で権限を変えてください。" /></p>
+    <p className="intro"><Phrased text="ログインを許可された人は、初回ログイン時にメンバーとして追加されます。オーナーにするときは、追加された後に下の一覧で権限を変えてください。" /></p>
   </section>;
 }
 
@@ -199,11 +199,11 @@ function UserRow({ user, actions, confirming, busy, onAsk, onCancel, onChange, o
   </li>;
 }
 
-function UsersSection({ userID, access, users, loading, loadError, onChanged }: {
+function UsersSection({ userID, oidc, users, loading, loadError, onChanged }: {
   userID: string;
-  // access hides the password reset links, which Cloudflare Access sign-in
-  // does not use.
-  access: boolean;
+  // oidc hides the password reset links, which single sign-on does not
+  // use.
+  oidc: boolean;
   users: ManagedUser[];
   loading: boolean;
   loadError: string | null;
@@ -252,15 +252,15 @@ function UsersSection({ userID, access, users, loading, loadError, onChanged }: 
 
   return <section className="action-panel settings-panel" id="users" aria-labelledby={headingID}>
     <h2 id={headingID}>ユーザー</h2>
-    {access
-      ? <p className="intro"><Phrased text="権限の変更、ログインの停止（無効化）と再開ができます。タスクや連携はユーザーごとに別で、オーナーも通常の画面では他のユーザーのタスクを見られません。Cloudflare Access のポリシーから外した人も、ここで無効にしてください。API トークンや AI クライアントの接続は Cloudflare Access を通らないため、無効にするまで使えます。" /></p>
+    {oidc
+      ? <p className="intro"><Phrased text="権限の変更、ログインの停止（無効化）と再開ができます。タスクや連携はユーザーごとに別で、オーナーも通常の画面では他のユーザーのタスクを見られません。IdP や ASTOVIA_ALLOWED_EMAILS でログインを止めた人も、ここで無効にしてください。API トークンや AI クライアントの接続はシングルサインオンを通らないため、無効にするまで使えます。" /></p>
       : <p className="intro"><Phrased text="権限の変更、ログインの停止（無効化）と再開、パスワード再設定リンクの発行ができます。タスクや連携はユーザーごとに別で、オーナーも通常の画面では他のユーザーのタスクを見られません。ただし、パスワード再設定リンクを自分で開けば、そのユーザーとしてログインできます。リンクでパスワードを再設定したことは、本人の画面に 14 日間表示されます。" /></p>}
     {created ? <LinkPanel title={`${created.email} のパスワード再設定リンク`} url={created.url} note="このリンクは 24 時間有効で、表示はこの 1 回だけです。本人以外に渡さないでください。" onClose={() => setCreated(null)} /> : null}
     {error ? <p className="notice error" role="alert">{error}</p> : null}
     {loadError ? <p className="notice error" role="alert">{loadError}</p> : null}
     {users.length > 0 ? <ul className="action-list">
       {users.map((user) => <UserRow key={user.id} user={user}
-        actions={access ? { ...userActions(user, users, userID), reset: false } : userActions(user, users, userID)}
+        actions={oidc ? { ...userActions(user, users, userID), reset: false } : userActions(user, users, userID)}
         confirming={confirming?.id === user.id ? confirming.confirm : null}
         busy={busyID === user.id}
         onAsk={(confirm) => { setConfirming({ id: user.id, confirm }); setError(null); }}
@@ -274,7 +274,7 @@ function UsersSection({ userID, access, users, loading, loadError, onChanged }: 
 
 // UserSettings is the user management page of Settings, for owners.
 export default function UserSettings({ userID }: { userID: string }) {
-  const access = useSyncExternalStore(authConfig.subscribe, authConfig.getSnapshot).config?.mode === 'cloudflare_access';
+  const oidc = useSyncExternalStore(authConfig.subscribe, authConfig.getSnapshot).config?.mode === 'oidc';
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
@@ -327,7 +327,7 @@ export default function UserSettings({ userID }: { userID: string }) {
   }
 
   return <div className="settings-stack">
-    {access ? <AccessJoinSection /> : <InviteSection onCreated={() => { void loadInvitations(); }} />}
+    {oidc ? <OIDCJoinSection /> : <InviteSection onCreated={() => { void loadInvitations(); }} />}
     <section className="action-panel settings-panel" id="invitations" aria-labelledby={invitationsHeadingID}>
       <h2 id={invitationsHeadingID}>有効な招待</h2>
       {invitationsError ? <p className="notice error" role="alert">{invitationsError}</p> : null}
@@ -341,7 +341,7 @@ export default function UserSettings({ userID }: { userID: string }) {
       </ul> : null}
       {!loading && !invitationsError && invitations.length === 0 ? <p className="action-empty">有効な招待はありません。</p> : null}
     </section>
-    <UsersSection userID={userID} access={access} users={users} loading={loading} loadError={usersError}
+    <UsersSection userID={userID} oidc={oidc} users={users} loading={loading} loadError={usersError}
       onChanged={(updated) => {
         setUsers((previous) => previous.map((u) => (u.id === updated.id ? updated : u)));
         // Demoting or disabling a user revokes the invitations it issued.

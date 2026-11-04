@@ -1,4 +1,4 @@
-package access
+package oidc
 
 import (
 	"bytes"
@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,12 +30,17 @@ const (
 	testNonce    = "nonce-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 )
 
-// oidcPath is the path of the issuer of the test application.
-const oidcPath = "/cdn-cgi/access/sso/oidc/" + testClientID
+// oidcPath is the path of the issuer of the test provider.
+const oidcPath = "/realms/" + testClientID
 
-// testIssuer returns the issuer of the test application on teamDomain.
-func testIssuer(teamDomain string) string {
-	return teamDomain + oidcPath
+// testIssuer returns the issuer of the test provider on origin.
+func testIssuer(origin string) string {
+	return origin + oidcPath
+}
+
+// testKeysURL returns the JWKS URL of the test provider on origin.
+func testKeysURL(origin string) string {
+	return testIssuer(origin) + "/jwks"
 }
 
 // testKey is an RSA key with its key ID.
@@ -55,7 +61,7 @@ func newKey(t *testing.T, kid string, bits int) testKey {
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-// jwk returns the JWK of the public key, as Cloudflare publishes it.
+// jwk returns the JWK of the public key, as providers publish it.
 func (k testKey) jwk() map[string]any {
 	return map[string]any{
 		"kty": "RSA", "kid": k.kid, "alg": "RS256", "use": "sig",
@@ -154,22 +160,45 @@ func (c *clock) add(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-func newVerifier(s *jwksServer, c *clock) *Verifier {
-	return NewVerifier(testIssuer(s.URL), testClientID, s.Client(), c.now)
+// testVerifier is a Verifier with the keys URL of its JWKS server; its
+// Verify returns the email claim only.
+type testVerifier struct {
+	*Verifier
+	keysURL string
+}
+
+func (v testVerifier) Verify(ctx context.Context, token, nonce string) (string, error) {
+	id, err := v.Verifier.Verify(ctx, token, nonce, v.keysURL)
+	return id.Email, err
+}
+
+// identity verifies token and returns the whole identity.
+func (v testVerifier) identity(ctx context.Context, token, nonce string) (Identity, error) {
+	return v.Verifier.Verify(ctx, token, nonce, v.keysURL)
+}
+
+func newVerifier(s *jwksServer, c *clock) testVerifier {
+	return testVerifierOf(s.URL, s.Client(), c)
+}
+
+func testVerifierOf(origin string, client *http.Client, c *clock) testVerifier {
+	return testVerifier{Verifier: NewVerifier(testIssuer(origin), testClientID, client, c.now), keysURL: testKeysURL(origin)}
 }
 
 type tokenClaims struct {
 	jwt.RegisteredClaims
-	Email string `json:"email,omitempty"`
-	Nonce string `json:"nonce,omitempty"`
+	Email         string `json:"email,omitempty"`
+	Nonce         string `json:"nonce,omitempty"`
+	AZP           string `json:"azp,omitempty"`
+	EmailVerified any    `json:"email_verified,omitempty"`
 }
 
 // validClaims returns the claims of an ID token issued now by the test
-// application of the team domain teamDomain.
-func validClaims(teamDomain string, now time.Time) tokenClaims {
+// provider on origin.
+func validClaims(origin string, now time.Time) tokenClaims {
 	return tokenClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    testIssuer(teamDomain),
+			Issuer:    testIssuer(origin),
 			Audience:  jwt.ClaimStrings{testClientID},
 			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 			NotBefore: jwt.NewNumericDate(now),
@@ -296,9 +325,9 @@ func TestVerify(t *testing.T) {
 		"number kid":          signWith(t, testKey{priv: k1.priv}, validClaims(s.URL, c.now()), map[string]any{"kid": 1}),
 		"crit":                signWith(t, k1, validClaims(s.URL, c.now()), map[string]any{"crit": []string{"exp"}}),
 		"empty crit":          signWith(t, k1, validClaims(s.URL, c.now()), map[string]any{"crit": []string{}}),
-		"issuer":              mutate(func(cl *tokenClaims) { cl.Issuer = "https://other.cloudflareaccess.com" }),
-		"team domain issuer":  mutate(func(cl *tokenClaims) { cl.Issuer = s.URL }),
-		"other app issuer":    mutate(func(cl *tokenClaims) { cl.Issuer = s.URL + "/cdn-cgi/access/sso/oidc/other" }),
+		"issuer":              mutate(func(cl *tokenClaims) { cl.Issuer = "https://other.example.com" }),
+		"origin issuer":       mutate(func(cl *tokenClaims) { cl.Issuer = s.URL }),
+		"other realm issuer":  mutate(func(cl *tokenClaims) { cl.Issuer = s.URL + "/realms/other" }),
 		"issuer with slash":   mutate(func(cl *tokenClaims) { cl.Issuer = testIssuer(s.URL) + "/" }),
 		"no issuer":           mutate(func(cl *tokenClaims) { cl.Issuer = "" }),
 		"audience":            mutate(func(cl *tokenClaims) { cl.Audience = jwt.ClaimStrings{"ffff"} }),
@@ -312,6 +341,7 @@ func TestVerify(t *testing.T) {
 		"nbf in the future":   mutate(func(cl *tokenClaims) { cl.NotBefore = jwt.NewNumericDate(c.now().Add(31 * time.Second)) }),
 		"iat in the future":   mutate(func(cl *tokenClaims) { cl.IssuedAt = jwt.NewNumericDate(c.now().Add(31 * time.Second)) }),
 		"no email":            mutate(func(cl *tokenClaims) { cl.Email = "" }),
+		"other azp":           mutate(func(cl *tokenClaims) { cl.AZP = "other-client" }),
 		"exp in the past day": mutate(func(cl *tokenClaims) { cl.ExpiresAt = jwt.NewNumericDate(c.now().Add(-24 * time.Hour)) }),
 	} {
 		if _, err := v.Verify(ctx, token, testNonce); !errors.Is(err, ErrInvalidToken) {
@@ -366,7 +396,7 @@ func TestVerify(t *testing.T) {
 			t.Fatalf("log contains %q: %s", secret, logs.String())
 		}
 	}
-	for _, reason := range []string{"access: rejected token: bad nonce", "access: rejected token: crit header", "access: rejected token: missing kid", "access: rejected token: several audiences", "access: rejected token: bad issuer", "access: rejected token: expired", "access: rejected token: missing email"} {
+	for _, reason := range []string{"oidc: rejected token: bad nonce", "oidc: rejected token: crit header", "oidc: rejected token: missing kid", "oidc: rejected token: several audiences", "oidc: rejected token: bad issuer", "oidc: rejected token: expired", "oidc: rejected token: missing email", "oidc: rejected token: bad azp"} {
 		if !strings.Contains(logs.String(), reason) {
 			t.Fatalf("log lacks %q: %s", reason, logs.String())
 		}
@@ -392,7 +422,7 @@ func TestKeyRotation(t *testing.T) {
 		t.Fatalf("%v, requests %d", err, s.requests.Load())
 	}
 
-	// Cloudflare rotates to k2 right after the fetch: within 30 seconds the
+	// The provider rotates to k2 right after the fetch: within 30 seconds the
 	// unknown kid does not fetch again.
 	s.setKeys(k1.jwk(), k2.jwk())
 	c.add(10 * time.Second)
@@ -426,7 +456,7 @@ func TestKeyRotation(t *testing.T) {
 		t.Fatalf("requests for unknown kids: %d", n)
 	}
 
-	// A successful fetch replaces the whole set: k1 removed by Cloudflare is
+	// A successful fetch replaces the whole set: k1 removed by the provider is
 	// no longer accepted.
 	s.setKeys(k2.jwk())
 	c.add(2 * time.Hour)
@@ -463,7 +493,7 @@ func TestKeysUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The keys expire and Cloudflare fails: the stale cache keeps working.
+	// The keys expire and the provider fails: the stale cache keeps working.
 	s.setStatus(http.StatusInternalServerError)
 	c.add(2 * time.Hour)
 	if _, err := v.Verify(ctx, sign(t, k1, validClaims(s.URL, c.now())), testNonce); err != nil {
@@ -490,14 +520,14 @@ func TestKeysUnavailable(t *testing.T) {
 		srv := httptest.NewServer(handler)
 		noRedirect := *srv.Client()
 		noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		v := NewVerifier(testIssuer(srv.URL), testClientID, &noRedirect, c.now)
+		v := testVerifierOf(srv.URL, &noRedirect, c)
 		if _, err := v.Verify(ctx, sign(t, k1, validClaims(srv.URL, c.now())), testNonce); !errors.Is(err, ErrKeysUnavailable) {
 			t.Errorf("%s: %v", name, err)
 		}
 		srv.Close()
 	}
 	closed := httptest.NewServer(http.NotFoundHandler())
-	closedVerifier := NewVerifier(testIssuer(closed.URL), testClientID, closed.Client(), c.now)
+	closedVerifier := testVerifierOf(closed.URL, closed.Client(), c)
 	closed.Close()
 	if _, err := closedVerifier.Verify(ctx, sign(t, k1, validClaims(closed.URL, c.now())), testNonce); !errors.Is(err, ErrKeysUnavailable) {
 		t.Fatalf("closed: %v", err)
@@ -654,5 +684,86 @@ func TestFetchIgnoresCallerContext(t *testing.T) {
 	cancel()
 	if _, err := v.Verify(ctx, sign(t, k1, validClaims(s.URL, c.now())), testNonce); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVerifyAuthorizedParty(t *testing.T) {
+	k1 := newKey(t, "k1", 2048)
+	s := newJWKSServer(t, k1.jwk())
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	v := newVerifier(s, c)
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		azp string
+		ok  bool
+	}{
+		"no azp":    {"", true},
+		"same azp":  {testClientID, true},
+		"other azp": {"other-client", false},
+		"azp case":  {strings.ToUpper(testClientID), false},
+	} {
+		cl := validClaims(s.URL, c.now())
+		cl.AZP = tc.azp
+		_, err := v.Verify(ctx, sign(t, k1, cl), testNonce)
+		if tc.ok != (err == nil) || (!tc.ok && !errors.Is(err, ErrInvalidToken)) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// An empty azp is present and not the client.
+	token := rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"k1"}`, map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "email": "alice@example.com", "nonce": testNonce, "azp": ""}, "")
+	token = strings.TrimSuffix(token, ".")
+	sig, err := jwt.SigningMethodRS256.Sign(token, k1.priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = v.Verify(ctx, token+"."+b64(sig), testNonce); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("empty azp: %v", err)
+	}
+}
+
+func TestVerifyEmailVerified(t *testing.T) {
+	k1 := newKey(t, "k1", 2048)
+	s := newJWKSServer(t, k1.jwk())
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	v := newVerifier(s, c)
+	ctx := context.Background()
+	// signRaw signs claims with email_verified set to the raw JSON value,
+	// or without it when raw is empty.
+	signRaw := func(raw string) string {
+		t.Helper()
+		claims := map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "email": "alice@example.com", "nonce": testNonce}
+		if raw != "" {
+			claims["email_verified"] = json.RawMessage(raw)
+		}
+		token := strings.TrimSuffix(rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"k1"}`, claims, ""), ".")
+		sig, err := jwt.SigningMethodRS256.Sign(token, k1.priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token + "." + b64(sig)
+	}
+	for _, tc := range []struct {
+		raw  string
+		want string
+	}{
+		{"", "absent"},
+		{"true", "true"},
+		{"false", "false"},
+		{"null", "false"},
+		{`"true"`, "false"},
+		{"1", "false"},
+		{"{}", "false"},
+	} {
+		id, err := v.identity(ctx, signRaw(tc.raw), testNonce)
+		if err != nil || id.Email != "alice@example.com" {
+			t.Fatalf("%q: %+v %v", tc.raw, id, err)
+		}
+		got := "absent"
+		if id.EmailVerified != nil {
+			got = strconv.FormatBool(*id.EmailVerified)
+		}
+		if got != tc.want {
+			t.Errorf("%q: %s, want %s", tc.raw, got, tc.want)
+		}
 	}
 }

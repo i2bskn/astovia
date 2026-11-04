@@ -18,38 +18,42 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/i2bskn/astovia/internal/access"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
+	"github.com/i2bskn/astovia/internal/oidc"
 	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
 
 const (
-	testTeamDomain     = "https://example.cloudflareaccess.com"
-	testAccessClientID = "client-id"
+	testIssuer       = "https://idp.example.com/realms/astovia"
+	testOIDCClientID = "client-id"
 )
 
-// accessConfig is the configuration of usersOrigin with Cloudflare Access.
-func accessConfig() config.Config {
-	return config.Config{PublicURL: usersOrigin, Secure: true, Secret: make([]byte, 32), Access: &config.AccessClient{
-		TeamDomain:  testTeamDomain,
-		ClientID:    testAccessClientID,
-		Secret:      "client-secret",
-		Issuer:      testTeamDomain + "/cdn-cgi/access/sso/oidc/" + testAccessClientID,
-		RedirectURI: usersOrigin + config.AccessCallbackPath,
+// oidcConfig is the configuration of usersOrigin with OIDC. Every address
+// is allowed and email_verified is required.
+func oidcConfig() config.Config {
+	return config.Config{PublicURL: usersOrigin, Secure: true, Secret: make([]byte, 32), OIDC: &config.OIDCClient{
+		Issuer:               testIssuer,
+		ClientID:             testOIDCClientID,
+		Secret:               "client-secret",
+		RedirectURI:          usersOrigin + config.OIDCCallbackPath,
+		AllowedEmails:        []string{"*"},
+		RequireEmailVerified: true,
 	}}
 }
 
-// fakeOIDC answers Exchange with idToken or exchangeErr and Verify with email
-// or verifyErr, and records the arguments. The authorization URL is the one
-// of the real client.
+// fakeOIDC answers AuthorizationURL with the authorization endpoint of the
+// test issuer or authErr, Exchange with idToken or exchangeErr and Verify
+// with email and verified or verifyErr, and records the arguments.
 type fakeOIDC struct {
 	mu          sync.Mutex
+	authErr     error
 	idToken     string
 	exchangeErr error
 	email       string
+	verified    *bool
 	verifyErr   error
 
 	code, verifier string
@@ -59,12 +63,28 @@ type fakeOIDC struct {
 }
 
 func newFakeOIDC() *fakeOIDC {
-	return &fakeOIDC{idToken: "id-token-value", email: "alice@example.com"}
+	verified := true
+	return &fakeOIDC{idToken: "id-token-value", email: "alice@example.com", verified: &verified}
 }
 
-func (f *fakeOIDC) AuthorizationURL(state, nonce, challenge string) string {
-	a := accessConfig().Access
-	return access.New(access.ClientConfig{Issuer: a.Issuer, ClientID: a.ClientID, ClientSecret: a.Secret, RedirectURI: a.RedirectURI}).AuthorizationURL(state, nonce, challenge)
+func (f *fakeOIDC) AuthorizationURL(state, nonce, challenge string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.authErr != nil {
+		return "", f.authErr
+	}
+	c := oidcConfig().OIDC
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {c.ClientID},
+		"redirect_uri":          {c.RedirectURI},
+		"scope":                 {"openid email"},
+		"state":                 {state},
+		"nonce":                 {nonce},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	return testIssuer + "/authorization?" + q.Encode(), nil
 }
 
 func (f *fakeOIDC) Exchange(_ context.Context, code, verifier string) (string, error) {
@@ -78,15 +98,15 @@ func (f *fakeOIDC) Exchange(_ context.Context, code, verifier string) (string, e
 	return f.idToken, nil
 }
 
-func (f *fakeOIDC) Verify(_ context.Context, idToken, nonce string) (string, error) {
+func (f *fakeOIDC) Verify(_ context.Context, idToken, nonce string) (oidc.Identity, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.verifies++
 	f.token, f.nonce = idToken, nonce
 	if f.verifyErr != nil {
-		return "", f.verifyErr
+		return oidc.Identity{}, f.verifyErr
 	}
-	return f.email, nil
+	return oidc.Identity{Email: f.email, EmailVerified: f.verified}, nil
 }
 
 func (f *fakeOIDC) set(email string, exchangeErr, verifyErr error) {
@@ -95,26 +115,38 @@ func (f *fakeOIDC) set(email string, exchangeErr, verifyErr error) {
 	f.email, f.exchangeErr, f.verifyErr = email, exchangeErr, verifyErr
 }
 
+// setVerified sets the email_verified claim: nil is absent.
+func (f *fakeOIDC) setVerified(verified *bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verified = verified
+}
+
+func (f *fakeOIDC) setAuthErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.authErr = err
+}
+
 func (f *fakeOIDC) exchangeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.exchanges
 }
 
-// newAccessAPI is newUsersAPI (alice the owner, carol the member) served
-// with Cloudflare Access and the fake OIDC client. The rate limits are the
-// real ones.
-func newAccessAPI(t *testing.T, driver string) (*usersAPI, *fakeOIDC) {
+// newOIDCAPI is newUsersAPI (alice the owner, carol the member) served
+// with OIDC and the fake OIDC client. The rate limits are the real ones.
+func newOIDCAPI(t *testing.T, driver string) (*usersAPI, *fakeOIDC) {
 	t.Helper()
 	api := newUsersAPI(t, driver)
-	srv := newServer(accessConfig(), api.srv.auth, fstest.MapFS{}, nil)
-	if _, ok := srv.accessOIDC.(*access.Client); !ok {
-		t.Fatalf("no Access client: %T", srv.accessOIDC)
+	srv := newServer(oidcConfig(), api.srv.auth, fstest.MapFS{}, nil)
+	if _, ok := srv.rp.(*oidc.Client); !ok {
+		t.Fatalf("no OIDC client: %T", srv.rp)
 	}
-	oidc := newFakeOIDC()
-	srv.accessOIDC = oidc
+	rp := newFakeOIDC()
+	srv.rp = rp
 	api.srv, api.handler = srv, srv.handler()
-	return api, oidc
+	return api, rp
 }
 
 // responseCookie returns the cookie name set by w and its Set-Cookie line.
@@ -128,13 +160,13 @@ func responseCookie(w *httptest.ResponseRecorder, name string) (*http.Cookie, st
 	return nil, ""
 }
 
-// expectAccessCookie checks the attributes of the sign-in cookie set by w
+// expectOIDCCookie checks the attributes of the sign-in cookie set by w
 // and returns it.
-func expectAccessCookie(t *testing.T, w *httptest.ResponseRecorder, maxAge int) *http.Cookie {
+func expectOIDCCookie(t *testing.T, w *httptest.ResponseRecorder, maxAge int) *http.Cookie {
 	t.Helper()
-	c, line := responseCookie(w, accessCookie)
+	c, line := responseCookie(w, oidcCookie)
 	if c == nil {
-		t.Fatalf("no %s cookie: %v", accessCookie, w.Header().Values("Set-Cookie"))
+		t.Fatalf("no %s cookie: %v", oidcCookie, w.Header().Values("Set-Cookie"))
 	}
 	if c.Path != "/" || c.Domain != "" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode || c.MaxAge != maxAge {
 		t.Fatalf("cookie attributes: %s", line)
@@ -154,17 +186,17 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// accessLogin starts a sign-in with the raw query.
-func accessLogin(t *testing.T, h http.Handler, query string) *httptest.ResponseRecorder {
+// oidcLogin starts a sign-in with the raw query.
+func oidcLogin(t *testing.T, h http.Handler, query string) *httptest.ResponseRecorder {
 	t.Helper()
-	return serve(t, h, httptest.NewRequest("GET", "/auth/access/login"+query, nil))
+	return serve(t, h, httptest.NewRequest("GET", "/auth/oidc/login"+query, nil))
 }
 
-// newAccessState returns a sign-in state returning to returnTo and its
+// newOIDCState returns a sign-in state returning to returnTo and its
 // cookie value, sealed by srv.
-func newAccessState(t *testing.T, srv *Server, returnTo string) (accessState, string) {
+func newOIDCState(t *testing.T, srv *Server, returnTo string) (oidcState, string) {
 	t.Helper()
-	st := accessState{ReturnTo: returnTo}
+	st := oidcState{ReturnTo: returnTo}
 	for _, p := range []*string{&st.State, &st.Nonce, &st.Verifier} {
 		v, err := auth.Random()
 		if err != nil {
@@ -172,7 +204,7 @@ func newAccessState(t *testing.T, srv *Server, returnTo string) (accessState, st
 		}
 		*p = v
 	}
-	value, err := srv.sealAccessState(st)
+	value, err := srv.sealOIDCState(st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,9 +214,9 @@ func newAccessState(t *testing.T, srv *Server, returnTo string) (accessState, st
 // callbackRequest returns the callback request with query and the sign-in
 // cookie value, if any.
 func callbackRequest(query, cookie string) *http.Request {
-	r := httptest.NewRequest("GET", "/auth/access/callback?"+query, nil)
+	r := httptest.NewRequest("GET", "/auth/oidc/callback?"+query, nil)
 	if cookie != "" {
-		r.AddCookie(&http.Cookie{Name: accessCookie, Value: cookie})
+		r.AddCookie(&http.Cookie{Name: oidcCookie, Value: cookie})
 	}
 	return r
 }
@@ -197,7 +229,7 @@ func expectSigninError(t *testing.T, w *httptest.ResponseRecorder, reason string
 	if w.Code != 303 || w.Header().Get("Location") != "/signin-error?reason="+reason || w.Body.Len() != 0 {
 		t.Fatalf("%d %v %q, want reason %s", w.Code, w.Header(), w.Body.String(), reason)
 	}
-	expectAccessCookie(t, w, -1)
+	expectOIDCCookie(t, w, -1)
 	if c, _ := responseCookie(w, CookieName); c != nil {
 		t.Fatal("refresh cookie set")
 	}
@@ -220,7 +252,7 @@ func TestAuthConfig(t *testing.T) {
 		want string
 	}{
 		{config.Config{PublicURL: usersOrigin}, `{"mode":"password"}`},
-		{accessConfig(), `{"mode":"cloudflare_access","logout_url":"https://example.cloudflareaccess.com/cdn-cgi/access/logout"}`},
+		{oidcConfig(), `{"mode":"oidc"}`},
 	} {
 		h := New(tc.cfg, nil, fstest.MapFS{}, nil)
 		w := serve(t, h, httptest.NewRequest("GET", "/auth/config", nil))
@@ -232,45 +264,45 @@ func TestAuthConfig(t *testing.T) {
 	}
 }
 
-func TestAccessRoutesWithoutAccess(t *testing.T) {
+func TestOIDCRoutesWithoutOIDC(t *testing.T) {
 	api := newUsersAPI(t, "sqlite")
-	if api.srv.accessOIDC != nil {
-		t.Fatal("OIDC client without Access")
+	if api.srv.rp != nil {
+		t.Fatal("OIDC client without OIDC")
 	}
-	for _, p := range []string{"/auth/access/login", "/auth/access/login?return_to=%2F", "/auth/access/callback?code=x&state=y"} {
+	for _, p := range []string{"/auth/oidc/login", "/auth/oidc/login?return_to=%2F", "/auth/oidc/callback?code=x&state=y"} {
 		w := serve(t, api.handler, httptest.NewRequest("GET", p, nil))
 		expect(t, w, 404, "not_found")
-		if c, _ := responseCookie(w, accessCookie); c != nil {
+		if c, _ := responseCookie(w, oidcCookie); c != nil {
 			t.Fatalf("%s: cookie set", p)
 		}
 	}
 }
 
-func TestAccessLogin(t *testing.T) {
-	api, oidc := newAccessAPI(t, "sqlite")
+func TestOIDCLogin(t *testing.T) {
+	api, rp := newOIDCAPI(t, "sqlite")
 	h := api.handler
 
 	returnTo := "/consent?request=abc_DEF-123"
-	w := accessLogin(t, h, "?return_to="+url.QueryEscape(returnTo))
+	w := oidcLogin(t, h, "?return_to="+url.QueryEscape(returnTo))
 	if w.Code != 302 || w.Header().Get("Cache-Control") != "no-store" || w.Body.Len() != 0 {
 		t.Fatalf("%d %v %q", w.Code, w.Header(), w.Body.String())
 	}
-	c := expectAccessCookie(t, w, accessCookieMaxAge)
+	c := expectOIDCCookie(t, w, oidcCookieMaxAge)
 	// The cookie is sealed: the state is not readable from it.
 	if !strings.HasPrefix(c.Value, "v1.") || strings.Contains(c.Value, "consent") {
 		t.Fatalf("cookie %q", c.Value)
 	}
-	st, ok := api.srv.openAccessState(c.Value)
+	st, ok := api.srv.openOIDCState(c.Value)
 	if !ok || st.ReturnTo != returnTo {
 		t.Fatalf("state %+v %v", st, ok)
 	}
 	loc, err := url.Parse(w.Header().Get("Location"))
-	if err != nil || loc.Scheme+"://"+loc.Host+loc.Path != testTeamDomain+"/cdn-cgi/access/sso/oidc/"+testAccessClientID+"/authorization" {
+	if err != nil || loc.Scheme+"://"+loc.Host+loc.Path != testIssuer+"/authorization" {
 		t.Fatalf("location %q", w.Header().Get("Location"))
 	}
 	q := loc.Query()
 	if q.Get("state") != st.State || q.Get("nonce") != st.Nonce || q.Get("code_challenge_method") != "S256" ||
-		q.Get("response_type") != "code" || q.Get("scope") != "openid email" || q.Get("client_id") != testAccessClientID || q.Get("redirect_uri") != usersOrigin+"/auth/access/callback" {
+		q.Get("response_type") != "code" || q.Get("scope") != "openid email" || q.Get("client_id") != testOIDCClientID || q.Get("redirect_uri") != usersOrigin+"/auth/oidc/callback" {
 		t.Fatalf("query %v", q)
 	}
 	// S256 of the verifier, as in RFC 7636; the verifier itself never
@@ -280,54 +312,54 @@ func TestAccessLogin(t *testing.T) {
 		t.Fatal("code_challenge")
 	}
 	// Every sign-in has new values.
-	other, _ := api.srv.openAccessState(expectAccessCookie(t, accessLogin(t, h, ""), accessCookieMaxAge).Value)
+	other, _ := api.srv.openOIDCState(expectOIDCCookie(t, oidcLogin(t, h, ""), oidcCookieMaxAge).Value)
 	if other.State == st.State || other.Nonce == st.Nonce || other.Verifier == st.Verifier || other.ReturnTo != "/" {
 		t.Fatalf("%+v", other)
 	}
 
 	// Kept return paths, including HTML characters, which are not escaped.
 	for _, v := range []string{"/", "/candidates", "/auto/", "/settings", "/settings/notifications", "/account", "/account/users", "/tasks/abc_DEF-1", "/consent", "/integrations/google/callback", "/?x=1", "/candidates?q=<a&b>\"'", "/consent?request=" + strings.Repeat("x", 2500)} {
-		w := accessLogin(t, h, "?return_to="+url.QueryEscape(v))
-		st, ok := api.srv.openAccessState(expectAccessCookie(t, w, accessCookieMaxAge).Value)
+		w := oidcLogin(t, h, "?return_to="+url.QueryEscape(v))
+		st, ok := api.srv.openOIDCState(expectOIDCCookie(t, w, oidcCookieMaxAge).Value)
 		if w.Code != 302 || !ok || st.ReturnTo != v {
 			t.Fatalf("%q: %d %+v", v, w.Code, st)
 		}
 	}
 	// Other sites and other paths fall back to /.
 	for _, v := range []string{"//evil.test", "/\\evil.test", "https://evil.test/", "http:/candidates", "/unknown", "candidates", "", "/candidates\x01", "/candidates\t", "/candidates x", "/candidates\x7f", "/candidates?q=é",
-		"/%2F%2Fevil.test", "/tasks/..%2F..%2Fx", "/tasks/../settings", "/signin-error", "/signin-error/", "/signin-error?reason=failed", "/candidates#x", "/candidates#", "/api/v1/me", "/auth/access/login", "/auth/refresh", "/mcp", "/tasks/a.b"} {
-		w := accessLogin(t, h, "?return_to="+url.QueryEscape(v))
-		st, ok := api.srv.openAccessState(expectAccessCookie(t, w, accessCookieMaxAge).Value)
+		"/%2F%2Fevil.test", "/tasks/..%2F..%2Fx", "/tasks/../settings", "/signin-error", "/signin-error/", "/signin-error?reason=failed", "/candidates#x", "/candidates#", "/api/v1/me", "/auth/oidc/login", "/auth/refresh", "/mcp", "/tasks/a.b"} {
+		w := oidcLogin(t, h, "?return_to="+url.QueryEscape(v))
+		st, ok := api.srv.openOIDCState(expectOIDCCookie(t, w, oidcCookieMaxAge).Value)
 		if w.Code != 302 || !ok || st.ReturnTo != "/" {
 			t.Fatalf("%q: %d %+v", v, w.Code, st)
 		}
 	}
 	for _, query := range []string{"", "?return_to=", "?return_to=%2Fsettings&return_to=%2Faccount", "?return_to=%2Fsettings&return_to=" + strings.Repeat("x", 3000)} {
-		st, _ := api.srv.openAccessState(expectAccessCookie(t, accessLogin(t, h, query), accessCookieMaxAge).Value)
+		st, _ := api.srv.openOIDCState(expectOIDCCookie(t, oidcLogin(t, h, query), oidcCookieMaxAge).Value)
 		if st.ReturnTo != "/" {
 			t.Fatalf("%q: %+v", query, st)
 		}
 	}
 
-	if w := serve(t, h, httptest.NewRequest("POST", "/auth/access/login", nil)); w.Code != 405 || errorCode(t, w) != "method_not_allowed" || w.Header().Get("Allow") != "GET" {
+	if w := serve(t, h, httptest.NewRequest("POST", "/auth/oidc/login", nil)); w.Code != 405 || errorCode(t, w) != "method_not_allowed" || w.Header().Get("Allow") != "GET" {
 		t.Fatalf("POST: %d %v", w.Code, w.Header())
 	}
-	if oidc.exchangeCount() != 0 {
+	if rp.exchangeCount() != 0 {
 		t.Fatal("login called the provider")
 	}
 }
 
 // The longest return path that fits starts the sign-in with a cookie of less
 // than 4096 bytes; a longer one does not start it.
-func TestAccessLoginReturnToLength(t *testing.T) {
-	api, _ := newAccessAPI(t, "sqlite")
+func TestOIDCLoginReturnToLength(t *testing.T) {
+	api, _ := newOIDCAPI(t, "sqlite")
 	h := api.handler
 	tooLong := func(w *httptest.ResponseRecorder) bool {
 		t.Helper()
 		if w.Code != 302 || w.Header().Get("Location") != "/signin-error?reason=return_too_long" {
 			return false
 		}
-		if c, _ := responseCookie(w, accessCookie); c != nil {
+		if c, _ := responseCookie(w, oidcCookie); c != nil {
 			t.Fatal("cookie set")
 		}
 		return true
@@ -341,17 +373,17 @@ func TestAccessLoginReturnToLength(t *testing.T) {
 	longest := ""
 	for n := maxReturnTo; n > len(prefix); n-- {
 		v := (prefix + filler)[:n]
-		w := accessLogin(t, h, "?return_to="+url.QueryEscape(v))
+		w := oidcLogin(t, h, "?return_to="+url.QueryEscape(v))
 		if tooLong(w) {
 			continue
 		}
-		c, line := responseCookie(w, accessCookie)
-		st, ok := api.srv.openAccessState(c.Value)
+		c, line := responseCookie(w, oidcCookie)
+		st, ok := api.srv.openOIDCState(c.Value)
 		if w.Code != 302 || !ok || st.ReturnTo != v {
 			t.Fatalf("%d bytes: %d %+v", n, w.Code, st)
 		}
 		pair, _, _ := strings.Cut(line, ";")
-		if len(c.Value) > maxAccessCookieValue || len(pair) >= 4096 {
+		if len(c.Value) > maxOIDCCookieValue || len(pair) >= 4096 {
 			t.Fatalf("%d bytes: cookie of %d bytes", n, len(pair))
 		}
 		longest = v
@@ -361,7 +393,7 @@ func TestAccessLoginReturnToLength(t *testing.T) {
 		t.Fatalf("longest return_to: %d bytes", len(longest))
 	}
 	// The same characters, one byte more, do not fit.
-	if !tooLong(accessLogin(t, h, "?return_to="+url.QueryEscape((prefix + filler)[:len(longest)+1]))) {
+	if !tooLong(oidcLogin(t, h, "?return_to="+url.QueryEscape((prefix + filler)[:len(longest)+1]))) {
 		t.Fatalf("%d bytes fit", len(longest)+1)
 	}
 
@@ -369,21 +401,21 @@ func TestAccessLoginReturnToLength(t *testing.T) {
 	// longer ones fail the length check.
 	for _, n := range []int{2700, 2701, 10000} {
 		v := prefix + strings.Repeat("x", n-len(prefix))
-		if !tooLong(accessLogin(t, h, "?return_to="+url.QueryEscape(v))) {
+		if !tooLong(oidcLogin(t, h, "?return_to="+url.QueryEscape(v))) {
 			t.Fatalf("%d bytes fit", n)
 		}
 	}
 }
 
-func TestAccessCallback(t *testing.T) {
+func TestOIDCCallback(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
-		t.Run(driver, func(t *testing.T) { testAccessCallback(t, driver) })
+		t.Run(driver, func(t *testing.T) { testOIDCCallback(t, driver) })
 	}
 }
 
-func testAccessCallback(t *testing.T, driver string) {
+func testOIDCCallback(t *testing.T, driver string) {
 	logs := captureLog(t)
-	api, oidc := newAccessAPI(t, driver)
+	api, rp := newOIDCAPI(t, driver)
 	h := api.handler
 	ctx := context.Background()
 	countUsers := func() int {
@@ -401,26 +433,26 @@ func testAccessCallback(t *testing.T, driver string) {
 		return decodeJSON[authResponse](t, w)
 	}
 
-	// The full flow: login, then the callback from Cloudflare. The address
+	// The full flow: login, then the callback from the provider. The address
 	// matches alice regardless of case, and alice stays an owner.
 	returnTo := "/consent?request=abc"
-	w := accessLogin(t, h, "?return_to="+url.QueryEscape(returnTo))
-	cookie := expectAccessCookie(t, w, accessCookieMaxAge)
+	w := oidcLogin(t, h, "?return_to="+url.QueryEscape(returnTo))
+	cookie := expectOIDCCookie(t, w, oidcCookieMaxAge)
 	loc, err := url.Parse(w.Header().Get("Location"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, _ := api.srv.openAccessState(cookie.Value)
-	oidc.set("Alice@Example.com", nil, nil)
+	st, _ := api.srv.openOIDCState(cookie.Value)
+	rp.set("Alice@Example.com", nil, nil)
 	w = serve(t, h, callbackRequest(url.Values{"code": {"code-value-1"}, "state": {loc.Query().Get("state")}}.Encode(), cookie.Value))
 	if w.Code != 303 || w.Header().Get("Location") != returnTo || w.Header().Get("Cache-Control") != "no-store" || w.Body.Len() != 0 {
 		t.Fatalf("%d %v %q", w.Code, w.Header(), w.Body.String())
 	}
-	expectAccessCookie(t, w, -1)
+	expectOIDCCookie(t, w, -1)
 	session := expectRefreshCookie(t, w)
 	// The verifier and the nonce of the cookie reach the provider.
-	if oidc.code != "code-value-1" || oidc.verifier != st.Verifier || oidc.token != "id-token-value" || oidc.nonce != st.Nonce {
-		t.Fatalf("%+v", oidc)
+	if rp.code != "code-value-1" || rp.verifier != st.Verifier || rp.token != "id-token-value" || rp.nonce != st.Nonce {
+		t.Fatalf("%+v", rp)
 	}
 	// The SPA restores the session with the refresh cookie.
 	if got := refresh(session).User; got.ID != "alice-id" || got.Email != "alice@example.com" || got.Role != store.RoleOwner {
@@ -432,8 +464,8 @@ func testAccessCallback(t *testing.T, driver string) {
 	// The cookie is single use: the same callback again fails.
 	expectSigninError(t, serve(t, h, callbackRequest(url.Values{"code": {"code-value-1"}, "state": {st.State}}.Encode(), "")), reasonFailed)
 
-	valid := func() (accessState, string) { return newAccessState(t, api.srv, "/") }
-	query := func(st accessState, extra url.Values) string {
+	valid := func() (oidcState, string) { return newOIDCState(t, api.srv, "/") }
+	query := func(st oidcState, extra url.Values) string {
 		q := url.Values{"code": {"code-value-1"}, "state": {st.State}}
 		for k, v := range extra {
 			q[k] = v
@@ -469,21 +501,21 @@ func testAccessCallback(t *testing.T, driver string) {
 		"tampered cookie":    {query(st, nil), string(tampered), reasonFailed},
 		"unsealed JSON":      {query(st, nil), base64.RawURLEncoding.EncodeToString([]byte(plain("/", ""))), reasonFailed},
 		"other purpose":      {query(st, nil), seal(box, "google-auth", plain("/", "")), reasonFailed},
-		"other secret":       {query(st, nil), seal(secretbox.New([]byte(strings.Repeat("x", 32))), accessSealPurpose, plain("/", "")), reasonFailed},
-		"unknown key":        {query(st, nil), seal(box, accessSealPurpose, plain("/", `,"x":1`)), reasonFailed},
-		"trailing data":      {query(st, nil), seal(box, accessSealPurpose, plain("/", "")+"{}"), reasonFailed},
-		"short state":        {query(st, nil), seal(box, accessSealPurpose, fmt.Sprintf(`{"s":"abc","n":%q,"v":%q,"r":"/"}`, st.Nonce, st.Verifier)), reasonFailed},
-		"padded nonce":       {query(st, nil), seal(box, accessSealPurpose, fmt.Sprintf(`{"s":%q,"n":%q,"v":%q,"r":"/"}`, st.State, st.Nonce[:42]+"=", st.Verifier)), reasonFailed},
-		"no verifier":        {query(st, nil), seal(box, accessSealPurpose, fmt.Sprintf(`{"s":%q,"n":%q,"r":"/"}`, st.State, st.Nonce)), reasonFailed},
-		"other site return":  {query(st, nil), seal(box, accessSealPurpose, plain("//evil.test", "")), reasonFailed},
-		"signin-error":       {query(st, nil), seal(box, accessSealPurpose, plain("/signin-error", "")), reasonFailed},
-		"state mismatch":     {query(accessState{State: st.State + "x"}, nil), value, reasonFailed},
-		"other state":        {query(accessState{State: strings.Repeat("A", 43)}, nil), value, reasonFailed},
+		"other secret":       {query(st, nil), seal(secretbox.New([]byte(strings.Repeat("x", 32))), oidcSealPurpose, plain("/", "")), reasonFailed},
+		"unknown key":        {query(st, nil), seal(box, oidcSealPurpose, plain("/", `,"x":1`)), reasonFailed},
+		"trailing data":      {query(st, nil), seal(box, oidcSealPurpose, plain("/", "")+"{}"), reasonFailed},
+		"short state":        {query(st, nil), seal(box, oidcSealPurpose, fmt.Sprintf(`{"s":"abc","n":%q,"v":%q,"r":"/"}`, st.Nonce, st.Verifier)), reasonFailed},
+		"padded nonce":       {query(st, nil), seal(box, oidcSealPurpose, fmt.Sprintf(`{"s":%q,"n":%q,"v":%q,"r":"/"}`, st.State, st.Nonce[:42]+"=", st.Verifier)), reasonFailed},
+		"no verifier":        {query(st, nil), seal(box, oidcSealPurpose, fmt.Sprintf(`{"s":%q,"n":%q,"r":"/"}`, st.State, st.Nonce)), reasonFailed},
+		"other site return":  {query(st, nil), seal(box, oidcSealPurpose, plain("//evil.test", "")), reasonFailed},
+		"signin-error":       {query(st, nil), seal(box, oidcSealPurpose, plain("/signin-error", "")), reasonFailed},
+		"state mismatch":     {query(oidcState{State: st.State + "x"}, nil), value, reasonFailed},
+		"other state":        {query(oidcState{State: strings.Repeat("A", 43)}, nil), value, reasonFailed},
 		"no state":           {"code=code-value-1", value, reasonFailed},
 		"two states":         {query(st, url.Values{"state": {st.State, st.State}}), value, reasonFailed},
 		"denied":             {query(st, url.Values{"error": {"access_denied"}}), value, reasonDenied},
 		"denied empty error": {query(st, url.Values{"error": {""}}), value, reasonDenied},
-		"denied bad state":   {query(accessState{State: "x"}, url.Values{"error": {"access_denied"}}), value, reasonFailed},
+		"denied bad state":   {query(oidcState{State: "x"}, url.Values{"error": {"access_denied"}}), value, reasonFailed},
 		"denied no state":    {"error=access_denied", value, reasonFailed},
 		"no code":            {url.Values{"state": {st.State}}.Encode(), value, reasonFailed},
 		"empty code":         {query(st, url.Values{"code": {""}}), value, reasonFailed},
@@ -491,15 +523,15 @@ func testAccessCallback(t *testing.T, driver string) {
 		"long code":          {query(st, url.Values{"code": {strings.Repeat("c", 2049)}}), value, reasonFailed},
 	} {
 		t.Run(name, func(t *testing.T) {
-			before := oidc.exchangeCount()
+			before := rp.exchangeCount()
 			expectSigninError(t, serve(t, h, callbackRequest(tc.query, tc.cookie)), tc.reason)
-			if oidc.exchangeCount() != before {
+			if rp.exchangeCount() != before {
 				t.Fatal("exchanged")
 			}
 		})
 	}
 	// A code of 2048 bytes is accepted.
-	oidc.set("alice@example.com", nil, nil)
+	rp.set("alice@example.com", nil, nil)
 	w = serve(t, h, callbackRequest(query(st, url.Values{"code": {strings.Repeat("c", 2048)}}), value))
 	if w.Code != 303 || w.Header().Get("Location") != "/" {
 		t.Fatalf("2048 bytes: %d %v", w.Code, w.Header())
@@ -511,16 +543,16 @@ func testAccessCallback(t *testing.T, driver string) {
 		exchangeErr, verifyErr error
 		reason                 string
 	}{
-		"provider unavailable": {access.ErrProviderUnavailable, nil, reasonUnavailable},
-		"exchange failed":      {access.ErrExchangeFailed, nil, reasonFailed},
+		"provider unavailable": {oidc.ErrProviderUnavailable, nil, reasonUnavailable},
+		"exchange failed":      {oidc.ErrExchangeFailed, nil, reasonFailed},
 		"exchange other error": {errors.New("other"), nil, reasonFailed},
-		"keys unavailable":     {nil, access.ErrKeysUnavailable, reasonUnavailable},
-		"invalid ID token":     {nil, access.ErrInvalidToken, reasonFailed},
+		"keys unavailable":     {nil, oidc.ErrKeysUnavailable, reasonUnavailable},
+		"invalid ID token":     {nil, oidc.ErrInvalidToken, reasonFailed},
 		"verify other error":   {nil, errors.New("other"), reasonFailed},
 	} {
 		t.Run(name, func(t *testing.T) {
-			oidc.set("alice@example.com", tc.exchangeErr, tc.verifyErr)
-			defer oidc.set("alice@example.com", nil, nil)
+			rp.set("alice@example.com", tc.exchangeErr, tc.verifyErr)
+			defer rp.set("alice@example.com", nil, nil)
 			st, value := valid()
 			expectSigninError(t, serve(t, h, callbackRequest(query(st, nil), value)), tc.reason)
 		})
@@ -528,7 +560,7 @@ func testAccessCallback(t *testing.T, driver string) {
 
 	// The first sign-in of an address creates a member that no password
 	// matches; the next sign-in finds it.
-	oidc.set(" Dave@Example.COM ", nil, nil)
+	rp.set(" Dave@Example.COM ", nil, nil)
 	st, value = valid()
 	w = serve(t, h, callbackRequest(query(st, nil), value))
 	if w.Code != 303 || w.Header().Get("Location") != "/" {
@@ -559,7 +591,7 @@ func testAccessCallback(t *testing.T, driver string) {
 
 	// A disabled user gets no session and stays disabled.
 	expect(t, api.do("PATCH", "/api/v1/users/carol-id", ownerToken(t, api), `{"disabled":true}`), 200, "")
-	oidc.set("carol@example.com", nil, nil)
+	rp.set("carol@example.com", nil, nil)
 	st, value = valid()
 	expectSigninError(t, serve(t, h, callbackRequest(query(st, nil), value)), reasonDisabled)
 	if u, err := api.store.UserByEmail(ctx, "carol@example.com"); err != nil || u.Disabled == 0 {
@@ -568,7 +600,7 @@ func testAccessCallback(t *testing.T, driver string) {
 
 	// A malformed email claim creates nobody.
 	for _, email := range []string{"not an address", "bob@", "bøb@example.com", "", strings.Repeat("a", 250) + "@example.com"} {
-		oidc.set(email, nil, nil)
+		rp.set(email, nil, nil)
 		st, value = valid()
 		expectSigninError(t, serve(t, h, callbackRequest(query(st, nil), value)), reasonFailed)
 	}
@@ -577,7 +609,7 @@ func testAccessCallback(t *testing.T, driver string) {
 	}
 
 	// Concurrent first sign-ins of one address create one user.
-	oidc.set("erin@example.com", nil, nil)
+	rp.set("erin@example.com", nil, nil)
 	const concurrent = 8
 	codes := make(chan string, concurrent)
 	var wg sync.WaitGroup
@@ -609,7 +641,7 @@ func testAccessCallback(t *testing.T, driver string) {
 			t.Fatalf("log contains %q: %s", secret, logs.String())
 		}
 	}
-	for _, reason := range []string{"auth: access sign-in failed: state mismatch", "auth: access sign-in failed: malformed email claim", "auth: access sign-in failed: user carol-id is disabled", "auth: created user " + dave.ID + " by an access sign-in"} {
+	for _, reason := range []string{"auth: oidc sign-in failed: state mismatch", "auth: oidc sign-in failed: malformed email claim", "auth: oidc sign-in failed: user carol-id is disabled", "auth: created user " + dave.ID + " by an oidc sign-in"} {
 		if !strings.Contains(logs.String(), reason) {
 			t.Fatalf("log lacks %q: %s", reason, logs.String())
 		}
@@ -631,17 +663,17 @@ func ownerToken(t *testing.T, api *usersAPI) string {
 	return result.AccessToken
 }
 
-func TestAccessCallbackDatabaseError(t *testing.T) {
+func TestOIDCCallbackDatabaseError(t *testing.T) {
 	logs := captureLog(t)
-	api, oidc := newAccessAPI(t, "sqlite")
+	api, rp := newOIDCAPI(t, "sqlite")
 	if err := api.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	oidc.set("alice@example.com", nil, nil)
-	st, value := newAccessState(t, api.srv, "/")
+	rp.set("alice@example.com", nil, nil)
+	st, value := newOIDCState(t, api.srv, "/")
 	expectSigninError(t, serve(t, api.handler, callbackRequest(url.Values{"code": {"c"}, "state": {st.State}}.Encode(), value)), reasonUnavailable)
-	oidc.set("new@example.com", nil, nil)
-	st, value = newAccessState(t, api.srv, "/")
+	rp.set("new@example.com", nil, nil)
+	st, value = newOIDCState(t, api.srv, "/")
 	expectSigninError(t, serve(t, api.handler, callbackRequest(url.Values{"code": {"c"}, "state": {st.State}}.Encode(), value)), reasonUnavailable)
 	if strings.Contains(logs.String(), "@example.com") {
 		t.Fatalf("log contains the address: %s", logs.String())
@@ -649,24 +681,24 @@ func TestAccessCallbackDatabaseError(t *testing.T) {
 }
 
 // Without an OIDC client the callback is unavailable instead of panicking.
-func TestAccessCallbackWithoutClient(t *testing.T) {
-	api, _ := newAccessAPI(t, "sqlite")
-	api.srv.accessOIDC = nil
-	st, value := newAccessState(t, api.srv, "/")
+func TestOIDCCallbackWithoutClient(t *testing.T) {
+	api, _ := newOIDCAPI(t, "sqlite")
+	api.srv.rp = nil
+	st, value := newOIDCState(t, api.srv, "/")
 	expectSigninError(t, serve(t, api.handler, callbackRequest(url.Values{"code": {"c"}, "state": {st.State}}.Encode(), value)), reasonUnavailable)
-	w := accessLogin(t, api.handler, "")
+	w := oidcLogin(t, api.handler, "")
 	if w.Code != 302 || w.Header().Get("Location") != "/signin-error?reason=unavailable" {
 		t.Fatalf("%d %v", w.Code, w.Header())
 	}
 }
 
-func TestPasswordEndpointsWithAccess(t *testing.T) {
+func TestPasswordEndpointsWithOIDC(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
-		t.Run(driver, func(t *testing.T) { testPasswordEndpointsWithAccess(t, driver) })
+		t.Run(driver, func(t *testing.T) { testPasswordEndpointsWithOIDC(t, driver) })
 	}
 }
 
-func testPasswordEndpointsWithAccess(t *testing.T, driver string) {
+func testPasswordEndpointsWithOIDC(t *testing.T, driver string) {
 	// Links issued while passwords were in use.
 	password := newUsersAPI(t, driver)
 	alice, _ := password.login("alice@example.com", "correct-password-123")
@@ -675,9 +707,9 @@ func testPasswordEndpointsWithAccess(t *testing.T, driver string) {
 	invToken := fragmentToken(t, inv.URL, usersOrigin+"/invite#")
 	pwrToken := fragmentToken(t, pwr.URL, usersOrigin+"/reset-password#")
 
-	// The same database served with Access.
-	srv := newServer(accessConfig(), password.srv.auth, fstest.MapFS{}, nil)
-	srv.accessOIDC = newFakeOIDC()
+	// The same database served with OIDC.
+	srv := newServer(oidcConfig(), password.srv.auth, fstest.MapFS{}, nil)
+	srv.rp = newFakeOIDC()
 	api := &usersAPI{t: t, store: password.store, srv: srv, handler: srv.handler(), now: password.now}
 	ctx := context.Background()
 	disabled := func(w *httptest.ResponseRecorder) {
@@ -738,7 +770,161 @@ func testPasswordEndpointsWithAccess(t *testing.T, driver string) {
 
 	// The 409s consumed no attempts: with passwords again, the login and the
 	// links are not rate limited.
-	srv.cfg.Access = nil
+	srv.cfg.OIDC = nil
 	expect(t, api.public("/auth/login", `{"email":"carol@example.com","password":"wrong-password-123"}`, ""), 401, "unauthorized")
 	expect(t, api.public("/auth/invitations/inspect", linkBody("/auth/invitations/inspect", invToken), ""), 404, "invitation_invalid")
+}
+
+// With OIDC the routes of the Cloudflare Access sign-in of earlier releases
+// do not exist.
+func TestOIDCOldRoutes(t *testing.T) {
+	api, _ := newOIDCAPI(t, "sqlite")
+	for _, p := range []string{"/auth/access/login", "/auth/access/login?return_to=%2F", "/auth/access/callback?code=x&state=y"} {
+		w := serve(t, api.handler, httptest.NewRequest("GET", p, nil))
+		expect(t, w, 404, "not_found")
+		if c, _ := responseCookie(w, oidcCookie); c != nil {
+			t.Fatalf("%s: cookie set", p)
+		}
+	}
+}
+
+// A provider whose metadata cannot be read does not start the sign-in and
+// leaves no sign-in cookie.
+func TestOIDCLoginProviderUnavailable(t *testing.T) {
+	api, rp := newOIDCAPI(t, "sqlite")
+	rp.setAuthErr(oidc.ErrProviderUnavailable)
+	w := oidcLogin(t, api.handler, "?return_to=%2Fsettings")
+	if w.Code != 302 || w.Header().Get("Location") != "/signin-error?reason=unavailable" || w.Body.Len() != 0 {
+		t.Fatalf("%d %v %q", w.Code, w.Header(), w.Body.String())
+	}
+	if c, _ := responseCookie(w, oidcCookie); c != nil {
+		t.Fatal("cookie set")
+	}
+	rp.setAuthErr(nil)
+	expectOIDCCookie(t, oidcLogin(t, api.handler, ""), oidcCookieMaxAge)
+}
+
+// email_verified and the allowed emails are checked after the ID token, on
+// every sign-in, before any user is found or created.
+func TestOIDCCallbackEmailChecks(t *testing.T) {
+	logs := captureLog(t)
+	api, rp := newOIDCAPI(t, "sqlite")
+	h := api.handler
+	ctx := context.Background()
+	callback := func() *httptest.ResponseRecorder {
+		t.Helper()
+		st, value := newOIDCState(t, api.srv, "/")
+		return serve(t, h, callbackRequest(url.Values{"code": {"c"}, "state": {st.State}}.Encode(), value))
+	}
+	countUsers := func() int {
+		t.Helper()
+		users, err := api.store.ListUsers(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(users)
+	}
+	yes, no := true, false
+	cfg := api.srv.cfg.OIDC
+	before := countUsers()
+
+	// email_verified required.
+	for name, tc := range map[string]struct {
+		verified *bool
+		ok       bool
+	}{"true": {&yes, true}, "false": {&no, false}, "absent": {nil, false}} {
+		rp.setVerified(tc.verified)
+		for _, email := range []string{"alice@example.com", "new-" + name + "@example.com"} {
+			rp.set(email, nil, nil)
+			w := callback()
+			if tc.ok {
+				if w.Code != 303 || w.Header().Get("Location") != "/" {
+					t.Fatalf("%s %s: %d %v", name, email, w.Code, w.Header())
+				}
+				expectRefreshCookie(t, w)
+				continue
+			}
+			expectSigninError(t, w, reasonNotVerified)
+		}
+	}
+	if n := countUsers(); n != before+1 {
+		t.Fatalf("users: %d", n)
+	}
+
+	// Not required: an absent claim passes, false does not.
+	cfg.RequireEmailVerified = false
+	rp.set("alice@example.com", nil, nil)
+	rp.setVerified(nil)
+	expectRefreshCookie(t, callback())
+	rp.setVerified(&no)
+	expectSigninError(t, callback(), reasonNotVerified)
+	rp.setVerified(&yes)
+	expectRefreshCookie(t, callback())
+
+	// The allowed emails apply to existing users as well, after
+	// email_verified.
+	for _, tc := range []struct {
+		allowed []string
+		email   string
+		reason  string
+	}{
+		{[]string{}, "alice@example.com", reasonNotAllowed},
+		{nil, "alice@example.com", reasonNotAllowed},
+		{[]string{"example.org"}, "alice@example.com", reasonNotAllowed},
+		{[]string{"sub.example.com"}, "alice@example.com", reasonNotAllowed},
+		{[]string{"bob@example.com"}, "Alice@Example.com", reasonNotAllowed},
+		{[]string{"example.org"}, "frank@example.com", reasonNotAllowed},
+		{[]string{"alice@example.com"}, " Alice@Example.COM ", ""},
+		{[]string{"example.org", "example.com"}, "alice@example.com", ""},
+		{[]string{"*"}, "alice@example.com", ""},
+	} {
+		cfg.AllowedEmails = tc.allowed
+		rp.set(tc.email, nil, nil)
+		w := callback()
+		if tc.reason != "" {
+			expectSigninError(t, w, tc.reason)
+			continue
+		}
+		if w.Code != 303 || w.Header().Get("Location") != "/" {
+			t.Fatalf("%+v: %d %v", tc, w.Code, w.Header())
+		}
+		expectRefreshCookie(t, w)
+	}
+	if _, err := api.store.UserByEmail(ctx, "frank@example.com"); err == nil {
+		t.Fatal("frank was created")
+	}
+	// email_verified is checked first.
+	cfg.AllowedEmails = []string{}
+	rp.set("alice@example.com", nil, nil)
+	rp.setVerified(&no)
+	expectSigninError(t, callback(), reasonNotVerified)
+	if n := countUsers(); n != before+1 {
+		t.Fatalf("users: %d", n)
+	}
+
+	if strings.Contains(strings.ToLower(logs.String()), "@example.com") {
+		t.Fatalf("log contains an address: %s", logs.String())
+	}
+	for _, reason := range []string{"auth: oidc sign-in failed: email not verified", "auth: oidc sign-in failed: email not allowed"} {
+		if !strings.Contains(logs.String(), reason) {
+			t.Fatalf("log lacks %q: %s", reason, logs.String())
+		}
+	}
+}
+
+// An empty ASTOVIA_ALLOWED_EMAILS is logged once when the server is built.
+func TestOIDCAllowedEmailsEmptyLog(t *testing.T) {
+	logs := captureLog(t)
+	const warning = "oidc: ASTOVIA_ALLOWED_EMAILS is empty; nobody can sign in"
+	newServer(oidcConfig(), nil, fstest.MapFS{}, nil)
+	newServer(config.Config{PublicURL: usersOrigin}, nil, fstest.MapFS{}, nil)
+	if strings.Contains(logs.String(), warning) {
+		t.Fatalf("logged: %s", logs.String())
+	}
+	c := oidcConfig()
+	c.OIDC.AllowedEmails = []string{}
+	newServer(c, nil, fstest.MapFS{}, nil)
+	if strings.Count(logs.String(), warning) != 1 {
+		t.Fatalf("log: %s", logs.String())
+	}
 }

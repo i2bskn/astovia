@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type Config struct {
@@ -20,10 +21,10 @@ type Config struct {
 	// Google is the OAuth client of the mail integration, or nil when
 	// ASTOVIA_GOOGLE_CLIENT_ID and ASTOVIA_GOOGLE_CLIENT_SECRET are not set.
 	Google *GoogleClient
-	// Access is the Cloudflare Access SaaS application (OIDC) that signs
-	// users in to the web UI instead of passwords, or nil when the
-	// ASTOVIA_ACCESS_* variables are not set (password sign-in).
-	Access *AccessClient
+	// OIDC is the OpenID Connect provider that signs users in to the web UI
+	// instead of passwords (ASTOVIA_AUTH_MODE=oidc), or nil for password
+	// sign-in.
+	OIDC *OIDCClient
 	// AIAllowPrivateEndpoints lets OpenAI-compatible AI endpoints use http
 	// and non-public addresses (ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS).
 	AIAllowPrivateEndpoints bool
@@ -51,29 +52,33 @@ const (
 // cloudflareAccountIDPattern is the format of a Cloudflare account ID.
 var cloudflareAccountIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-// AccessClient identifies the Cloudflare Access SaaS application (OIDC)
-// whose relying party Astovia is. Issuer and RedirectURI are derived from
-// the team domain, the client ID and the public URL. The secret is never
-// logged or put in an error.
-type AccessClient struct {
-	// TeamDomain is the team origin, https://<team>.cloudflareaccess.com.
-	TeamDomain string
+// OIDCClient is the OpenID Connect client registered at the provider whose
+// relying party Astovia is. RedirectURI is derived from the public URL. The
+// secret is never logged or put in an error.
+type OIDCClient struct {
+	// Issuer is the issuer of the provider, as configured; it is compared
+	// exactly with the provider metadata and the iss claim.
+	Issuer string
 	// ClientID and Secret are the OIDC client ID and secret.
 	ClientID, Secret string
-	// Issuer is the OIDC issuer of the application; the authorization,
-	// token and JWKS endpoints are under it (no discovery).
-	Issuer string
-	// RedirectURI is the callback registered in the application.
+	// RedirectURI is the callback registered at the provider.
 	RedirectURI string
+	// AllowedEmails is the parsed ASTOVIA_ALLOWED_EMAILS: lower-case
+	// entries, each an address, a domain or "*". Empty allows nobody.
+	AllowedEmails []string
+	// RequireEmailVerified requires the email_verified claim to be true;
+	// when false, only a missing claim is accepted as well.
+	RequireEmailVerified bool
 }
 
-// AccessCallbackPath is the path of the redirect URI of the Access
-// application.
-const AccessCallbackPath = "/auth/access/callback"
+// OIDCCallbackPath is the path of the redirect URI of the OIDC client.
+const OIDCCallbackPath = "/auth/oidc/callback"
 
-// accessClientIDPattern is the accepted format of an Access client ID. The
-// ID is embedded in URL paths, so only unreserved characters are allowed.
-var accessClientIDPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]{1,256}$`)
+// Sign-in modes of ASTOVIA_AUTH_MODE.
+const (
+	AuthModePassword = "password"
+	AuthModeOIDC     = "oidc"
+)
 
 // GoogleClient is the OAuth client (a web application) the operator made in
 // Google Cloud for the mail integration. RedirectURI is derived from the
@@ -105,7 +110,7 @@ func Load(requireSecret bool) (Config, error) {
 	if c.Google, err = googleClient(c.PublicURL); err != nil {
 		return c, err
 	}
-	if c.Access, err = accessClient(c.PublicURL); err != nil {
+	if c.OIDC, err = oidcClient(c.PublicURL); err != nil {
 		return c, err
 	}
 	if c.AIAllowPrivateEndpoints, err = boolEnv("ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS"); err != nil {
@@ -158,55 +163,117 @@ func validGoogleValue(v string) bool {
 	return true
 }
 
-// accessClient reads the Cloudflare Access application. All three values
-// empty keep password sign-in; only some of them is an error. As with the
-// Google client, the values are not trimmed: surrounding spaces are
-// rejected.
-func accessClient(publicURL string) (*AccessClient, error) {
-	team, id, secret := os.Getenv("ASTOVIA_ACCESS_TEAM_DOMAIN"), os.Getenv("ASTOVIA_ACCESS_CLIENT_ID"), os.Getenv("ASTOVIA_ACCESS_CLIENT_SECRET")
-	if team == "" && id == "" && secret == "" {
+// legacyAccessError replaces the Cloudflare Access variables of earlier
+// releases. They are not read as the new ones, so that there is only one
+// way to configure the sign-in.
+const legacyAccessError = "ASTOVIA_ACCESS_TEAM_DOMAIN, ASTOVIA_ACCESS_CLIENT_ID and ASTOVIA_ACCESS_CLIENT_SECRET were replaced: set ASTOVIA_AUTH_MODE=oidc, ASTOVIA_OIDC_ISSUER=https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client ID>, ASTOVIA_OIDC_CLIENT_ID, ASTOVIA_OIDC_CLIENT_SECRET, ASTOVIA_ALLOWED_EMAILS=* and ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED=false, change the redirect URL of the Access application to <ASTOVIA_PUBLIC_URL>/auth/oidc/callback, and remove the ASTOVIA_ACCESS_* variables"
+
+// oidcClient reads the sign-in mode and, with ASTOVIA_AUTH_MODE=oidc, the
+// OIDC client. Password sign-in returns nil. The Cloudflare Access
+// variables of earlier releases are an error, so that a migration that is
+// left half done does not fall back to passwords silently; so are the
+// ASTOVIA_OIDC_* variables without ASTOVIA_AUTH_MODE=oidc. As with the
+// Google client, the issuer, the client ID and the secret are not trimmed:
+// surrounding spaces are rejected.
+func oidcClient(publicURL string) (*OIDCClient, error) {
+	if os.Getenv("ASTOVIA_ACCESS_TEAM_DOMAIN") != "" || os.Getenv("ASTOVIA_ACCESS_CLIENT_ID") != "" || os.Getenv("ASTOVIA_ACCESS_CLIENT_SECRET") != "" {
+		return nil, errors.New(legacyAccessError)
+	}
+	issuer, id, secret := os.Getenv("ASTOVIA_OIDC_ISSUER"), os.Getenv("ASTOVIA_OIDC_CLIENT_ID"), os.Getenv("ASTOVIA_OIDC_CLIENT_SECRET")
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("ASTOVIA_AUTH_MODE"))) {
+	case "", AuthModePassword:
+		// ASTOVIA_ALLOWED_EMAILS and ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED are
+		// ignored with passwords.
+		if issuer != "" || id != "" || secret != "" {
+			return nil, errors.New("ASTOVIA_OIDC_* is set but ASTOVIA_AUTH_MODE is not oidc; set ASTOVIA_AUTH_MODE=oidc or remove ASTOVIA_OIDC_*")
+		}
 		return nil, nil
+	case AuthModeOIDC:
+	default:
+		return nil, errors.New("ASTOVIA_AUTH_MODE must be password or oidc")
 	}
-	if team == "" || id == "" || secret == "" {
-		return nil, errors.New("ASTOVIA_ACCESS_TEAM_DOMAIN, ASTOVIA_ACCESS_CLIENT_ID and ASTOVIA_ACCESS_CLIENT_SECRET must be set together")
+	if issuer == "" {
+		return nil, errors.New("ASTOVIA_OIDC_ISSUER is required with ASTOVIA_AUTH_MODE=oidc")
 	}
-	domain, err := accessTeamDomain(team)
+	if !validOIDCIssuer(issuer) {
+		return nil, errors.New("ASTOVIA_OIDC_ISSUER must be an https URL of at most 2048 bytes without credentials, query, fragment, spaces or more than one trailing slash")
+	}
+	if id == "" {
+		return nil, errors.New("ASTOVIA_OIDC_CLIENT_ID is required with ASTOVIA_AUTH_MODE=oidc")
+	}
+	if !validOIDCClientID(id) {
+		return nil, errors.New("ASTOVIA_OIDC_CLIENT_ID must be 1-256 printable ASCII characters without spaces")
+	}
+	if secret == "" {
+		return nil, errors.New("ASTOVIA_OIDC_CLIENT_SECRET is required with ASTOVIA_AUTH_MODE=oidc")
+	}
+	if !validOIDCSecret(secret) {
+		return nil, errors.New("ASTOVIA_OIDC_CLIENT_SECRET must be 1-1024 printable ASCII characters without spaces")
+	}
+	requireVerified, err := requireEmailVerified(os.Getenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED"))
 	if err != nil {
 		return nil, err
 	}
-	if !accessClientIDPattern.MatchString(id) {
-		return nil, errors.New("ASTOVIA_ACCESS_CLIENT_ID must be 1-256 characters of A-Z, a-z, 0-9, '.', '_', '~' and '-'")
-	}
-	if !validAccessSecret(secret) {
-		return nil, errors.New("ASTOVIA_ACCESS_CLIENT_SECRET must be 1-1024 printable ASCII characters without spaces")
-	}
 	// The sign-in cookie uses the Secure attribute and the __Host- prefix.
 	if !strings.HasPrefix(publicURL, "https://") {
-		return nil, errors.New("ASTOVIA_PUBLIC_URL must use https with Cloudflare Access")
+		return nil, errors.New("ASTOVIA_PUBLIC_URL must use https with ASTOVIA_AUTH_MODE=oidc")
 	}
-	issuer := domain + "/cdn-cgi/access/sso/oidc/" + id
-	return &AccessClient{TeamDomain: domain, ClientID: id, Secret: secret, Issuer: issuer, RedirectURI: publicURL + AccessCallbackPath}, nil
+	return &OIDCClient{Issuer: issuer, ClientID: id, Secret: secret, RedirectURI: publicURL + OIDCCallbackPath, AllowedEmails: ParseAllowedEmails(os.Getenv("ASTOVIA_ALLOWED_EMAILS")), RequireEmailVerified: requireVerified}, nil
 }
 
-// accessTeamDomain checks an Access team domain and returns it lower-case,
-// without the one trailing slash it may have.
-func accessTeamDomain(raw string) (string, error) {
-	invalid := errors.New("ASTOVIA_ACCESS_TEAM_DOMAIN must be an origin such as https://<team>.cloudflareaccess.com")
-	u, err := url.Parse(strings.TrimSuffix(raw, "/"))
-	if err != nil || u.Scheme != "https" || u.Opaque != "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") || u.Port() != "" || strings.HasSuffix(u.Host, ":") {
-		return "", invalid
+// validOIDCIssuer accepts an absolute https URL of 1-2048 bytes with a host
+// and without credentials, opaque part, query, fragment, spaces or control
+// characters, whose path ends with at most one slash. Ports and IP
+// literals are allowed: the operator sets the value.
+func validOIDCIssuer(v string) bool {
+	if len(v) == 0 || len(v) > 2048 || strings.Contains(v, "#") || strings.HasSuffix(v, "//") {
+		return false
 	}
-	host := strings.ToLower(u.Host)
-	// A trailing dot would not match the iss claim.
-	if strings.HasSuffix(host, ".") || !ValidDNSHost(host) || !strings.HasSuffix(host, ".cloudflareaccess.com") {
-		return "", invalid
+	for _, c := range v {
+		if unicode.IsSpace(c) || unicode.IsControl(c) {
+			return false
+		}
 	}
-	return "https://" + host, nil
+	u, err := url.Parse(v)
+	return err == nil && u.Scheme == "https" && u.Host != "" && u.Hostname() != "" && u.User == nil && u.Opaque == "" && u.RawQuery == "" && !u.ForceQuery
 }
 
-// validAccessSecret accepts 1-1024 bytes of printable ASCII other than the
+// validOIDCClientID accepts 1-256 bytes of printable ASCII other than the
+// space. The ID is encoded wherever it is sent.
+func validOIDCClientID(v string) bool {
+	return len(v) <= 256 && validOIDCSecret(v)
+}
+
+// requireEmailVerified reads ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED: unset,
+// empty or true requires the claim, and false accepts a missing one. The
+// value is trimmed; any other value, including 1, 0 and TRUE, is an error.
+// boolEnv is not used: it reads unset as false.
+func requireEmailVerified(v string) (bool, error) {
+	switch strings.TrimSpace(v) {
+	case "", "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, errors.New("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED must be true or false")
+}
+
+// ParseAllowedEmails splits ASTOVIA_ALLOWED_EMAILS at commas into trimmed,
+// lower-case entries, dropping the empty ones. auth.EmailAllowed matches an
+// address against them.
+func ParseAllowedEmails(v string) []string {
+	out := []string{}
+	for _, entry := range strings.Split(v, ",") {
+		if entry = strings.ToLower(strings.TrimSpace(entry)); entry != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// validOIDCSecret accepts 1-1024 bytes of printable ASCII other than the
 // space.
-func validAccessSecret(v string) bool {
+func validOIDCSecret(v string) bool {
 	if len(v) == 0 || len(v) > 1024 {
 		return false
 	}

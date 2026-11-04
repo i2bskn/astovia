@@ -1,8 +1,8 @@
-// Package access signs users in with a Cloudflare Access SaaS application
-// over OpenID Connect: it builds the authorization URL, exchanges the
+// Package oidc signs users in with an OpenID Connect provider: it reads the
+// provider metadata (discovery), builds the authorization URL, exchanges the
 // authorization code for an ID token and verifies the ID token against the
-// signing keys of the application.
-package access
+// signing keys of the provider.
+package oidc
 
 import (
 	"context"
@@ -26,9 +26,9 @@ import (
 var (
 	// ErrInvalidToken is returned for every ID token that is not accepted.
 	// The reason is only logged.
-	ErrInvalidToken = errors.New("invalid access token")
+	ErrInvalidToken = errors.New("invalid ID token")
 	// ErrKeysUnavailable is returned when no signing keys could be fetched.
-	ErrKeysUnavailable = errors.New("access signing keys are unavailable")
+	ErrKeysUnavailable = errors.New("OIDC signing keys are unavailable")
 )
 
 const (
@@ -40,7 +40,7 @@ const (
 	keysTTL = time.Hour
 	// fetchInterval is the minimum time between two fetch attempts,
 	// successful or not, so that tokens with unknown key IDs cannot make
-	// many requests to Cloudflare.
+	// many requests to the provider.
 	fetchInterval = 30 * time.Second
 	// fetchTimeout bounds one fetch of the JWKS.
 	fetchTimeout = 5 * time.Second
@@ -52,12 +52,12 @@ const (
 	maxRSAExponent = 1<<31 - 1
 )
 
-// Verifier verifies the ID tokens of one SaaS application against its
-// signing keys. Keys are fetched on the first request and cached.
+// Verifier verifies the ID tokens that one issuer issues to one client
+// against the signing keys of the issuer. Keys are fetched on the first
+// request and cached; there is one cache, whatever the keys URL.
 type Verifier struct {
 	issuer   string
 	audience string
-	keysURL  string
 	client   *http.Client
 	now      func() time.Time
 
@@ -72,30 +72,44 @@ type Verifier struct {
 }
 
 // NewVerifier returns a verifier for the ID tokens that issuer issues to
-// clientID. The keys are read from issuer + "/jwks" with client, which
-// should not follow redirects.
+// clientID. The keys are read with client, which should not follow
+// redirects, from the keys URL given to Verify (the jwks_uri of the
+// provider metadata).
 func NewVerifier(issuer, clientID string, client *http.Client, now func() time.Time) *Verifier {
-	return &Verifier{issuer: issuer, audience: clientID, keysURL: issuer + "/jwks", client: client, now: now}
+	return &Verifier{issuer: issuer, audience: clientID, client: client, now: now}
 }
 
-// idClaims holds the claims read besides the registered ones. sub and
-// email_verified are not read: Access is the only issuer of the
-// application and asserts the email itself.
+// Identity is what a verified ID token says about the user.
+type Identity struct {
+	// Email is the email claim, unchanged; normalization is up to the
+	// caller.
+	Email string
+	// EmailVerified is nil when the claim is absent, otherwise whether it is the JSON boolean true.
+	EmailVerified *bool
+}
+
+// idClaims holds the claims read besides the registered ones. sub is not
+// read: users are matched by their email address. email_verified is read
+// raw, so that a value that is not a boolean is rejected by the caller
+// instead of failing the whole parse.
 type idClaims struct {
 	jwt.RegisteredClaims
-	Email string `json:"email"`
-	Nonce string `json:"nonce"`
+	Email           string          `json:"email"`
+	Nonce           string          `json:"nonce"`
+	AuthorizedParty *string         `json:"azp"`
+	EmailVerified   json.RawMessage `json:"email_verified"`
 }
 
 // Verify checks the signature and the claims of the ID token, including that
-// its nonce equals nonce, and returns its email claim unchanged. It returns
+// its nonce equals nonce, and returns its email claim unchanged with its
+// email_verified claim. The signing keys are read from keysURL. It returns
 // ErrKeysUnavailable when no signing keys could be fetched and
 // ErrInvalidToken otherwise. Keys are fetched with their own timeout
 // instead of the request context, so that a client going away does not
 // cancel a fetch that other requests wait for.
-func (v *Verifier) Verify(_ context.Context, token, nonce string) (string, error) {
+func (v *Verifier) Verify(_ context.Context, token, nonce, keysURL string) (Identity, error) {
 	if len(token) == 0 || len(token) > maxTokenSize {
-		return "", reject("bad size")
+		return Identity{}, reject("bad size")
 	}
 	var claims idClaims
 	var keyErr error
@@ -115,7 +129,7 @@ func (v *Verifier) Verify(_ context.Context, token, nonce string) (string, error
 			keyErr = reject("missing kid")
 			return nil, keyErr
 		}
-		key, err := v.key(kid)
+		key, err := v.key(kid, keysURL)
 		if err != nil {
 			keyErr = err
 			return nil, err
@@ -124,24 +138,38 @@ func (v *Verifier) Verify(_ context.Context, token, nonce string) (string, error
 	}, jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(v.issuer), jwt.WithAudience(v.audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(leeway), jwt.WithTimeFunc(v.now))
 	if keyErr != nil {
 		if errors.Is(keyErr, ErrKeysUnavailable) {
-			return "", ErrKeysUnavailable
+			return Identity{}, ErrKeysUnavailable
 		}
-		return "", ErrInvalidToken
+		return Identity{}, ErrInvalidToken
 	}
 	if err != nil || parsed == nil || !parsed.Valid {
-		return "", reject(parseReason(err))
+		return Identity{}, reject(parseReason(err))
 	}
-	// With one audience there is no authorized party (azp) to check.
 	if len(claims.Audience) != 1 {
-		return "", reject("several audiences")
+		return Identity{}, reject("several audiences")
+	}
+	// An authorized party, when present, must be this client.
+	if claims.AuthorizedParty != nil && *claims.AuthorizedParty != v.audience {
+		return Identity{}, reject("bad azp")
 	}
 	if nonce == "" || subtle.ConstantTimeCompare([]byte(claims.Nonce), []byte(nonce)) != 1 {
-		return "", reject("bad nonce")
+		return Identity{}, reject("bad nonce")
 	}
 	if claims.Email == "" {
-		return "", reject("missing email")
+		return Identity{}, reject("missing email")
 	}
-	return claims.Email, nil
+	return Identity{Email: claims.Email, EmailVerified: emailVerified(claims.EmailVerified)}, nil
+}
+
+// emailVerified reads the raw email_verified claim: nil when it is absent,
+// a pointer to true when it is the JSON boolean true and a pointer to false
+// for any other value, including false, null and the string "true".
+func emailVerified(raw json.RawMessage) *bool {
+	if raw == nil {
+		return nil
+	}
+	verified := string(raw) == "true"
+	return &verified
 }
 
 // parseReason names the failure of jwt.ParseWithClaims for the log. The
@@ -174,13 +202,13 @@ func parseReason(err error) string {
 // reject logs the reason, never the token or its claims, and returns
 // ErrInvalidToken.
 func reject(reason string) error {
-	log.Printf("access: rejected token: %s", reason)
+	log.Printf("oidc: rejected token: %s", reason)
 	return ErrInvalidToken
 }
 
-// key returns the public key kid, fetching the keys when the cache has
-// expired or does not know kid.
-func (v *Verifier) key(kid string) (*rsa.PublicKey, error) {
+// key returns the public key kid, fetching the keys from keysURL when the
+// cache has expired or does not know kid.
+func (v *Verifier) key(kid, keysURL string) (*rsa.PublicKey, error) {
 	k, known, fresh := v.lookup(kid)
 	if known && fresh {
 		return k, nil
@@ -189,13 +217,13 @@ func (v *Verifier) key(kid string) (*rsa.PublicKey, error) {
 		// The cached key still verifies; refresh only if no other request is
 		// already fetching, and never wait for it.
 		if v.fetchMu.TryLock() {
-			v.refreshLocked("")
+			v.refreshLocked("", keysURL)
 			v.fetchMu.Unlock()
 		}
 	} else {
 		// Wait for a fetch in progress: it may bring kid.
 		v.fetchMu.Lock()
-		v.refreshLocked(kid)
+		v.refreshLocked(kid, keysURL)
 		v.fetchMu.Unlock()
 	}
 	v.mu.RLock()
@@ -218,11 +246,11 @@ func (v *Verifier) lookup(kid string) (*rsa.PublicKey, bool, bool) {
 	return k, ok, !v.fetchedAt.IsZero() && v.now().Sub(v.fetchedAt) < keysTTL
 }
 
-// refreshLocked fetches the keys unless the last attempt was less than
+// refreshLocked fetches the keys from keysURL unless the last attempt was less than
 // fetchInterval ago or, when kid is not empty, kid has meanwhile become
 // known. On success the cached keys are replaced as a whole; on failure they
 // are kept. fetchMu must be held.
-func (v *Verifier) refreshLocked(kid string) {
+func (v *Verifier) refreshLocked(kid, keysURL string) {
 	now := v.now()
 	if !v.attemptedAt.IsZero() && now.Sub(v.attemptedAt) < fetchInterval {
 		return
@@ -233,9 +261,9 @@ func (v *Verifier) refreshLocked(kid string) {
 		}
 	}
 	v.attemptedAt = now
-	keys, err := v.fetch()
+	keys, err := v.fetch(keysURL)
 	if err != nil {
-		log.Printf("access: fetch signing keys: %v", err)
+		log.Printf("oidc: fetch signing keys: %v", err)
 		return
 	}
 	v.mu.Lock()
@@ -254,20 +282,20 @@ type jwk struct {
 	E   string `json:"e"`
 }
 
-// fetch reads the JWKS of the application and returns its RS256 signing keys
+// fetch reads the JWKS at keysURL and returns its RS256 signing keys
 // of at least minRSABits by key ID. Keys that cannot be used are skipped; a
 // key ID that appears more than once is ambiguous and skipped as a whole.
-func (v *Verifier) fetch() (map[string]*rsa.PublicKey, error) {
+func (v *Verifier) fetch(keysURL string) (map[string]*rsa.PublicKey, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.keysURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, keysURL, nil)
 	if err != nil {
 		return nil, errors.New("cannot build the request")
 	}
 	req.Header.Set("Accept", "application/json")
 	res, err := v.client.Do(req)
 	if err != nil {
-		// The error names the URL, which carries only the client ID.
+		// The error names the URL, which is public provider metadata.
 		return nil, err
 	}
 	defer func() { _ = res.Body.Close() }()

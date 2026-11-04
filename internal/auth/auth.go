@@ -58,6 +58,37 @@ func Email(v string) (string, error) {
 	}
 	return v, nil
 }
+
+// allowAll is the ASTOVIA_ALLOWED_EMAILS entry that allows every address,
+// for a provider that itself restricts who can sign in.
+const allowAll = "*"
+
+// EmailAllowed reports whether the normalized address email may sign in
+// with allowlist, the entries of ASTOVIA_ALLOWED_EMAILS parsed by the
+// config. An entry that is exactly "*" allows every address; "*" inside an
+// entry is not a wildcard. An entry with "@" matches the whole address, any
+// other entry the domain exactly (subdomains do not match). An empty list
+// allows nobody.
+func EmailAllowed(email string, allowlist []string) bool {
+	email = strings.ToLower(email)
+	domain := email[strings.LastIndexByte(email, '@')+1:]
+	for _, entry := range allowlist {
+		if entry == allowAll {
+			return true
+		}
+	}
+	for _, entry := range allowlist {
+		if strings.Contains(entry, "@") {
+			if entry == email {
+				return true
+			}
+		} else if entry == domain {
+			return true
+		}
+	}
+	return false
+}
+
 func Password(v string) (string, error) {
 	if len(v) < 12 || len(v) > 72 {
 		return "", errors.New("password must contain 12–72 UTF-8 bytes")

@@ -363,28 +363,28 @@ function browser({ storage = true } = {}) {
   return { items, assigned };
 }
 
-test('the Access sign-in returns to the encoded path and query', async () => {
-  const { accessLoginURL } = await harness(async () => json({}, 401));
-  assert.equal(accessLoginURL('/', ''), '/auth/access/login?return_to=%2F');
-  assert.equal(accessLoginURL('/consent', '?request=a%2Fb&x=1'), '/auth/access/login?return_to=%2Fconsent%3Frequest%3Da%252Fb%26x%3D1');
-  assert.equal(accessLoginURL('/tasks/abc', ''), '/auth/access/login?return_to=%2Ftasks%2Fabc');
+test('the OIDC sign-in returns to the encoded path and query', async () => {
+  const { oidcLoginURL } = await harness(async () => json({}, 401));
+  assert.equal(oidcLoginURL('/', ''), '/auth/oidc/login?return_to=%2F');
+  assert.equal(oidcLoginURL('/consent', '?request=a%2Fb&x=1'), '/auth/oidc/login?return_to=%2Fconsent%3Frequest%3Da%252Fb%26x%3D1');
+  assert.equal(oidcLoginURL('/tasks/abc', ''), '/auth/oidc/login?return_to=%2Ftasks%2Fabc');
 });
 
-test('startAccessLogin marks the tab and leaves with location.assign', async () => {
+test('startOIDCLogin marks the tab and leaves with location.assign', async () => {
   const { items, assigned } = browser();
-  const { startAccessLogin } = await harness(async () => json({}, 401));
-  startAccessLogin('/settings', '?x=1');
-  assert.deepEqual(assigned, ['/auth/access/login?return_to=%2Fsettings%3Fx%3D1']);
-  assert.equal(items.get('astovia-access-login'), '1');
+  const { startOIDCLogin } = await harness(async () => json({}, 401));
+  startOIDCLogin('/settings', '?x=1');
+  assert.deepEqual(assigned, ['/auth/oidc/login?return_to=%2Fsettings%3Fx%3D1']);
+  assert.equal(items.get('astovia-oidc-login'), '1');
   // Without storage the sign-in still starts.
   const blocked = browser({ storage: false });
-  startAccessLogin('/', '');
-  assert.deepEqual(blocked.assigned, ['/auth/access/login?return_to=%2F']);
+  startOIDCLogin('/', '');
+  assert.deepEqual(blocked.assigned, ['/auth/oidc/login?return_to=%2F']);
 });
 
-test('the page after an Access sign-in tells the other tabs once', async () => {
+test('the page after an OIDC sign-in tells the other tabs once', async () => {
   const { items } = browser();
-  items.set('astovia-access-login', '1');
+  items.set('astovia-oidc-login', '1');
   const { auth, messages } = await harness(async (path) => {
     if (path === '/auth/refresh') return json(session);
     if (path === '/api/v1/me') return json(user);
@@ -394,15 +394,15 @@ test('the page after an Access sign-in tells the other tabs once', async () => {
   await until(() => messages.length === 1);
   assert.deepEqual(messages, ['session-changed']);
   assert.equal(auth.getSnapshot().status, 'authenticated');
-  assert.equal(items.has('astovia-access-login'), false);
+  assert.equal(items.has('astovia-oidc-login'), false);
 });
 
-test('a failed restore after an Access sign-in clears the mark without telling', async () => {
+test('a failed restore after an OIDC sign-in clears the mark without telling', async () => {
   const { items } = browser();
-  items.set('astovia-access-login', '1');
+  items.set('astovia-oidc-login', '1');
   const { auth, messages } = await harness(async () => json({}, 401));
   auth.initialize();
-  await until(() => auth.getSnapshot().status === 'anonymous' && !items.has('astovia-access-login'));
+  await until(() => auth.getSnapshot().status === 'anonymous' && !items.has('astovia-oidc-login'));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(messages, []);
 });
@@ -421,45 +421,8 @@ test('a page load without the mark tells nothing', async () => {
   assert.equal(items.size, 0);
 });
 
-test('logoutAccess leaves for Cloudflare only after the Astovia logout', async () => {
-  const logoutURL = 'https://example.cloudflareaccess.com/cdn-cgi/access/logout';
-  {
-    const { assigned } = browser();
-    const { auth, logoutAccess, messages } = await harness(async (path) => {
-      if (path === '/auth/login') return json(session);
-      if (path === '/api/v1/me') return json(user);
-      if (path === '/auth/logout') return new Response(null, { status: 204 });
-      return json({}, 404);
-    });
-    await auth.login('test-user@example.com', 'test-password');
-    await logoutAccess(logoutURL);
-    assert.equal(auth.getSnapshot().status, 'anonymous');
-    assert.deepEqual(assigned, [logoutURL]);
-    assert.equal(messages.at(-1), 'logout');
-  }
-  {
-    // A failed Astovia logout stays on the screen with its error.
-    const { assigned } = browser();
-    const { auth, logoutAccess } = await harness(async (path) => {
-      if (path === '/auth/login') return json(session);
-      if (path === '/api/v1/me') return json(user);
-      return json({}, 503);
-    });
-    await auth.login('test-user@example.com', 'test-password');
-    await logoutAccess(logoutURL);
-    assert.equal(auth.getSnapshot().status, 'authenticated');
-    assert.match(auth.getSnapshot().error, /ログアウトを完了できません/);
-    assert.deepEqual(assigned, []);
-  }
-  {
-    // Signed out, it leaves at once.
-    const { assigned } = browser();
-    const calls = [];
-    const { auth, logoutAccess } = await harness(async (path) => { calls.push(path); return json({}, 401); });
-    auth.initialize();
-    await until(() => auth.getSnapshot().status === 'anonymous');
-    await logoutAccess(logoutURL);
-    assert.deepEqual(assigned, [logoutURL]);
-    assert.deepEqual(calls, ['/auth/refresh']);
-  }
+test('no Access logout is exported', async () => {
+  const module = await harness(async () => json({}, 401));
+  assert.equal('logoutAccess' in module, false);
+  assert.equal('startAccessLogin' in module, false);
 });

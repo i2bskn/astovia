@@ -1,10 +1,10 @@
-// The server signs users in either with passwords or with Cloudflare Access
+// The server signs users in either with passwords or with OpenID Connect
 // (GET /auth/config). The screens read the mode before showing a sign-in
 // form; when it cannot be read they do not assume passwords.
 
 export type AuthConfig =
   | { mode: 'password' }
-  | { mode: 'cloudflare_access'; logoutURL: string };
+  | { mode: 'oidc' };
 
 export interface AuthConfigState {
   status: 'loading' | 'ready' | 'failed';
@@ -15,28 +15,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-// isAccessLogoutURL accepts only the logout URL of an Access team domain:
-// https://<team>.cloudflareaccess.com/cdn-cgi/access/logout.
-function isAccessLogoutURL(value: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return false;
-  }
-  return url.protocol === 'https:' && url.hostname.endsWith('.cloudflareaccess.com') && url.port === '' &&
-    url.username === '' && url.password === '' && url.pathname === '/cdn-cgi/access/logout' &&
-    url.search === '' && url.hash === '' && url.href === value;
-}
-
 // parseAuthConfig reads the body of /auth/config, or returns null when it is
 // not one of the two modes.
 export function parseAuthConfig(data: unknown): AuthConfig | null {
   if (!isRecord(data)) return null;
   if (data.mode === 'password') return { mode: 'password' };
-  if (data.mode === 'cloudflare_access' && typeof data.logout_url === 'string' && isAccessLogoutURL(data.logout_url)) {
-    return { mode: 'cloudflare_access', logoutURL: data.logout_url };
-  }
+  if (data.mode === 'oidc') return { mode: 'oidc' };
   return null;
 }
 
@@ -80,8 +64,10 @@ const failedMessage = 'ログインできませんでした。もう一度お試
 
 const signinMessages: Record<string, string> = {
   failed: failedMessage,
-  denied: 'Cloudflare Access でログインが許可されませんでした。許可されたアカウントでログインしているか確認してください。',
-  unavailable: 'Cloudflare に接続できませんでした。時間をおいて、もう一度お試しください。',
+  denied: 'ログインが許可されませんでした。別のアカウントで試すときは、ログインサービスからログアウトしてから、もう一度ログインしてください。',
+  not_allowed: 'このメールアドレスではログインできません。運用者に確認してください。別のアカウントで試すときは、ログインサービスからログアウトしてから、もう一度ログインしてください。',
+  email_not_verified: 'メールアドレスが確認済みでないため、ログインできません。ログインサービスでメールアドレスを確認してから、もう一度ログインしてください。',
+  unavailable: 'ログインサービスに接続できませんでした。しばらくしてから、もう一度お試しください。',
   disabled: 'このアカウントは無効化されています。この Astovia のオーナーに連絡してください。',
   return_too_long: 'ログイン後に元の画面に戻れませんでした。もう一度ログインしてから、元の画面を開き直してください。',
 };
