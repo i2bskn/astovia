@@ -26,7 +26,7 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は[「PostgreSQLを使用する」](https://astovia.dev/guides/native/#postgresqlを使用する)の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加、Chatwork連携の`chatwork_connections`テーブルの追加、メール連携の`gmail_accounts`・`google_auth_states`テーブルの追加、`action_items`の`importance`列の追加、AIの追加の指示の`ai_instructions`テーブルの追加、通知の送り先の`notification_channels`テーブルと`notifications`の`channel`列の追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加、Chatwork連携の`chatwork_connections`テーブルの追加、メール連携の`gmail_accounts`・`google_auth_states`テーブルの追加、`action_items`の`importance`列の追加、AIの追加の指示の`ai_instructions`テーブルの追加、通知の送り先の`notification_channels`テーブルと`notifications`の`channel`列の追加、`users`の`oidc_issuer`・`oidc_subject`列の追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -44,6 +44,37 @@ make user-create USER_EMAIL=alice@example.com
 ログインIDはメールアドレスです。作成したユーザーはオーナーになります。パスワードは画面に表示されない対話入力で設定します。`USER_EMAIL`はmakeのコマンドライン引数で指定してください。シェルの環境変数として設定した`USER_EMAIL`は使用せず、未指定時と同じく何も実行せずに失敗します。make経由で使える文字は英数字と`._%+@-`だけで、`@`を含まない値や3〜254文字に収まらない値も実行前に拒否します。それ以外の記号を含むアドレスは`astovia users ... --email`を直接使ってください。形式の検証はCLIが行います。
 
 ログインIDをメールアドレスに変更する前に作成したSQLiteのDBは、`users`表の列が異なるため起動時のスキーマ確認で失敗します。開発中のデータしか無い場合は、DBファイルを削除して`make migrate`で作り直し、`make user-create USER_EMAIL=...`でユーザーを作り直してください。自動移行は用意していません。旧DBに対して`make migrate`を実行すると、`username`列の削除と`email`列の追加の計画が表示されます。データが残らないため承認せず、DBファイルを作り直してください。
+
+OIDCでログインする構成（`ASTOVIA_AUTH_MODE=oidc`）では、最初のオーナーを`--no-password`でパスワードなしに作成します。初回のOIDCログインで、確認済みのメールアドレスが一致するユーザーにIDトークンの`iss`と`sub`が紐付きます。2回目以降は`iss`と`sub`だけで本人を特定します。makeのターゲットはないため、生のコマンドで実行します。
+
+```sh
+docker compose run --rm app go run ./cmd/astovia users create --email alice@example.com --no-password
+```
+
+IdP側の識別子が変わると、紐付け済みのユーザーはログインできなくなります。該当するのは、`ASTOVIA_OIDC_ISSUER`を変えた場合・クライアントIDごとに`sub`が変わるIdPでクライアントを作り直した場合・IdPでアカウントを作り直した場合です。Cloudflare Access for SaaSのissuerはクライアントIDを含むため、Accessのアプリケーションを作り直すと変わります。その場合は紐付けを解除し、次のログインで紐付け直します。
+
+```sh
+docker compose run --rm app go run ./cmd/astovia users unlink --email alice@example.com
+docker compose run --rm app go run ./cmd/astovia users unlink --all
+```
+
+解除したユーザーには、その時点の確認済みメールアドレスが一致する人が紐付きます。IdP側でメールアドレスが変わった人は紐付け直せません（Astoviaにメールアドレスを変える機能はありません）。以前のメールアドレスをIdPで別の人が使っている場合は、その人がそのユーザーに紐付きます。該当するユーザーは解除の前に無効化してください。`unlink`はセッション・APIトークン・MCPの接続を残すため、人を止める手段にはなりません。止めるときは`users disable`を使います。
+
+### v0.1.0から更新する場合（OIDC）
+
+`ASTOVIA_ALLOWED_EMAILS`は廃止しました。値が残っていると`serve`は起動せず、手順を表示して止まります（`users`のCLIは値が残っていても動きます）。ログインできる人はユーザー管理画面の招待で決まり、招待のない人は初回ログインで追加されません。
+
+v0.1.0では、許可リストから外した既存ユーザーもログインを止められていました。更新後は、無効化していない既存ユーザーは確認済みのメールアドレスの一致で紐付いてログインできます。元オーナーはオーナーとして戻ります。次の順に進めてください。
+
+1. スキーマを適用します（起動前に必要です。配布構成では`docker compose run --rm migrate`、PostgreSQLでは既存の手順のまま）。
+2. 許可リストから外して止めていた人を無効化します: `astovia users disable --email <address>`
+3. `ASTOVIA_ALLOWED_EMAILS`を消します。
+4. 最初のオーナーがいなければ、`astovia users create --email <address> --no-password`で作成します。
+5. 他の人をユーザー管理画面から招待します。
+
+CLIを実行しにくい構成では、更新する前（v0.1.0のうち）にユーザー管理画面で無効化しておいてください。v0.1.0で`ASTOVIA_ALLOWED_EMAILS`を空にして全員を止めていた構成では、起動エラーが出ないまま既存ユーザーがログインできるようになります。止めたい人を無効化してください。
+
+issuerがGoogle（`https://accounts.google.com`）の場合、`@gmail.com`以外のアドレスの初回ログインにはGoogle Workspaceの`hd`クレームが必要です。v0.1.0でログインしていた「独自ドメインのアドレスで作った個人のGoogleアカウント」は、更新後は紐付けられません。回避する設定はありません。
 
 ユーザー操作は`docker compose run --rm app go run ./cmd/astovia users ...`で、イメージ内の古いバイナリではなく現在のソースから実行します。そのため、CLIのコードを変更してもイメージの再ビルドは不要です。ユーザー操作CLIには署名鍵は不要ですが、Airから起動する`serve`では必須です。
 

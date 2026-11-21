@@ -1,11 +1,21 @@
 -- name: GetUserByEmail :one
-SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE email = sqlc.arg(email);
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE email = sqlc.arg(email);
 -- name: GetUserByID :one
-SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE id = sqlc.arg(id);
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE id = sqlc.arg(id);
 -- name: LockUserByID :one
-SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE id = sqlc.arg(id);
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE id = sqlc.arg(id);
 -- name: CreateUser :exec
-INSERT INTO users (id,email,password_hash,disabled,created_at,role) VALUES (?,?,?,0,?,?);
+INSERT INTO users (id,email,password_hash,disabled,created_at,role,oidc_issuer,oidc_subject)
+VALUES (sqlc.arg(id),sqlc.arg(email),sqlc.arg(password_hash),0,sqlc.arg(created_at),sqlc.arg(role),sqlc.arg(oidc_issuer),sqlc.arg(oidc_subject));
+-- name: GetUserByOIDC :one
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users
+WHERE oidc_issuer = sqlc.arg(oidc_issuer) AND oidc_subject = sqlc.arg(oidc_subject);
+-- name: SetUserOIDC :exec
+UPDATE users SET oidc_issuer = sqlc.arg(oidc_issuer), oidc_subject = sqlc.arg(oidc_subject) WHERE id = sqlc.arg(id);
+-- name: ClearUserOIDC :exec
+UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE id = sqlc.arg(id);
+-- name: ClearAllUserOIDC :exec
+UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE oidc_issuer IS NOT NULL OR oidc_subject IS NOT NULL;
 -- name: ResetPassword :exec
 UPDATE users SET password_hash = ? WHERE id = ?;
 -- name: DisableUser :exec
@@ -15,11 +25,11 @@ UPDATE users SET disabled = 0 WHERE id = sqlc.arg(id);
 -- name: SetUserRole :exec
 UPDATE users SET role = sqlc.arg(role) WHERE id = sqlc.arg(id);
 -- name: ListUsers :many
-SELECT id, email, password_hash, disabled, created_at, role FROM users ORDER BY created_at, id LIMIT sqlc.arg(page_size);
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users ORDER BY created_at, id LIMIT sqlc.arg(page_size);
 -- name: GetUsersByIDs :many
-SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE instr(',' || CAST(sqlc.arg(ids) AS TEXT) || ',', ',' || id || ',') > 0;
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE instr(',' || CAST(sqlc.arg(ids) AS TEXT) || ',', ',' || id || ',') > 0;
 -- name: LockUsersForOwnerChange :many
-SELECT id, email, password_hash, disabled, created_at, role FROM users
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users
 WHERE id = sqlc.arg(operator_id) OR id = sqlc.arg(target_id) OR (role = 'owner' AND disabled = 0)
 ORDER BY id;
 -- name: CreateSession :exec
@@ -511,6 +521,10 @@ VALUES (sqlc.arg(id),sqlc.arg(token_hash),sqlc.arg(email),sqlc.arg(role),sqlc.ar
 SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations WHERE token_hash = sqlc.arg(token_hash);
 -- name: LockInvitationByTokenHash :one
 SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations WHERE token_hash = sqlc.arg(token_hash);
+-- name: LockActiveInvitationsByEmail :many
+SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations
+WHERE email = sqlc.arg(email) AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > sqlc.arg(now)
+ORDER BY id;
 -- name: AcceptInvitation :execrows
 UPDATE invitations SET accepted_at = sqlc.arg(accepted_at), accepted_user_id = sqlc.arg(accepted_user_id)
 WHERE id = sqlc.arg(id) AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > sqlc.arg(now);

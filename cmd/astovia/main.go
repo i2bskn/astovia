@@ -46,7 +46,7 @@ func main() {
 func run(args []string) error {
 	users := len(args) > 0 && args[0] == "users"
 	if !users && len(args) > 0 && (len(args) != 1 || args[0] != "serve") {
-		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable/role --email ADDRESS [--password-stdin] [--role owner|member]]")
+		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable/role/unlink --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]")
 	}
 	c, e := config.Load(!users)
 	if e != nil {
@@ -176,28 +176,64 @@ func waitWorkers(wg *sync.WaitGroup, deadline time.Time) {
 		log.Print("background work did not stop in time")
 	}
 }
+// unlinkHelp is printed with the flags of users unlink.
+const unlinkHelp = `Usage: astovia users unlink (--email ADDRESS | --all)
+
+Clears the OpenID Connect identity (iss and sub) of one user or, with --all,
+of every user. Use it when the identities changed at the provider: the issuer
+(ASTOVIA_OIDC_ISSUER) changed, the OIDC client was created again at a provider
+whose sub depends on the client ID, or an account was created again.
+
+  - After unlinking, the next OIDC sign-in whose verified email address equals
+    the email address of the user links that user again.
+  - A user whose email address changed at the provider cannot be linked again:
+    Astovia cannot change the email address of a user.
+  - If another person now uses the former email address at the provider, that
+    person is linked to the user. Disable such users before unlinking.
+  - Sessions, API tokens and MCP connections are kept. unlink does not stop
+    anyone; use "astovia users disable" for that.
+
+`
+
 func account(ctx context.Context, s *store.Store, args []string, in io.Reader) error {
 	if len(args) < 1 {
-		return errors.New("users command requires create, reset-password, disable, enable, or role")
+		return errors.New("users command requires create, reset-password, disable, enable, role, or unlink")
 	}
 	op := args[0]
-	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" && op != "role" {
+	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" && op != "role" && op != "unlink" {
 		return errors.New("unknown users command")
 	}
 	f := flag.NewFlagSet(op, flag.ContinueOnError)
 	email := f.String("email", "", "email address")
 	stdin := f.Bool("password-stdin", false, "read password from stdin")
+	noPassword := f.Bool("no-password", false, "create a user without a password, who signs in only with OpenID Connect (create only)")
 	role := f.String("role", store.RoleOwner, "role of the new user, or the new role (owner or member)")
+	all := f.Bool("all", false, "unlink every user (unlink only)")
+	if op == "unlink" {
+		f.Usage = func() {
+			fmt.Fprint(f.Output(), unlinkHelp)
+			f.PrintDefaults()
+		}
+	}
 	if e := f.Parse(args[1:]); e != nil {
 		return e
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected arguments")
 	}
-	roleSet := false
-	f.Visit(func(fl *flag.Flag) { roleSet = roleSet || fl.Name == "role" })
+	roleSet, emailSet := false, false
+	f.Visit(func(fl *flag.Flag) {
+		roleSet = roleSet || fl.Name == "role"
+		emailSet = emailSet || fl.Name == "email"
+	})
 	if op != "create" && op != "role" && roleSet {
 		return errors.New(op + " does not accept --role")
+	}
+	if op != "create" && *noPassword {
+		return errors.New(op + " does not accept --no-password")
+	}
+	if op != "unlink" && *all {
+		return errors.New(op + " does not accept --all")
 	}
 	// role changes the role given; it never falls back to the default.
 	if op == "role" && !roleSet {
@@ -205,6 +241,34 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 	}
 	if !store.ValidRole(*role) {
 		return errors.New("role must be owner or member")
+	}
+	if op == "unlink" {
+		if *stdin {
+			return errors.New(op + " does not accept --password-stdin")
+		}
+		if *all == emailSet {
+			return errors.New("unlink requires exactly one of --email and --all")
+		}
+		// Unlinking keeps the sessions and tokens: it is not a way to stop a
+		// user.
+		var e error
+		if *all {
+			e = s.UnlinkAllOIDC(ctx)
+		} else {
+			var u string
+			if u, e = auth.Email(*email); e != nil {
+				return e
+			}
+			e = s.UnlinkOIDC(ctx, u)
+		}
+		if e != nil {
+			if errors.Is(e, store.ErrNotFound) {
+				return e
+			}
+			return errors.New("could not update user")
+		}
+		fmt.Println("User operation completed.")
+		return nil
 	}
 	u, e := auth.Email(*email)
 	if e != nil {
@@ -215,6 +279,13 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		if *stdin {
 			return errors.New(op + " does not accept --password-stdin")
 		}
+	} else if *noPassword {
+		if *stdin {
+			return errors.New("--no-password and --password-stdin cannot be used together")
+		}
+		// The user signs in only with OpenID Connect: the first sign-in with
+		// the verified email address links the identity.
+		hash = store.NoPasswordHash
 	} else {
 		p, e := readPassword(in, *stdin)
 		if e != nil {

@@ -289,6 +289,8 @@ type User struct {
 	Disabled     int64
 	CreatedAt    int64
 	Role         string
+	OidcIssuer   sql.NullString
+	OidcSubject  sql.NullString
 }
 
 type WebPushSubscription struct {

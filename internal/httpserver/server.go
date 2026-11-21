@@ -164,9 +164,6 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 	var rp relyingParty
 	if c.OIDC != nil {
 		rp = oidc.New(oidc.ClientConfig{Issuer: c.OIDC.Issuer, ClientID: c.OIDC.ClientID, ClientSecret: c.OIDC.Secret, RedirectURI: c.OIDC.RedirectURI})
-		if len(c.OIDC.AllowedEmails) == 0 {
-			log.Printf("oidc: ASTOVIA_ALLOWED_EMAILS is empty; nobody can sign in")
-		}
 	}
 	aiClient := ai.New()
 	if c.AIAllowPrivateEndpoints {
@@ -219,12 +216,13 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/api/v1/users", allow(http.MethodGet, s.requireOwner(http.HandlerFunc(s.handleListUsers))))
 	mux.Handle("/api/v1/users/{id}", allow(http.MethodPatch, s.requireOwner(requireJSON(http.HandlerFunc(s.handlePatchUser)))))
 	// The password reset link takes no body, so no content type is required.
-	// Issuing links is password sign-in only; listing and revoking the
-	// invitations is not, so that old ones can be cleaned up.
+	// Issuing password reset links is password sign-in only. Invitations are
+	// created, listed and revoked in both modes: with OIDC an invitation
+	// admits its email address at the first sign-in instead of giving a link.
 	mux.Handle("/api/v1/users/{id}/password-resets", allow(http.MethodPost, s.requireOwner(s.passwordAuth(http.HandlerFunc(s.handleCreatePasswordReset)))))
 	mux.Handle("/api/v1/invitations", allowMethods(map[string]http.Handler{
 		http.MethodGet:  s.requireOwner(http.HandlerFunc(s.handleListInvitations)),
-		http.MethodPost: s.requireOwner(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleCreateInvitation)))),
+		http.MethodPost: s.requireOwner(requireJSON(http.HandlerFunc(s.handleCreateInvitation))),
 	}))
 	mux.Handle("/api/v1/invitations/{id}", allow(http.MethodDelete, s.requireOwner(http.HandlerFunc(s.handleDeleteInvitation))))
 	mux.Handle("/api/v1/action-items", allowMethods(map[string]http.Handler{

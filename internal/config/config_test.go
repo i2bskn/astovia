@@ -137,11 +137,10 @@ func TestOIDCClient(t *testing.T) {
 	const secret = "s3cr3t:with+special/chars%~"
 	const issuer, id = "https://accounts.example.com", "client/id+1"
 
-	// Unset, empty or password: password sign-in. ASTOVIA_ALLOWED_EMAILS and
-	// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED are ignored, even when invalid.
+	// Unset, empty or password: password sign-in.
+	// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED is ignored, even when invalid.
 	for _, mode := range []string{"", "password", " Password "} {
 		setOIDC(t, mode, "", "", "")
-		t.Setenv("ASTOVIA_ALLOWED_EMAILS", "*")
 		t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "1")
 		t.Setenv("ASTOVIA_PUBLIC_URL", "http://localhost:8080")
 		if c, e := Load(true); e != nil || c.OIDC != nil {
@@ -175,14 +174,12 @@ func TestOIDCClient(t *testing.T) {
 	// All set; the CLI reads them too. The issuer is kept as it is.
 	for _, requireSecret := range []bool{true, false} {
 		setOIDC(t, " OIDC ", issuer+"/", id, secret)
-		t.Setenv("ASTOVIA_ALLOWED_EMAILS", " Alice@Example.com, ,example.org,,* ")
 		c, e := Load(requireSecret)
 		want := OIDCClient{
 			Issuer:               issuer + "/",
 			ClientID:             id,
 			Secret:               secret,
 			RedirectURI:          "https://astovia.example.com/auth/oidc/callback",
-			AllowedEmails:        []string{"alice@example.com", "example.org", "*"},
 			RequireEmailVerified: true,
 		}
 		if e != nil || c.OIDC == nil || !reflect.DeepEqual(*c.OIDC, want) {
@@ -190,10 +187,9 @@ func TestOIDCClient(t *testing.T) {
 		}
 	}
 	// Ports, IP literals and paths are allowed in the issuer.
-	t.Setenv("ASTOVIA_ALLOWED_EMAILS", "")
 	for _, v := range []string{"https://keycloak.internal:8443/realms/astovia", "https://10.0.0.1/realms/x/", "https://[2001:db8::1]:8443", "https://example.cloudflareaccess.com/cdn-cgi/access/sso/oidc/abc"} {
 		setOIDC(t, "oidc", v, id, secret)
-		if c, e := Load(false); e != nil || c.OIDC == nil || c.OIDC.Issuer != v || len(c.OIDC.AllowedEmails) != 0 || c.OIDC.AllowedEmails == nil {
+		if c, e := Load(false); e != nil || c.OIDC == nil || c.OIDC.Issuer != v {
 			t.Fatalf("%s: %+v %v", v, c.OIDC, e)
 		}
 	}
@@ -298,20 +294,68 @@ func TestLegacyAccessVariables(t *testing.T) {
 	}
 }
 
-func TestParseAllowedEmails(t *testing.T) {
-	for _, tc := range []struct {
-		in   string
-		want []string
-	}{
-		{"", []string{}},
-		{" , ,", []string{}},
-		{"Alice@Example.com", []string{"alice@example.com"}},
-		{" example.com , *,bob@x.test ", []string{"example.com", "*", "bob@x.test"}},
-		{"*@example.com", []string{"*@example.com"}},
-	} {
-		if got := ParseAllowedEmails(tc.in); !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("%q: %v", tc.in, got)
+// ASTOVIA_ALLOWED_EMAILS of earlier releases stops the server, whatever the
+// mode, and tells the operator what to do first. The users commands ignore
+// it, so that users can be disabled before it is removed.
+func TestAllowedEmailsVariable(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://astovia.example.com")
+	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	const value = "mallory@example.org"
+	for _, mode := range []string{"", "password", "oidc"} {
+		setOIDC(t, mode, "", "", "")
+		if mode == "oidc" {
+			setOIDC(t, mode, "https://accounts.example.com", "id", "secret")
 		}
+		for _, v := range []string{value, "*", " example.org , " + value, "x"} {
+			t.Setenv("ASTOVIA_ALLOWED_EMAILS", v)
+			_, e := Load(true)
+			if e == nil || e.Error() != allowedEmailsError {
+				t.Fatalf("%q %q: %v", mode, v, e)
+			}
+			if strings.Contains(e.Error(), value) {
+				t.Fatalf("error contains the value: %v", e)
+			}
+			// The users commands load the configuration without the secret.
+			if c, e := Load(false); e != nil || (c.OIDC != nil) != (mode == "oidc") {
+				t.Fatalf("%q %q for the CLI: %+v %v", mode, v, c.OIDC, e)
+			}
+		}
+		// Empty or blank is not set.
+		for _, v := range []string{"", " ", " \t "} {
+			t.Setenv("ASTOVIA_ALLOWED_EMAILS", v)
+			for _, requireSecret := range []bool{true, false} {
+				if c, e := Load(requireSecret); e != nil || (c.OIDC != nil) != (mode == "oidc") {
+					t.Fatalf("%q %q: %+v %v", mode, v, c.OIDC, e)
+				}
+			}
+		}
+	}
+	// The steps are in the order the operator takes them.
+	last := -1
+	for _, step := range []string{"astovia users disable --email <address>", "remove ASTOVIA_ALLOWED_EMAILS", "astovia users create --email <address> --no-password", "invite"} {
+		i := strings.Index(allowedEmailsError, step)
+		if i <= last {
+			t.Fatalf("%q is missing or out of order: %s", step, allowedEmailsError)
+		}
+		last = i
+	}
+
+	// The Cloudflare Access variables are reported first.
+	setOIDC(t, "", "", "", "")
+	t.Setenv("ASTOVIA_ALLOWED_EMAILS", value)
+	t.Setenv("ASTOVIA_ACCESS_CLIENT_ID", "legacy")
+	if _, e := Load(true); e == nil || e.Error() != legacyAccessError {
+		t.Fatal(e)
+	}
+	// It comes before the other checks of the sign-in mode.
+	setOIDC(t, "unknown", "", "", "")
+	if _, e := Load(true); e == nil || e.Error() != allowedEmailsError {
+		t.Fatal(e)
+	}
+	if strings.Contains(legacyAccessError, "ASTOVIA_ALLOWED_EMAILS") || !strings.Contains(legacyAccessError, "invitation") {
+		t.Fatal(legacyAccessError)
 	}
 }
 

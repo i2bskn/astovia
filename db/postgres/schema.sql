@@ -14,10 +14,14 @@ CREATE TABLE "users" (
   "disabled" bigint NOT NULL,
   "created_at" bigint NOT NULL,
   "role" text NOT NULL DEFAULT 'owner',
+  "oidc_issuer" text NULL,
+  "oidc_subject" text NULL,
   PRIMARY KEY ("id")
 );
 -- Create index "users_email_key" to table: "users"
 CREATE UNIQUE INDEX "users_email_key" ON "users" ("email");
+-- Create index "users_oidc_identity_key" to table: "users"
+CREATE UNIQUE INDEX "users_oidc_identity_key" ON "users" ("oidc_issuer", "oidc_subject");
 -- Create "action_items" table
 CREATE TABLE "action_items" (
   "id" text NOT NULL,

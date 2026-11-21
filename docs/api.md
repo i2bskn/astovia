@@ -49,7 +49,7 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 | `PATCH /api/v1/users/{id}` | 本文`{role}`か`{disabled}`のどちらか1つで変更し、変更後のユーザーを返す。今と同じ値なら何もせず200。最後の有効なオーナーをメンバーにすると409`last_owner`、自分の無効化は409`self`、存在しないユーザーは404 |
 | `POST /api/v1/users/{id}/password-resets` | パスワード再設定リンクを発行し201`{url, expires_at}`を返す（本文なし）。`url`は一度だけ返す。無効化されたユーザーは409`user_disabled` |
 | `GET /api/v1/invitations` | 有効な招待の一覧`{invitations: [{id, email, role, created_at, expires_at, invited_by_email}]}`（新しい順、200件まで） |
-| `POST /api/v1/invitations` | 本文`{email, role}`で招待を作成し201`{id, email, role, created_at, expires_at, url}`を返す。`url`は一度だけ返す。同じメールアドレスのユーザーがいれば（無効化中も含め）409`email_taken` |
+| `POST /api/v1/invitations` | 本文`{email, role}`で招待を作成し201`{id, email, role, created_at, expires_at, url}`を返す。`url`は一度だけ返す。同じメールアドレスのユーザーがいれば（無効化中も含め）409`email_taken`。OIDCでログインする構成（`ASTOVIA_AUTH_MODE=oidc`）では`url`のない201`{id, email, role, created_at, expires_at}`を返す。招待したメールアドレスの人は、確認済みのメールアドレスが一致する初回のOIDCログインでユーザーとして追加される |
 | `DELETE /api/v1/invitations/{id}` | 有効な招待を取り消し204を返す。無い・既に無効な招待は404 |
 | `GET /api/v1/action-items` | 本人の対応事項の一覧。クエリは`status`（`open`／`candidate`／`done`／`dismissed`）、`limit`（1〜100、既定50）、`cursor`、`auto`（`true`のみ。自動で処理したもの（自動で完了・対象外にしたもの）だけを処理の新しい順に返す。カーソルは`auto`の有無で別物で、混ぜると400）、`parent_id`（その親の子タスクを作成日時の古い順に100件まで返す。ページングはなく、他のクエリと併用すると400。存在しない・他のユーザーの親は空の一覧）、`view`（`top`のみ。親を持たない対応事項と、親と違う状態の子タスクだけを返す。`status`を省略した場合は親を持たない対応事項だけ。並びとカーソルは`view`なしと同じで、`auto`・`parent_id`と併用すると400）。`{items, next_cursor}`を返す |
 | `POST /api/v1/action-items` | 対応事項を作成し201と`Location`を返す。本文は`{content, status?, note?, due_at?, refs?, parent_id?, importance?}` |

@@ -91,7 +91,7 @@ func TestUsersCommand(t *testing.T) {
 				{"disable with password-stdin", []string{"disable", "--email", "alice@example.com", "--password-stdin"}, "disable does not accept --password-stdin"},
 				{"extra arguments", []string{"create", "--email", "alice@example.com", "extra"}, "unexpected arguments"},
 				{"unknown subcommand", []string{"rename", "--email", "alice@example.com"}, "unknown users command"},
-				{"no subcommand", nil, "users command requires create, reset-password, disable, enable, or role"},
+				{"no subcommand", nil, "users command requires create, reset-password, disable, enable, role, or unlink"},
 				{"username flag", []string{"create", "--username", "alice@example.com", "--password-stdin"}, "flag provided but not defined: -username"},
 				{"invalid email on create", []string{"create", "--email", "alice", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
 				{"invalid email on reset-password", []string{"reset-password", "--email", "alice@", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
@@ -108,6 +108,14 @@ func TestUsersCommand(t *testing.T) {
 				{"invalid role on role", []string{"role", "--email", "alice@example.com", "--role", "admin"}, "role must be owner or member"},
 				{"empty role on role", []string{"role", "--email", "alice@example.com", "--role="}, "role must be owner or member"},
 				{"invalid email on role", []string{"role", "--email", "alice", "--role", "member"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"no-password with password-stdin", []string{"create", "--email", "bob@example.com", "--no-password", "--password-stdin"}, "--no-password and --password-stdin cannot be used together"},
+				{"no-password on reset-password", []string{"reset-password", "--email", "alice@example.com", "--password-stdin", "--no-password"}, "reset-password does not accept --no-password"},
+				{"no-password on disable", []string{"disable", "--email", "alice@example.com", "--no-password"}, "disable does not accept --no-password"},
+				{"no-password on enable", []string{"enable", "--email", "alice@example.com", "--no-password"}, "enable does not accept --no-password"},
+				{"no-password on role", []string{"role", "--email", "alice@example.com", "--role", "member", "--no-password"}, "role does not accept --no-password"},
+				{"all on create", []string{"create", "--email", "bob@example.com", "--password-stdin", "--all"}, "create does not accept --all"},
+				{"all on disable", []string{"disable", "--email", "alice@example.com", "--all"}, "disable does not accept --all"},
+				{"all on role", []string{"role", "--email", "alice@example.com", "--role", "member", "--all"}, "role does not accept --all"},
 			} {
 				if err = call("correct-password-123\n", tc.args...); err == nil || err.Error() != tc.want {
 					t.Fatalf("%s: got %v, want %q", tc.name, err, tc.want)
@@ -174,7 +182,7 @@ func TestUsersCommand(t *testing.T) {
 func TestRunUsage(t *testing.T) {
 	for _, args := range [][]string{{"serve", "x"}, {"foo"}} {
 		err := run(args)
-		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable/role --email ADDRESS [--password-stdin] [--role owner|member]]" {
+		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable/role/unlink --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]" {
 			t.Fatalf("%q: got %v", args, err)
 		}
 	}
@@ -266,6 +274,131 @@ func TestUsersRoleCommand(t *testing.T) {
 			}
 			if u, err := s.UserByEmail(ctx, "alice@example.com"); err != nil || u.Disabled == 0 {
 				t.Fatalf("%+v %v", u, err)
+			}
+		})
+	}
+}
+
+func TestUsersNoPasswordAndUnlink(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := testutil.Database(t, driver)
+			a, err := auth.New(s, make([]byte, 32), "http://localhost:8080")
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := func(args ...string) error {
+				t.Helper()
+				// No password is read: the input is empty.
+				return account(ctx, s, args, strings.NewReader(""))
+			}
+			user := func(email string) store.User {
+				t.Helper()
+				u, err := s.UserByEmail(ctx, email)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return u
+			}
+			link := func(email, subject string) {
+				t.Helper()
+				if _, _, err := s.LinkOIDCUser(ctx, "https://idp.example.com", subject, email, store.User{}, time.Now().Unix()); err != nil {
+					t.Fatalf("link %s: %v", email, err)
+				}
+			}
+			linked := func(email string) bool {
+				t.Helper()
+				u := user(email)
+				if u.OidcIssuer.Valid != u.OidcSubject.Valid {
+					t.Fatalf("%s: half an identity: %+v", email, u)
+				}
+				return u.OidcSubject.Valid
+			}
+
+			// create --no-password makes a user that no password signs in,
+			// an owner unless --role says otherwise, and not linked yet.
+			if err = call("create", "--email", "Alice@Example.com", "--no-password"); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err = call("create", "--email", "bob@example.com", "--no-password", "--role", "member"); err != nil {
+				t.Fatalf("create a member: %v", err)
+			}
+			for email, role := range map[string]string{"alice@example.com": store.RoleOwner, "bob@example.com": store.RoleMember} {
+				if u := user(email); u.PasswordHash != store.NoPasswordHash || u.Role != role || u.Disabled != 0 || linked(email) {
+					t.Fatalf("%s: %+v", email, u)
+				}
+			}
+			for _, password := range []string{store.NoPasswordHash, "correct-password-123", ""} {
+				if _, err = a.Login(ctx, "alice@example.com", password); !errors.Is(err, store.ErrUnauthorized) {
+					t.Fatalf("password %q: %v", password, err)
+				}
+			}
+			if err = call("create", "--email", "alice@example.com", "--no-password"); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("duplicate create: %v", err)
+			}
+
+			link("alice@example.com", "sub-alice")
+			link("bob@example.com", "sub-bob")
+			alice := user("alice@example.com")
+			session, err := a.LoginUser(ctx, alice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tc := range []struct {
+				name string
+				args []string
+				want string
+			}{
+				{"neither email nor all", []string{"unlink"}, "unlink requires exactly one of --email and --all"},
+				{"email and all", []string{"unlink", "--email", "alice@example.com", "--all"}, "unlink requires exactly one of --email and --all"},
+				{"role", []string{"unlink", "--email", "alice@example.com", "--role", "owner"}, "unlink does not accept --role"},
+				{"password-stdin", []string{"unlink", "--email", "alice@example.com", "--password-stdin"}, "unlink does not accept --password-stdin"},
+				{"no-password", []string{"unlink", "--email", "alice@example.com", "--no-password"}, "unlink does not accept --no-password"},
+				{"all with role", []string{"unlink", "--all", "--role", "owner"}, "unlink does not accept --role"},
+				{"invalid email", []string{"unlink", "--email", "alice"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"empty email", []string{"unlink", "--email", ""}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"extra arguments", []string{"unlink", "--all", "extra"}, "unexpected arguments"},
+			} {
+				if err = call(tc.args...); err == nil || err.Error() != tc.want {
+					t.Fatalf("%s: got %v, want %q", tc.name, err, tc.want)
+				}
+			}
+			if err = call("unlink", "--email", "missing@example.com"); !errors.Is(err, store.ErrNotFound) || err.Error() != "user not found" {
+				t.Fatalf("missing user: %v", err)
+			}
+			if !linked("alice@example.com") || !linked("bob@example.com") {
+				t.Fatal("rejected commands unlinked a user")
+			}
+
+			// unlink --email clears one user, twice without an error, and
+			// keeps the session, the role and the password hash.
+			for range 2 {
+				if err = call("unlink", "--email", "Alice@Example.com"); err != nil {
+					t.Fatalf("unlink: %v", err)
+				}
+			}
+			if linked("alice@example.com") || !linked("bob@example.com") {
+				t.Fatal("unlink --email")
+			}
+			if u := user("alice@example.com"); u.Role != alice.Role || u.PasswordHash != alice.PasswordHash || u.Disabled != 0 {
+				t.Fatalf("%+v", u)
+			}
+			if _, err = a.Refresh(ctx, session.Refresh); err != nil {
+				t.Fatalf("refresh after unlink: %v", err)
+			}
+			// Another identity links the user again.
+			link("alice@example.com", "sub-alice-2")
+
+			// unlink --all clears everyone; --email is not needed.
+			if err = call("unlink", "--all"); err != nil {
+				t.Fatalf("unlink --all: %v", err)
+			}
+			if linked("alice@example.com") || linked("bob@example.com") {
+				t.Fatal("unlink --all")
+			}
+			if err = call("unlink", "--all"); err != nil {
+				t.Fatalf("unlink --all again: %v", err)
 			}
 		})
 	}

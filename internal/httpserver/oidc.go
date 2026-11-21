@@ -50,12 +50,6 @@ const (
 	maxOIDCCookieValue = 3800
 	// maxCodeLength bounds the authorization code in bytes.
 	maxCodeLength = 2048
-	// oidcUserPassword is the password hash of the users created by an OIDC
-	// sign-in. It is not a bcrypt hash, so no password matches it if
-	// password sign-in is enabled again. The value is the one of the
-	// Cloudflare Access sign-in of earlier releases, kept so that the
-	// existing rows have the same value.
-	oidcUserPassword = "!access"
 	// signinErrorPath is the screen that explains a failed sign-in.
 	signinErrorPath = "/signin-error"
 )
@@ -69,6 +63,15 @@ const (
 	reasonReturnTooLong = "return_too_long"
 	reasonNotAllowed    = "not_allowed"
 	reasonNotVerified   = "email_not_verified"
+	reasonUnsupported   = "unsupported_account"
+)
+
+const (
+	// googleIssuer is the issuer of Google. Its hd claim tells a Google
+	// Workspace account from a personal account made with another address.
+	googleIssuer = "https://accounts.google.com"
+	// gmailDomain is the only domain whose Google accounts need no hd claim.
+	gmailDomain = "gmail.com"
 )
 
 // oidcState is the content of the sign-in cookie: the state, nonce and
@@ -95,12 +98,12 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, _ *http.Request) {
 }
 
 // passwordAuth rejects with 409 the endpoints of password sign-in, the
-// invitations and the password resets when OpenID Connect signs users in.
-// It runs before the rate limits, so that nothing is counted.
+// invitation links and the password resets when OpenID Connect signs users
+// in. It runs before the rate limits, so that nothing is counted.
 func (s *Server) passwordAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.OIDC != nil {
-			fail(w, 409, "password_auth_disabled", "Passwords, invitations and password resets are disabled; this server signs in with OpenID Connect.")
+			fail(w, 409, "password_auth_disabled", "Passwords, invitation links and password resets are disabled; this server signs in with OpenID Connect.")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -162,11 +165,11 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOIDCCallback finishes the sign-in: it checks the state, exchanges
-// the code, verifies the ID token, checks email_verified and the allowed
-// emails, finds or creates the user and starts a session with the refresh
-// cookie. Every failure redirects to /signin-error with a reason. Only the
-// reasons are logged, never the code, the state, the tokens, the cookies or
-// the email address.
+// the code, verifies the ID token, finds the user linked to its iss and sub
+// (oidcUser links or creates it on the first sign-in) and starts a session
+// with the refresh cookie. Every failure redirects to /signin-error with a
+// reason. Only the reasons are logged, never the code, the state, the
+// tokens, the cookies, the email address or the sub.
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// The sign-in cookie is single use: it is cleared whatever the outcome.
 	http.SetCookie(w, newOIDCCookie("", -1))
@@ -222,22 +225,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		failed(reasonFailed, "invalid ID token")
 		return
 	}
-	email, err := auth.Email(identity.Email)
-	if err != nil {
-		failed(reasonFailed, "malformed email claim")
-		return
-	}
-	if !emailVerified(identity.EmailVerified, s.cfg.OIDC.RequireEmailVerified) {
-		failed(reasonNotVerified, "email not verified")
-		return
-	}
-	// Checked on every sign-in, so that removing an address from the list
-	// stops existing users as well.
-	if !auth.EmailAllowed(email, s.cfg.OIDC.AllowedEmails) {
-		failed(reasonNotAllowed, "email not allowed")
-		return
-	}
-	u, reason, detail := s.oidcUser(r.Context(), email)
+	u, reason, detail := s.oidcUser(r.Context(), identity)
 	if reason != "" {
 		failed(reason, detail)
 		return
@@ -270,36 +258,86 @@ func emailVerified(claim *bool, require bool) bool {
 	return *claim
 }
 
-// oidcUser returns the enabled user of the verified, normalized email,
-// creating it as a member on the first sign-in. Otherwise it returns the
-// reason for /signin-error and the detail to log. A disabled user is never
-// enabled again here.
-func (s *Server) oidcUser(ctx context.Context, email string) (store.User, string, string) {
-	u, err := s.auth.Store.UserByEmail(ctx, email)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Who can sign in is decided by the provider and the allowed emails.
-		id, idErr := auth.Random()
-		if idErr != nil {
-			return store.User{}, reasonUnavailable, "cannot create a user ID"
-		}
-		u = store.User{ID: id, Email: email, PasswordHash: oidcUserPassword, CreatedAt: s.auth.Now().Unix(), Role: store.RoleMember}
-		err = s.auth.Store.CreateUser(ctx, u)
-		switch {
-		case err == nil:
-			log.Printf("auth: created user %s by an oidc sign-in", u.ID)
-		case errors.Is(err, store.ErrConflict):
-			// Created by a concurrent sign-in with the same address. Read it
-			// once.
-			u, err = s.auth.Store.UserByEmail(ctx, email)
-		default:
-			// The error of a failed insert is not logged: it may name the
-			// address.
-			return store.User{}, reasonUnavailable, "cannot create the user"
-		}
+// oidcUser returns the enabled user of the verified ID token. Otherwise it
+// returns the reason for /signin-error and the detail to log. A disabled
+// user is never enabled again here.
+//
+// A user linked to the iss and sub of the token is returned as it is: its
+// email address, email_verified, hd and the invitations are not looked at,
+// and the stored address is not updated. Without one this is the first
+// sign-in of the identity (firstOIDCUser).
+func (s *Server) oidcUser(ctx context.Context, identity oidc.Identity) (store.User, string, string) {
+	issuer := s.cfg.OIDC.Issuer
+	u, err := s.auth.Store.UserByOIDC(ctx, issuer, identity.Subject)
+	switch {
+	case err == nil && u.Disabled != 0:
+		return store.User{}, reasonDisabled, "user " + u.ID + " is disabled"
+	case err == nil:
+		return u, "", ""
+	case errors.Is(err, store.ErrInvalidOIDCIdentity):
+		return store.User{}, reasonFailed, "empty issuer or sub"
+	case !errors.Is(err, sql.ErrNoRows):
+		log.Printf("auth: oidc sign-in: find user: %v", err)
+		return store.User{}, reasonUnavailable, "database error while finding the user"
 	}
+	return s.firstOIDCUser(ctx, issuer, identity)
+}
+
+// firstOIDCUser handles the first sign-in of an identity: the verified
+// email address must belong to a user that is not linked yet or have an
+// active invitation, and the identity is linked to that user or to the one
+// created from the invitation. Nothing is created, linked or accepted when
+// a check fails.
+func (s *Server) firstOIDCUser(ctx context.Context, issuer string, identity oidc.Identity) (store.User, string, string) {
+	email, err := auth.Email(identity.Email)
+	if err != nil {
+		return store.User{}, reasonFailed, "malformed email claim"
+	}
+	if !emailVerified(identity.EmailVerified, s.cfg.OIDC.RequireEmailVerified) {
+		return store.User{}, reasonNotVerified, "email not verified"
+	}
+	// Google lets anyone make a personal account with an address of a domain
+	// they do not hold; only gmail.com addresses and Google Workspace
+	// accounts (hd) are taken as verified by Google.
+	if issuer == googleIssuer && email[strings.LastIndexByte(email, '@')+1:] != gmailDomain && identity.HostedDomain == "" {
+		return store.User{}, reasonUnsupported, "google account without hd"
+	}
+	id, err := auth.Random()
+	if err != nil {
+		return store.User{}, reasonUnavailable, "cannot create a user ID"
+	}
+	newUser := store.User{ID: id, PasswordHash: store.NoPasswordHash, CreatedAt: s.auth.Now().Unix()}
+	u, created, err := s.auth.Store.LinkOIDCUser(ctx, issuer, identity.Subject, email, newUser, s.auth.Now().Unix())
+	// The errors of LinkOIDCUser are not logged: they may name the address.
+	switch {
+	case err == nil && created:
+		log.Printf("auth: created user %s from an invitation by an oidc sign-in", u.ID)
+		return u, "", ""
+	case err == nil:
+		log.Printf("auth: linked user %s to an oidc identity", u.ID)
+		return u, "", ""
+	case errors.Is(err, store.ErrNotInvited):
+		return store.User{}, reasonNotAllowed, "not invited"
+	case errors.Is(err, store.ErrOIDCLinked):
+		return store.User{}, reasonNotAllowed, "email belongs to a user linked to another identity"
+	case errors.Is(err, store.ErrUserDisabled):
+		return store.User{}, reasonDisabled, "user is disabled"
+	case errors.Is(err, store.ErrInvalidOIDCIdentity):
+		return store.User{}, reasonFailed, "empty issuer or sub"
+	case !errors.Is(err, store.ErrConflict):
+		return store.User{}, reasonUnavailable, "cannot link or create the user"
+	}
+	return s.oidcUserAfterConflict(ctx, issuer, identity.Subject)
+}
+
+// oidcUserAfterConflict reads the identity once after a concurrent sign-in
+// linked or created a user first (store.ErrConflict). Without a user of the
+// identity, another identity took the email address.
+func (s *Server) oidcUserAfterConflict(ctx context.Context, issuer, subject string) (store.User, string, string) {
+	u, err := s.auth.Store.UserByOIDC(ctx, issuer, subject)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return store.User{}, reasonUnavailable, "cannot find the created user"
+		return store.User{}, reasonNotAllowed, "email was taken by another identity during the sign-in"
 	case err != nil:
 		log.Printf("auth: oidc sign-in: find user: %v", err)
 		return store.User{}, reasonUnavailable, "database error while finding the user"

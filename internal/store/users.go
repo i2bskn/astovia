@@ -38,6 +38,16 @@ var ErrUserDisabled = errors.New("user is disabled")
 var ErrInvitationInvalid = errors.New("invitation is invalid or expired")
 var ErrInvitationNotFound = errors.New("invitation not found")
 var ErrResetInvalid = errors.New("password reset link is invalid or expired")
+var ErrNotInvited = errors.New("no active invitation for the email")
+var ErrOIDCLinked = errors.New("user is linked to another OIDC identity")
+var ErrInvalidOIDCIdentity = errors.New("OIDC issuer and subject are required")
+
+// NoPasswordHash is the password hash of the users that sign in only with
+// OpenID Connect. It is not a bcrypt hash, so no password matches it if
+// password sign-in is enabled again. The value is the one of the Cloudflare
+// Access sign-in of earlier releases, kept so that the existing rows have the
+// same value.
+const NoPasswordHash = "!access"
 
 // ValidRole reports whether role is RoleOwner or RoleMember.
 func ValidRole(role string) bool { return role == RoleOwner || role == RoleMember }
@@ -434,6 +444,172 @@ func (s *Store) AcceptInvitation(ctx context.Context, hash string, u User, now i
 		return User{}, err
 	}
 	return u, nil
+}
+
+// UserByOIDC returns the user linked to the OIDC identity (issuer, subject),
+// enabled or not, or sql.ErrNoRows. An empty issuer or subject fails with
+// ErrInvalidOIDCIdentity without reading the database.
+func (s *Store) UserByOIDC(ctx context.Context, issuer, subject string) (User, error) {
+	if issuer == "" || subject == "" {
+		return User{}, ErrInvalidOIDCIdentity
+	}
+	return s.q.userByOIDC(ctx, issuer, subject)
+}
+
+// Stages of LinkOIDCUser at which a failed write is read again.
+const (
+	linkStageNone = iota
+	linkStageLink
+	linkStageCreate
+)
+
+// LinkOIDCUser links the OIDC identity (issuer, subject), which no user is
+// linked to yet, to the user of the verified, normalized email. It reports
+// whether the user was created.
+//
+// An existing user is linked when it is enabled (ErrUserDisabled) and not
+// linked to an identity yet (ErrOIDCLinked); its role and password hash are
+// kept, and the active invitations to the email are revoked. Without a user,
+// the newest active invitation to the email decides (ErrNotInvited when
+// there is none): the user is created with the invitation's email and role,
+// the invitation is marked accepted and the other active invitations to the
+// email are revoked. newUser gives the ID, password hash and creation time.
+//
+// A concurrent first sign-in that linked or created the user first fails
+// this one with ErrConflict; the caller reads the identity again. The
+// invitation rows are locked in ID order, so that concurrent sign-ins with
+// the same email wait for each other. An empty issuer or subject fails with
+// ErrInvalidOIDCIdentity without reading the database.
+//
+// As in AcceptInvitation, the state of the owner that issued the invitation
+// is not checked here.
+func (s *Store) LinkOIDCUser(ctx context.Context, issuer, subject, email string, newUser User, now int64) (User, bool, error) {
+	if issuer == "" || subject == "" {
+		return User{}, false, ErrInvalidOIDCIdentity
+	}
+	var out User
+	created := false
+	stage := linkStageNone
+	err := s.transaction(ctx, func(q queries) error {
+		u, e := q.userByEmail(ctx, email)
+		if e != nil && !errors.Is(e, sql.ErrNoRows) {
+			return e
+		}
+		if e == nil {
+			if u, e = q.lockUser(ctx, u.ID); e != nil {
+				return e
+			}
+			if u.Disabled != 0 {
+				return ErrUserDisabled
+			}
+			if u.OidcIssuer.Valid || u.OidcSubject.Valid {
+				// Linked while this sign-in waited for the lock.
+				if u.OidcIssuer.String == issuer && u.OidcSubject.String == subject {
+					return ErrConflict
+				}
+				return ErrOIDCLinked
+			}
+			stage = linkStageLink
+			if e = q.setUserOIDC(ctx, u.ID, issuer, subject); e != nil {
+				return e
+			}
+			if e = q.revokeEmailInvitations(ctx, email, now); e != nil {
+				return e
+			}
+			u.OidcIssuer = sql.NullString{String: issuer, Valid: true}
+			u.OidcSubject = sql.NullString{String: subject, Valid: true}
+			out = u
+			return nil
+		}
+		invs, e := q.lockActiveInvitationsByEmail(ctx, email, now)
+		if e != nil {
+			return e
+		}
+		if len(invs) == 0 {
+			// A concurrent sign-in may have used the invitation while this
+			// one waited for the lock.
+			if _, e = q.userByEmail(ctx, email); e == nil {
+				return ErrConflict
+			} else if !errors.Is(e, sql.ErrNoRows) {
+				return e
+			}
+			return ErrNotInvited
+		}
+		inv := invs[0]
+		for _, x := range invs[1:] {
+			if x.CreatedAt > inv.CreatedAt || (x.CreatedAt == inv.CreatedAt && x.ID > inv.ID) {
+				inv = x
+			}
+		}
+		if !ValidRole(inv.Role) {
+			return ErrNotInvited
+		}
+		u = newUser
+		u.Email, u.Role, u.Disabled = inv.Email, inv.Role, 0
+		u.OidcIssuer = sql.NullString{String: issuer, Valid: true}
+		u.OidcSubject = sql.NullString{String: subject, Valid: true}
+		stage = linkStageCreate
+		if e = q.createUser(ctx, u); e != nil {
+			return e
+		}
+		n, e := q.acceptInvitation(ctx, inv.ID, u.ID, now)
+		if e != nil {
+			return e
+		}
+		if n != 1 {
+			return ErrNotInvited
+		}
+		if e = q.revokeEmailInvitations(ctx, email, now); e != nil {
+			return e
+		}
+		out, created = u, true
+		return nil
+	})
+	if err == nil {
+		return out, created, nil
+	}
+	if errors.Is(err, ErrNotInvited) || errors.Is(err, ErrOIDCLinked) || errors.Is(err, ErrUserDisabled) || errors.Is(err, ErrConflict) {
+		return User{}, false, err
+	}
+	// A unique violation of users.email or users_oidc_identity_key by a
+	// concurrent sign-in is reported as ErrConflict, as in CreateUser.
+	if stage != linkStageNone {
+		if existing, e := s.q.userByOIDC(ctx, issuer, subject); e == nil && existing.ID != "" {
+			return User{}, false, ErrConflict
+		}
+	}
+	if stage == linkStageCreate {
+		if existing, e := s.q.userByEmail(ctx, email); e == nil && existing.ID != "" {
+			return User{}, false, ErrConflict
+		}
+	}
+	return User{}, false, err
+}
+
+// UnlinkOIDC clears the OIDC identity of the user with email, for the
+// operator's CLI, so that the next OIDC sign-in with the verified email links
+// the user again. A user that is not linked is left as it is. The sessions
+// and tokens are kept.
+func (s *Store) UnlinkOIDC(ctx context.Context, email string) error {
+	u, err := s.q.userByEmail(ctx, email)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	return s.transaction(ctx, func(q queries) error {
+		if _, e := q.lockUser(ctx, u.ID); e != nil {
+			return e
+		}
+		return q.clearUserOIDC(ctx, u.ID)
+	})
+}
+
+// UnlinkAllOIDC clears the OIDC identity of every user, for the operator's
+// CLI, with one UPDATE. The sessions and tokens are kept.
+func (s *Store) UnlinkAllOIDC(ctx context.Context) error {
+	return s.transaction(ctx, func(q queries) error { return q.clearAllUserOIDC(ctx) })
 }
 
 // PasswordResetUser returns the enabled user of the active password reset

@@ -24,14 +24,19 @@ export interface Invitation {
   invited_by_email: string;
 }
 
+// SigninMode is how the server signs users in (authConfig.ts).
+export type SigninMode = 'password' | 'oidc';
+
 // CreatedInvitation carries the link, which the server returns only once.
+// With single sign-on (OIDC) there is no link: the invitation admits its
+// email address at the first sign-in.
 export interface CreatedInvitation {
   id: string;
   email: string;
   role: Role;
   created_at: string;
   expires_at: string;
-  url: string;
+  url?: string;
 }
 
 // CreatedReset is a password reset link, returned only once.
@@ -82,12 +87,17 @@ function readInvitations(data: unknown): Invitation[] {
   return data.invitations;
 }
 
-function readCreatedInvitation(data: unknown): CreatedInvitation {
+// readCreatedInvitation checks the link with passwords. With OIDC the link
+// is not checked and never returned, even if the response has one.
+function readCreatedInvitation(data: unknown, mode: SigninMode): CreatedInvitation {
   if (!isRecord(data) || typeof data.id !== 'string' || typeof data.email !== 'string' || !isRole(data.role) ||
-    typeof data.created_at !== 'string' || typeof data.expires_at !== 'string' || !isLink(data.url, '/invite', 'inv_')) {
+    typeof data.created_at !== 'string' || typeof data.expires_at !== 'string') {
     throw new Error('Unexpected invitation response');
   }
-  return data as unknown as CreatedInvitation;
+  const invitation: CreatedInvitation = { id: data.id, email: data.email, role: data.role, created_at: data.created_at, expires_at: data.expires_at };
+  if (mode === 'oidc') return invitation;
+  if (!isLink(data.url, '/invite', 'inv_')) throw new Error('Unexpected invitation response');
+  return { ...invitation, url: data.url };
 }
 
 function readCreatedReset(data: unknown): CreatedReset {
@@ -113,8 +123,8 @@ export function createUsersClient(request: RequestFunction) {
     async listInvitations(): Promise<Invitation[]> {
       return readInvitations(await request<unknown>('/api/v1/invitations'));
     },
-    async createInvitation(email: string, role: Role): Promise<CreatedInvitation> {
-      return readCreatedInvitation(await request<unknown>('/api/v1/invitations', { method: 'POST', headers: json, body: JSON.stringify({ email, role }) }));
+    async createInvitation(email: string, role: Role, mode: SigninMode): Promise<CreatedInvitation> {
+      return readCreatedInvitation(await request<unknown>('/api/v1/invitations', { method: 'POST', headers: json, body: JSON.stringify({ email, role }) }), mode);
     },
     async revokeInvitation(id: string): Promise<void> {
       await request<unknown>(`/api/v1/invitations/${encodeURIComponent(id)}`, { method: 'DELETE' });

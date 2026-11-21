@@ -54,7 +54,7 @@ test('the client sends the requests and checks the responses', async () => {
   assert.equal((await client.updateUser('b', { disabled: false })).disabled, false);
   assert.match((await client.createPasswordReset('b')).url, /#pwr_/);
   assert.equal((await client.listInvitations())[0].invited_by_email, 'a@example.com');
-  assert.match((await client.createInvitation('c@example.com', 'member')).url, /#inv_/);
+  assert.match((await client.createInvitation('c@example.com', 'member', 'password')).url, /#inv_/);
   await client.revokeInvitation('i');
   assert.deepEqual(sent.map(([key, body]) => [key, body]), [
     ['GET /api/v1/users', null],
@@ -72,6 +72,27 @@ test('unexpected responses are rejected', async () => {
   await assert.rejects(reply({ users: [{ ...user('a', 'owner'), disabled: 0 }] }).listUsers());
   await assert.rejects(reply({ url: 'https://evil.test/reset-password#pwr_x', expires_at: 'x' }).createPasswordReset('a'));
   await assert.rejects(reply({ url: 'https://astovia.test/invite#inv_x', expires_at: 'x' }).createPasswordReset('a'));
-  await assert.rejects(reply({ id: 'i', email: 'c@example.com', role: 'member', created_at: 'x', expires_at: 'y', url: 'https://astovia.test/reset-password#pwr_x' }).createInvitation('c@example.com', 'member'));
+  await assert.rejects(reply({ id: 'i', email: 'c@example.com', role: 'member', created_at: 'x', expires_at: 'y', url: 'https://astovia.test/reset-password#pwr_x' }).createInvitation('c@example.com', 'member', 'password'));
+  // With passwords an invitation without a link is not one.
+  await assert.rejects(reply({ id: 'i', email: 'c@example.com', role: 'member', created_at: 'x', expires_at: 'y' }).createInvitation('c@example.com', 'member', 'password'));
+  await assert.rejects(reply({ id: 'i', email: 'c@example.com', role: 'admin', created_at: 'x', expires_at: 'y' }).createInvitation('c@example.com', 'member', 'oidc'));
+  await assert.rejects(reply({ id: 'i', email: 'c@example.com', role: 'member', created_at: 'x' }).createInvitation('c@example.com', 'member', 'oidc'));
   await assert.rejects(reply({ invitations: [{ id: 'i', email: 'c@example.com', role: 'member', created_at: 'x', expires_at: 'y' }] }).listInvitations());
+});
+
+test('with single sign-on an invitation has no link', async () => {
+  const created = { id: 'i', email: 'c@example.com', role: 'owner', created_at: 'x', expires_at: 'y' };
+  const sent = [];
+  const reply = (data) => createUsersClient(async (path, init) => {
+    sent.push([`${init?.method ?? 'GET'} ${path}`, init?.body ?? null]);
+    return data;
+  });
+  assert.deepEqual(await reply(created).createInvitation('c@example.com', 'owner', 'oidc'), created);
+  assert.deepEqual(sent, [['POST /api/v1/invitations', '{"email":"c@example.com","role":"owner"}']]);
+  // A link in the response is not checked and not kept, whatever it is.
+  for (const url of [`https://astovia.test/invite#inv_${'A'.repeat(43)}`, 'https://evil.test/invite#inv_x', 1, null]) {
+    const invitation = await reply({ ...created, url }).createInvitation('c@example.com', 'owner', 'oidc');
+    assert.deepEqual(invitation, created);
+    assert.equal('url' in invitation, false);
+  }
 });

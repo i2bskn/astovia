@@ -63,9 +63,6 @@ type OIDCClient struct {
 	ClientID, Secret string
 	// RedirectURI is the callback registered at the provider.
 	RedirectURI string
-	// AllowedEmails is the parsed ASTOVIA_ALLOWED_EMAILS: lower-case
-	// entries, each an address, a domain or "*". Empty allows nobody.
-	AllowedEmails []string
 	// RequireEmailVerified requires the email_verified claim to be true;
 	// when false, only a missing claim is accepted as well.
 	RequireEmailVerified bool
@@ -110,7 +107,7 @@ func Load(requireSecret bool) (Config, error) {
 	if c.Google, err = googleClient(c.PublicURL); err != nil {
 		return c, err
 	}
-	if c.OIDC, err = oidcClient(c.PublicURL); err != nil {
+	if c.OIDC, err = oidcClient(c.PublicURL, requireSecret); err != nil {
 		return c, err
 	}
 	if c.AIAllowPrivateEndpoints, err = boolEnv("ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS"); err != nil {
@@ -166,24 +163,33 @@ func validGoogleValue(v string) bool {
 // legacyAccessError replaces the Cloudflare Access variables of earlier
 // releases. They are not read as the new ones, so that there is only one
 // way to configure the sign-in.
-const legacyAccessError = "ASTOVIA_ACCESS_TEAM_DOMAIN, ASTOVIA_ACCESS_CLIENT_ID and ASTOVIA_ACCESS_CLIENT_SECRET were replaced: set ASTOVIA_AUTH_MODE=oidc, ASTOVIA_OIDC_ISSUER=https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client ID>, ASTOVIA_OIDC_CLIENT_ID, ASTOVIA_OIDC_CLIENT_SECRET, ASTOVIA_ALLOWED_EMAILS=* and ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED=false, change the redirect URL of the Access application to <ASTOVIA_PUBLIC_URL>/auth/oidc/callback, and remove the ASTOVIA_ACCESS_* variables"
+const legacyAccessError = "ASTOVIA_ACCESS_TEAM_DOMAIN, ASTOVIA_ACCESS_CLIENT_ID and ASTOVIA_ACCESS_CLIENT_SECRET were replaced: set ASTOVIA_AUTH_MODE=oidc, ASTOVIA_OIDC_ISSUER=https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client ID>, ASTOVIA_OIDC_CLIENT_ID, ASTOVIA_OIDC_CLIENT_SECRET and ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED=false, change the redirect URL of the Access application to <ASTOVIA_PUBLIC_URL>/auth/oidc/callback, and remove the ASTOVIA_ACCESS_* variables; new users need an invitation from the user management screen before their first sign-in"
+
+// allowedEmailsError replaces ASTOVIA_ALLOWED_EMAILS of earlier releases.
+// The steps are in the order the operator takes them: a user that the list
+// kept out can sign in again once the variable is gone, unless disabled.
+const allowedEmailsError = "ASTOVIA_ALLOWED_EMAILS was removed: who can sign in is now decided by the invitations of the user management screen, and existing users that are not disabled can sign in. First, disable every user you kept out by leaving them off the list with `astovia users disable --email <address>`; otherwise they can sign in again. Then remove ASTOVIA_ALLOWED_EMAILS, create the first owner with `astovia users create --email <address> --no-password` if there is none yet, and invite the other people from the user management screen"
 
 // oidcClient reads the sign-in mode and, with ASTOVIA_AUTH_MODE=oidc, the
 // OIDC client. Password sign-in returns nil. The Cloudflare Access
 // variables of earlier releases are an error, so that a migration that is
 // left half done does not fall back to passwords silently; so are the
-// ASTOVIA_OIDC_* variables without ASTOVIA_AUTH_MODE=oidc. As with the
-// Google client, the issuer, the client ID and the secret are not trimmed:
-// surrounding spaces are rejected.
-func oidcClient(publicURL string) (*OIDCClient, error) {
+// ASTOVIA_OIDC_* variables without ASTOVIA_AUTH_MODE=oidc. A non-blank
+// ASTOVIA_ALLOWED_EMAILS is an error in either mode when serve is true; the
+// users commands (serve false) ignore it, so that the operator can disable
+// users before removing it. As with the Google client, the issuer, the
+// client ID and the secret are not trimmed: surrounding spaces are rejected.
+func oidcClient(publicURL string, serve bool) (*OIDCClient, error) {
 	if os.Getenv("ASTOVIA_ACCESS_TEAM_DOMAIN") != "" || os.Getenv("ASTOVIA_ACCESS_CLIENT_ID") != "" || os.Getenv("ASTOVIA_ACCESS_CLIENT_SECRET") != "" {
 		return nil, errors.New(legacyAccessError)
+	}
+	if serve && strings.TrimSpace(os.Getenv("ASTOVIA_ALLOWED_EMAILS")) != "" {
+		return nil, errors.New(allowedEmailsError)
 	}
 	issuer, id, secret := os.Getenv("ASTOVIA_OIDC_ISSUER"), os.Getenv("ASTOVIA_OIDC_CLIENT_ID"), os.Getenv("ASTOVIA_OIDC_CLIENT_SECRET")
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("ASTOVIA_AUTH_MODE"))) {
 	case "", AuthModePassword:
-		// ASTOVIA_ALLOWED_EMAILS and ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED are
-		// ignored with passwords.
+		// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED is ignored with passwords.
 		if issuer != "" || id != "" || secret != "" {
 			return nil, errors.New("ASTOVIA_OIDC_* is set but ASTOVIA_AUTH_MODE is not oidc; set ASTOVIA_AUTH_MODE=oidc or remove ASTOVIA_OIDC_*")
 		}
@@ -218,7 +224,7 @@ func oidcClient(publicURL string) (*OIDCClient, error) {
 	if !strings.HasPrefix(publicURL, "https://") {
 		return nil, errors.New("ASTOVIA_PUBLIC_URL must use https with ASTOVIA_AUTH_MODE=oidc")
 	}
-	return &OIDCClient{Issuer: issuer, ClientID: id, Secret: secret, RedirectURI: publicURL + OIDCCallbackPath, AllowedEmails: ParseAllowedEmails(os.Getenv("ASTOVIA_ALLOWED_EMAILS")), RequireEmailVerified: requireVerified}, nil
+	return &OIDCClient{Issuer: issuer, ClientID: id, Secret: secret, RedirectURI: publicURL + OIDCCallbackPath, RequireEmailVerified: requireVerified}, nil
 }
 
 // validOIDCIssuer accepts an absolute https URL of 1-2048 bytes with a host
@@ -256,19 +262,6 @@ func requireEmailVerified(v string) (bool, error) {
 		return false, nil
 	}
 	return false, errors.New("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED must be true or false")
-}
-
-// ParseAllowedEmails splits ASTOVIA_ALLOWED_EMAILS at commas into trimmed,
-// lower-case entries, dropping the empty ones. auth.EmailAllowed matches an
-// address against them.
-func ParseAllowedEmails(v string) []string {
-	out := []string{}
-	for _, entry := range strings.Split(v, ",") {
-		if entry = strings.ToLower(strings.TrimSpace(entry)); entry != "" {
-			out = append(out, entry)
-		}
-	}
-	return out
 }
 
 // validOIDCSecret accepts 1-1024 bytes of printable ASCII other than the

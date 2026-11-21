@@ -17,8 +17,11 @@ services:
       ASTOVIA_OIDC_ISSUER: ${ASTOVIA_OIDC_ISSUER:-}
       ASTOVIA_OIDC_CLIENT_ID: ${ASTOVIA_OIDC_CLIENT_ID:-}
       ASTOVIA_OIDC_CLIENT_SECRET: ${ASTOVIA_OIDC_CLIENT_SECRET:-}
-      ASTOVIA_ALLOWED_EMAILS: ${ASTOVIA_ALLOWED_EMAILS:-}
       ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED: ${ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED:-}
+      # ASTOVIA_ALLOWED_EMAILS was removed. It is passed only so that a value
+      # left in .env stops Astovia with instructions instead of being ignored
+      # silently.
+      ASTOVIA_ALLOWED_EMAILS: ${ASTOVIA_ALLOWED_EMAILS:-}
       # Passed only so that Astovia can detect the Cloudflare Access variables
       # of earlier releases and stop with migration instructions. Remove in
       # the next release.

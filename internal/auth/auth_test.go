@@ -638,29 +638,3 @@ func TestAccessJWTRequiresSessionOwner(t *testing.T) {
 		})
 	}
 }
-
-func TestEmailAllowed(t *testing.T) {
-	for _, tc := range []struct {
-		email     string
-		allowlist []string
-		want      bool
-	}{
-		{"alice@example.com", nil, false},
-		{"alice@example.com", []string{}, false},
-		{"alice@example.com", []string{"*"}, true},
-		{"alice@example.com", []string{"other.test", "*"}, true},
-		{"alice@example.com", []string{"alice@example.com"}, true},
-		{"alice@example.com", []string{"bob@example.com"}, false},
-		{"alice@example.com", []string{"example.com"}, true},
-		{"alice@sub.example.com", []string{"example.com"}, false},
-		{"alice@example.com", []string{"sub.example.com"}, false},
-		{"alice@example.com.evil.test", []string{"example.com"}, false},
-		{"alice@example.com", []string{"*@example.com"}, false},
-		{"alice@example.com", []string{"@example.com"}, false},
-		{"Alice@Example.com", []string{"alice@example.com"}, true},
-	} {
-		if got := EmailAllowed(tc.email, tc.allowlist); got != tc.want {
-			t.Errorf("%q %v: %v", tc.email, tc.allowlist, got)
-		}
-	}
-}

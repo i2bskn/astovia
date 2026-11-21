@@ -54,12 +54,15 @@ function LinkPanel({ title, url, note, onClose }: { title: string; url: string; 
   </div>;
 }
 
-function InviteSection({ onCreated }: { onCreated: () => void }) {
+// InviteSection registers an invitation. With passwords it shows the link
+// to hand over; with single sign-on (oidc) there is no link, and the invited
+// address is added at its first sign-in.
+function InviteSection({ oidc, onCreated }: { oidc: boolean; onCreated: () => void }) {
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<Role>('member');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [created, setCreated] = useState<{ email: string; url: string } | null>(null);
+  const [created, setCreated] = useState<{ email: string; url: string | null } | null>(null);
   const headingID = useId();
   const emailID = useId();
   const roleID = useId();
@@ -75,8 +78,8 @@ function InviteSection({ onCreated }: { onCreated: () => void }) {
     setError(null);
     setSubmitting(true);
     try {
-      const invitation = await client.createInvitation(email, role);
-      setCreated({ email: invitation.email, url: invitation.url });
+      const invitation = await client.createInvitation(email, role, oidc ? 'oidc' : 'password');
+      setCreated({ email: invitation.email, url: invitation.url ?? null });
       setEmail('');
       onCreated();
     } catch (failure) {
@@ -89,7 +92,10 @@ function InviteSection({ onCreated }: { onCreated: () => void }) {
 
   return <section className="action-panel settings-panel" id="invite" aria-labelledby={headingID}>
     <h2 id={headingID}>招待</h2>
-    <p className="intro"><Phrased text="招待するメールアドレスと権限を決めて、招待リンクを作ります。メールは送らないので、リンクをコピーして本人に渡してください。リンクを開いた人がパスワードを決めると、アカウントができます。" /></p>
+    {oidc
+      ? <p className="intro"><Phrased text="招待したメールアドレスの人だけが、初回ログイン時にユーザーとして追加されます。" /></p>
+      : <p className="intro"><Phrased text="招待するメールアドレスと権限を決めて、招待リンクを作ります。メールは送らないので、リンクをコピーして本人に渡してください。リンクを開いた人がパスワードを決めると、アカウントができます。" /></p>}
+    {created && created.url === null ? <p className="notice success" role="status">{created.email} を招待しました。本人がシングルサインオンでログインすると追加されます。招待は 7 日間有効です。</p> : null}
     <form className="action-form" onSubmit={(event) => { void submit(event); }} aria-busy={submitting} noValidate>
       <div className="field">
         <label htmlFor={emailID}>メールアドレス</label>
@@ -103,19 +109,9 @@ function InviteSection({ onCreated }: { onCreated: () => void }) {
         </select>
       </div>
       {error ? <p id={errorID} className="notice error" role="alert">{error}</p> : null}
-      <button className="button primary add-button" type="submit" disabled={submitting}>{submitting ? '作成中…' : '招待リンクを作成'}</button>
+      <button className="button primary add-button" type="submit" disabled={submitting}>{submitting ? (oidc ? '登録中…' : '作成中…') : (oidc ? '招待を登録' : '招待リンクを作成')}</button>
     </form>
-    {created ? <LinkPanel title={`${created.email} の招待リンク`} url={created.url} note="このリンクは 7 日間有効で、表示はこの 1 回だけです。" onClose={() => setCreated(null)} /> : null}
-  </section>;
-}
-
-// OIDCJoinSection replaces the invitations when single sign-on (OIDC) signs
-// users in: who can sign in is decided by the provider and the operator.
-function OIDCJoinSection() {
-  const headingID = useId();
-  return <section className="action-panel settings-panel" id="invite" aria-labelledby={headingID}>
-    <h2 id={headingID}>ユーザーの追加</h2>
-    <p className="intro"><Phrased text="ログインを許可された人は、初回ログイン時にメンバーとして追加されます。オーナーにするときは、追加された後に下の一覧で権限を変えてください。" /></p>
+    {created && created.url !== null ? <LinkPanel title={`${created.email} の招待リンク`} url={created.url} note="このリンクは 7 日間有効で、表示はこの 1 回だけです。" onClose={() => setCreated(null)} /> : null}
   </section>;
 }
 
@@ -253,7 +249,7 @@ function UsersSection({ userID, oidc, users, loading, loadError, onChanged }: {
   return <section className="action-panel settings-panel" id="users" aria-labelledby={headingID}>
     <h2 id={headingID}>ユーザー</h2>
     {oidc
-      ? <p className="intro"><Phrased text="権限の変更、ログインの停止（無効化）と再開ができます。タスクや連携はユーザーごとに別で、オーナーも通常の画面では他のユーザーのタスクを見られません。IdP や ASTOVIA_ALLOWED_EMAILS でログインを止めた人も、ここで無効にしてください。API トークンや AI クライアントの接続はシングルサインオンを通らないため、無効にするまで使えます。" /></p>
+      ? <p className="intro"><Phrased text="権限の変更、ログインの停止（無効化）と再開ができます。タスクや連携はユーザーごとに別で、オーナーも通常の画面では他のユーザーのタスクを見られません。IdP でログインを止めた人も、ここで無効にしてください。API トークンや AI クライアントの接続はシングルサインオンを通らないため、無効にするまで使えます。" /></p>
       : <p className="intro"><Phrased text="権限の変更、ログインの停止（無効化）と再開、パスワード再設定リンクの発行ができます。タスクや連携はユーザーごとに別で、オーナーも通常の画面では他のユーザーのタスクを見られません。ただし、パスワード再設定リンクを自分で開けば、そのユーザーとしてログインできます。リンクでパスワードを再設定したことは、本人の画面に 14 日間表示されます。" /></p>}
     {created ? <LinkPanel title={`${created.email} のパスワード再設定リンク`} url={created.url} note="このリンクは 24 時間有効で、表示はこの 1 回だけです。本人以外に渡さないでください。" onClose={() => setCreated(null)} /> : null}
     {error ? <p className="notice error" role="alert">{error}</p> : null}
@@ -327,7 +323,7 @@ export default function UserSettings({ userID }: { userID: string }) {
   }
 
   return <div className="settings-stack">
-    {oidc ? <OIDCJoinSection /> : <InviteSection onCreated={() => { void loadInvitations(); }} />}
+    <InviteSection oidc={oidc} onCreated={() => { void loadInvitations(); }} />
     <section className="action-panel settings-panel" id="invitations" aria-labelledby={invitationsHeadingID}>
       <h2 id={invitationsHeadingID}>有効な招待</h2>
       {invitationsError ? <p className="notice error" role="alert">{invitationsError}</p> : null}

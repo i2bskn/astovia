@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -31,22 +32,23 @@ const (
 	testOIDCClientID = "client-id"
 )
 
-// oidcConfig is the configuration of usersOrigin with OIDC. Every address
-// is allowed and email_verified is required.
+// oidcConfig is the configuration of usersOrigin with OIDC. email_verified
+// is required.
 func oidcConfig() config.Config {
 	return config.Config{PublicURL: usersOrigin, Secure: true, Secret: make([]byte, 32), OIDC: &config.OIDCClient{
 		Issuer:               testIssuer,
 		ClientID:             testOIDCClientID,
 		Secret:               "client-secret",
 		RedirectURI:          usersOrigin + config.OIDCCallbackPath,
-		AllowedEmails:        []string{"*"},
 		RequireEmailVerified: true,
 	}}
 }
 
 // fakeOIDC answers AuthorizationURL with the authorization endpoint of the
 // test issuer or authErr, Exchange with idToken or exchangeErr and Verify
-// with email and verified or verifyErr, and records the arguments.
+// with email, verified, the subject and hd or verifyErr, and records the
+// arguments. The subject is subject when set and otherwise derived from the
+// address, so that every address is another identity.
 type fakeOIDC struct {
 	mu          sync.Mutex
 	authErr     error
@@ -54,6 +56,8 @@ type fakeOIDC struct {
 	exchangeErr error
 	email       string
 	verified    *bool
+	subject     *string
+	hd          string
 	verifyErr   error
 
 	code, verifier string
@@ -106,13 +110,37 @@ func (f *fakeOIDC) Verify(_ context.Context, idToken, nonce string) (oidc.Identi
 	if f.verifyErr != nil {
 		return oidc.Identity{}, f.verifyErr
 	}
-	return oidc.Identity{Email: f.email, EmailVerified: f.verified}, nil
+	subject := defaultSubject(f.email)
+	if f.subject != nil {
+		subject = *f.subject
+	}
+	return oidc.Identity{Email: f.email, EmailVerified: f.verified, Subject: subject, HostedDomain: f.hd}, nil
+}
+
+// defaultSubject is the sub of the identity fakeOIDC gives to an address.
+func defaultSubject(email string) string {
+	return "sub:" + strings.ToLower(strings.TrimSpace(email))
 }
 
 func (f *fakeOIDC) set(email string, exchangeErr, verifyErr error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.email, f.exchangeErr, f.verifyErr = email, exchangeErr, verifyErr
+}
+
+// setSubject sets the sub claim whatever the address; nil derives it from
+// the address again.
+func (f *fakeOIDC) setSubject(subject *string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subject = subject
+}
+
+// setHD sets the hd claim: empty is absent.
+func (f *fakeOIDC) setHD(hd string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hd = hd
 }
 
 // setVerified sets the email_verified claim: nil is absent.
@@ -558,9 +586,22 @@ func testOIDCCallback(t *testing.T, driver string) {
 		})
 	}
 
-	// The first sign-in of an address creates a member that no password
-	// matches; the next sign-in finds it.
+	// alice was linked to the identity of the first sign-in; her role and
+	// her password hash stayed.
+	if u, err := api.store.UserByOIDC(ctx, testIssuer, defaultSubject("alice@example.com")); err != nil || u.ID != "alice-id" || u.Role != store.RoleOwner || u.PasswordHash == store.NoPasswordHash {
+		t.Fatalf("%+v %v", u, err)
+	}
+
+	// The first sign-in of an address that was not invited creates nobody.
 	rp.set(" Dave@Example.COM ", nil, nil)
+	st, value = valid()
+	expectSigninError(t, serve(t, h, callbackRequest(query(st, nil), value)), reasonNotAllowed)
+	if n := countUsers(); n != 2 {
+		t.Fatalf("users: %d", n)
+	}
+	// Once invited, it creates a member that no password matches; the next
+	// sign-in finds it.
+	expect(t, api.do("POST", "/api/v1/invitations", ownerToken(t, api), `{"email":"dave@example.com","role":"member"}`), 201, "")
 	st, value = valid()
 	w = serve(t, h, callbackRequest(query(st, nil), value))
 	if w.Code != 303 || w.Header().Get("Location") != "/" {
@@ -568,11 +609,15 @@ func testOIDCCallback(t *testing.T, driver string) {
 	}
 	daveCookie := expectRefreshCookie(t, w)
 	dave, err := api.store.UserByEmail(ctx, "dave@example.com")
-	if err != nil || dave.Role != store.RoleMember || dave.Disabled != 0 || dave.PasswordHash != "!access" || dave.CreatedAt != api.now.Unix() {
+	if err != nil || dave.Role != store.RoleMember || dave.Disabled != 0 || dave.PasswordHash != "!access" || dave.CreatedAt != api.now.Unix() ||
+		dave.OidcIssuer != (sql.NullString{String: testIssuer, Valid: true}) || dave.OidcSubject != (sql.NullString{String: defaultSubject("dave@example.com"), Valid: true}) {
 		t.Fatalf("%+v %v", dave, err)
 	}
 	if got := refresh(daveCookie).User; got.ID != dave.ID || got.Role != store.RoleMember {
 		t.Fatalf("%+v", got)
+	}
+	if list, err := api.store.ListInvitations(ctx, api.now.Unix()); err != nil || len(list) != 0 {
+		t.Fatalf("the invitation is still active: %+v %v", list, err)
 	}
 	st, value = valid()
 	expectRefreshCookie(t, serve(t, h, callbackRequest(query(st, nil), value)))
@@ -608,7 +653,9 @@ func testOIDCCallback(t *testing.T, driver string) {
 		t.Fatalf("users: %d", n)
 	}
 
-	// Concurrent first sign-ins of one address create one user.
+	// Concurrent first sign-ins of one identity create one user, and all of
+	// them sign in.
+	expect(t, api.do("POST", "/api/v1/invitations", ownerToken(t, api), `{"email":"erin@example.com","role":"member"}`), 201, "")
 	rp.set("erin@example.com", nil, nil)
 	const concurrent = 8
 	codes := make(chan string, concurrent)
@@ -636,12 +683,12 @@ func testOIDCCallback(t *testing.T, driver string) {
 	}
 
 	// Nothing secret was logged.
-	for _, secret := range []string{"code-value-1", "id-token-value", "alice@example", "Alice@Example", "Dave@Example", "dave@example", "carol@example", "erin@example", "not an address", st.State, st.Nonce, st.Verifier, cookie.Value, session} {
+	for _, secret := range []string{"code-value-1", "id-token-value", "alice@example", "Alice@Example", "Dave@Example", "dave@example", "carol@example", "erin@example", "not an address", "sub:", st.State, st.Nonce, st.Verifier, cookie.Value, session} {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("log contains %q: %s", secret, logs.String())
 		}
 	}
-	for _, reason := range []string{"auth: oidc sign-in failed: state mismatch", "auth: oidc sign-in failed: malformed email claim", "auth: oidc sign-in failed: user carol-id is disabled", "auth: created user " + dave.ID + " by an oidc sign-in"} {
+	for _, reason := range []string{"auth: oidc sign-in failed: state mismatch", "auth: oidc sign-in failed: malformed email claim", "auth: oidc sign-in failed: user is disabled", "auth: oidc sign-in failed: not invited", "auth: linked user alice-id to an oidc identity", "auth: created user " + dave.ID + " from an invitation by an oidc sign-in"} {
 		if !strings.Contains(logs.String(), reason) {
 			t.Fatalf("log lacks %q: %s", reason, logs.String())
 		}
@@ -736,7 +783,6 @@ func testPasswordEndpointsWithOIDC(t *testing.T, driver string) {
 	disabled(serve(t, api.handler, r))
 
 	token := ownerToken(t, api)
-	disabled(api.do("POST", "/api/v1/invitations", token, `{"email":"erin@example.com","role":"member"}`))
 	disabled(api.do("POST", "/api/v1/users/carol-id/password-resets", token, ""))
 	// Signing in comes first.
 	expect(t, api.do("POST", "/api/v1/invitations", "", `{"email":"erin@example.com","role":"member"}`), 401, "unauthorized")
@@ -758,7 +804,7 @@ func testPasswordEndpointsWithOIDC(t *testing.T, driver string) {
 	}
 
 	// The invitations can still be listed and revoked, and the roles and the
-	// disabled flag changed.
+	// disabled flag changed. Creating them has its own test.
 	list := decodeJSON[invitationListResponse](t, api.do("GET", "/api/v1/invitations", token, ""))
 	if len(list.Invitations) != 1 || list.Invitations[0].ID != inv.ID {
 		t.Fatalf("%+v", list)
@@ -804,127 +850,641 @@ func TestOIDCLoginProviderUnavailable(t *testing.T) {
 	expectOIDCCookie(t, oidcLogin(t, api.handler, ""), oidcCookieMaxAge)
 }
 
-// email_verified and the allowed emails are checked after the ID token, on
-// every sign-in, before any user is found or created.
-func TestOIDCCallbackEmailChecks(t *testing.T) {
-	logs := captureLog(t)
-	api, rp := newOIDCAPI(t, "sqlite")
-	h := api.handler
-	ctx := context.Background()
-	callback := func() *httptest.ResponseRecorder {
-		t.Helper()
-		st, value := newOIDCState(t, api.srv, "/")
-		return serve(t, h, callbackRequest(url.Values{"code": {"c"}, "state": {st.State}}.Encode(), value))
-	}
-	countUsers := func() int {
-		t.Helper()
-		users, err := api.store.ListUsers(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return len(users)
-	}
-	yes, no := true, false
-	cfg := api.srv.cfg.OIDC
-	before := countUsers()
+// oidcSignIn is an OIDC server over a users API with helpers for the first
+// sign-in tests.
+type oidcSignIn struct {
+	t   *testing.T
+	api *usersAPI
+	rp  *fakeOIDC
+	raw *sql.DB
+}
 
-	// email_verified required.
-	for name, tc := range map[string]struct {
-		verified *bool
-		ok       bool
-	}{"true": {&yes, true}, "false": {&no, false}, "absent": {nil, false}} {
-		rp.setVerified(tc.verified)
-		for _, email := range []string{"alice@example.com", "new-" + name + "@example.com"} {
-			rp.set(email, nil, nil)
-			w := callback()
-			if tc.ok {
-				if w.Code != 303 || w.Header().Get("Location") != "/" {
-					t.Fatalf("%s %s: %d %v", name, email, w.Code, w.Header())
-				}
-				expectRefreshCookie(t, w)
-				continue
-			}
-			expectSigninError(t, w, reasonNotVerified)
-		}
+func newOIDCSignIn(t *testing.T, driver string) *oidcSignIn {
+	t.Helper()
+	api, rp := newOIDCAPI(t, driver)
+	name := driver
+	if driver == "postgres" {
+		name = "pgx"
 	}
-	if n := countUsers(); n != before+1 {
-		t.Fatalf("users: %d", n)
+	raw, err := sql.Open(name, api.dsn)
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = raw.Close() })
+	return &oidcSignIn{t: t, api: api, rp: rp, raw: raw}
+}
 
-	// Not required: an absent claim passes, false does not.
-	cfg.RequireEmailVerified = false
-	rp.set("alice@example.com", nil, nil)
-	rp.setVerified(nil)
-	expectRefreshCookie(t, callback())
-	rp.setVerified(&no)
-	expectSigninError(t, callback(), reasonNotVerified)
-	rp.setVerified(&yes)
-	expectRefreshCookie(t, callback())
+// callback finishes a new sign-in as email with the sub subject; an empty
+// subject is the one derived from the address.
+func (o *oidcSignIn) callback(email, subject string) *httptest.ResponseRecorder {
+	o.t.Helper()
+	o.rp.set(email, nil, nil)
+	if subject == "" {
+		o.rp.setSubject(nil)
+	} else {
+		o.rp.setSubject(&subject)
+	}
+	st, value := newOIDCState(o.t, o.api.srv, "/")
+	return serve(o.t, o.api.handler, callbackRequest(url.Values{"code": {"c"}, "state": {st.State}}.Encode(), value))
+}
 
-	// The allowed emails apply to existing users as well, after
-	// email_verified.
-	for _, tc := range []struct {
-		allowed []string
-		email   string
-		reason  string
-	}{
-		{[]string{}, "alice@example.com", reasonNotAllowed},
-		{nil, "alice@example.com", reasonNotAllowed},
-		{[]string{"example.org"}, "alice@example.com", reasonNotAllowed},
-		{[]string{"sub.example.com"}, "alice@example.com", reasonNotAllowed},
-		{[]string{"bob@example.com"}, "Alice@Example.com", reasonNotAllowed},
-		{[]string{"example.org"}, "frank@example.com", reasonNotAllowed},
-		{[]string{"alice@example.com"}, " Alice@Example.COM ", ""},
-		{[]string{"example.org", "example.com"}, "alice@example.com", ""},
-		{[]string{"*"}, "alice@example.com", ""},
-	} {
-		cfg.AllowedEmails = tc.allowed
-		rp.set(tc.email, nil, nil)
-		w := callback()
-		if tc.reason != "" {
-			expectSigninError(t, w, tc.reason)
-			continue
-		}
-		if w.Code != 303 || w.Header().Get("Location") != "/" {
-			t.Fatalf("%+v: %d %v", tc, w.Code, w.Header())
-		}
-		expectRefreshCookie(t, w)
+// signedIn checks that w is a successful sign-in and returns its user.
+func (o *oidcSignIn) signedIn(w *httptest.ResponseRecorder) userResponse {
+	o.t.Helper()
+	if w.Code != 303 || w.Header().Get("Location") != "/" {
+		o.t.Fatalf("%d %v", w.Code, w.Header())
 	}
-	if _, err := api.store.UserByEmail(ctx, "frank@example.com"); err == nil {
-		t.Fatal("frank was created")
-	}
-	// email_verified is checked first.
-	cfg.AllowedEmails = []string{}
-	rp.set("alice@example.com", nil, nil)
-	rp.setVerified(&no)
-	expectSigninError(t, callback(), reasonNotVerified)
-	if n := countUsers(); n != before+1 {
-		t.Fatalf("users: %d", n)
-	}
+	r := o.api.public("/auth/refresh", `{}`, expectRefreshCookie(o.t, w))
+	expect(o.t, r, 200, "")
+	return decodeJSON[authResponse](o.t, r).User
+}
 
-	if strings.Contains(strings.ToLower(logs.String()), "@example.com") {
-		t.Fatalf("log contains an address: %s", logs.String())
-	}
-	for _, reason := range []string{"auth: oidc sign-in failed: email not verified", "auth: oidc sign-in failed: email not allowed"} {
-		if !strings.Contains(logs.String(), reason) {
-			t.Fatalf("log lacks %q: %s", reason, logs.String())
-		}
+// invite registers an invitation as alice and returns its ID.
+func (o *oidcSignIn) invite(email, role string) string {
+	o.t.Helper()
+	w := o.api.do("POST", "/api/v1/invitations", ownerToken(o.t, o.api), `{"email":"`+email+`","role":"`+role+`"}`)
+	expect(o.t, w, 201, "")
+	return decodeJSON[createdInvitationResponse](o.t, w).ID
+}
+
+// exec runs a statement on the database, for states the API cannot make.
+func (o *oidcSignIn) exec(query string) {
+	o.t.Helper()
+	if _, err := o.raw.ExecContext(context.Background(), query); err != nil {
+		o.t.Fatal(err)
 	}
 }
 
-// An empty ASTOVIA_ALLOWED_EMAILS is logged once when the server is built.
-func TestOIDCAllowedEmailsEmptyLog(t *testing.T) {
-	logs := captureLog(t)
-	const warning = "oidc: ASTOVIA_ALLOWED_EMAILS is empty; nobody can sign in"
-	newServer(oidcConfig(), nil, fstest.MapFS{}, nil)
-	newServer(config.Config{PublicURL: usersOrigin}, nil, fstest.MapFS{}, nil)
-	if strings.Contains(logs.String(), warning) {
-		t.Fatalf("logged: %s", logs.String())
+func (o *oidcSignIn) user(email string) store.User {
+	o.t.Helper()
+	u, err := o.api.store.UserByEmail(context.Background(), email)
+	if err != nil {
+		o.t.Fatalf("%s: %v", email, err)
 	}
-	c := oidcConfig()
-	c.OIDC.AllowedEmails = []string{}
-	newServer(c, nil, fstest.MapFS{}, nil)
-	if strings.Count(logs.String(), warning) != 1 {
-		t.Fatalf("log: %s", logs.String())
+	return u
+}
+
+func (o *oidcSignIn) noUser(email string) {
+	o.t.Helper()
+	if _, err := o.api.store.UserByEmail(context.Background(), email); !errors.Is(err, sql.ErrNoRows) {
+		o.t.Fatalf("%s exists: %v", email, err)
 	}
+}
+
+// activeInvitations returns the IDs of the active invitations, newest
+// first.
+func (o *oidcSignIn) activeInvitations() []string {
+	o.t.Helper()
+	list, err := o.api.store.ListInvitations(context.Background(), o.api.now.Unix())
+	if err != nil {
+		o.t.Fatal(err)
+	}
+	ids := make([]string, 0, len(list))
+	for _, inv := range list {
+		ids = append(ids, inv.ID)
+	}
+	return ids
+}
+
+// identity returns the identity columns of the user of email.
+func (o *oidcSignIn) identity(email string) (string, string) {
+	o.t.Helper()
+	u := o.user(email)
+	if u.OidcIssuer.Valid != u.OidcSubject.Valid {
+		o.t.Fatalf("%s: half an identity: %+v", email, u)
+	}
+	return u.OidcIssuer.String, u.OidcSubject.String
+}
+
+func oidcDrivers(t *testing.T, fn func(t *testing.T, o *oidcSignIn)) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) { fn(t, newOIDCSignIn(t, driver)) })
+	}
+}
+
+// A linked user signs in by iss and sub alone: the email address,
+// email_verified, hd and the invitations are not looked at.
+func TestOIDCLinkedSignIn(t *testing.T) {
+	oidcDrivers(t, func(t *testing.T, o *oidcSignIn) {
+		logs := captureLog(t)
+		yes, no := true, false
+		// The first sign-in links alice, who was created with a password.
+		before := o.user("alice@example.com")
+		if got := o.signedIn(o.callback("alice@example.com", "subject-alice-1")); got.ID != "alice-id" || got.Role != store.RoleOwner {
+			t.Fatalf("%+v", got)
+		}
+		if issuer, sub := o.identity("alice@example.com"); issuer != testIssuer || sub != "subject-alice-1" {
+			t.Fatalf("identity %q %q", issuer, sub)
+		}
+		if after := o.user("alice@example.com"); after.PasswordHash != before.PasswordHash || after.Role != before.Role {
+			t.Fatalf("%+v", after)
+		}
+		inv := o.invite("dave@example.com", store.RoleOwner)
+
+		// Another address, the address of another user, an invited address
+		// and a malformed address all sign alice in.
+		for _, email := range []string{"alice@example.com", "renamed@example.org", "carol@example.com", "dave@example.com", "not an address", ""} {
+			for name, verified := range map[string]*bool{"true": &yes, "false": &no, "absent": nil} {
+				o.rp.setVerified(verified)
+				if got := o.signedIn(o.callback(email, "subject-alice-1")); got.ID != "alice-id" || got.Email != "alice@example.com" {
+					t.Fatalf("%q email_verified %s: %+v", email, name, got)
+				}
+			}
+		}
+		o.rp.setVerified(&yes)
+		// Nothing else changed: no user was created or linked, and the
+		// invitation is still active.
+		o.noUser("renamed@example.org")
+		o.noUser("dave@example.com")
+		if issuer, sub := o.identity("carol@example.com"); issuer != "" || sub != "" {
+			t.Fatalf("carol was linked: %q %q", issuer, sub)
+		}
+		if ids := o.activeInvitations(); len(ids) != 1 || ids[0] != inv {
+			t.Fatalf("invitations: %v", ids)
+		}
+		if users, err := o.api.store.ListUsers(context.Background()); err != nil || len(users) != 2 {
+			t.Fatalf("users: %d %v", len(users), err)
+		}
+
+		// The same sub at another issuer is not alice: her address belongs to
+		// a user linked to another identity.
+		o.api.srv.cfg.OIDC.Issuer = "https://other-idp.example.com"
+		expectSigninError(t, o.callback("alice@example.com", "subject-alice-1"), reasonNotAllowed)
+		o.api.srv.cfg.OIDC.Issuer = testIssuer
+		// Another sub with alice's address is not alice either.
+		expectSigninError(t, o.callback("alice@example.com", "subject-mallory"), reasonNotAllowed)
+		if issuer, sub := o.identity("alice@example.com"); issuer != testIssuer || sub != "subject-alice-1" {
+			t.Fatalf("identity %q %q", issuer, sub)
+		}
+		// The sub is compared as it is.
+		expectSigninError(t, o.callback("alice@example.com", "SUBJECT-ALICE-1"), reasonNotAllowed)
+		// An empty sub, which the verifier never returns, fails.
+		o.rp.setSubject(new(string))
+		st, value := newOIDCState(t, o.api.srv, "/")
+		expectSigninError(t, serve(t, o.api.handler, callbackRequest(url.Values{"code": {"c"}, "state": {st.State}}.Encode(), value)), reasonFailed)
+
+		// A linked user that is disabled gets no session.
+		expect(t, o.api.do("PATCH", "/api/v1/users/carol-id", ownerToken(t, o.api), `{"role":"owner"}`), 200, "")
+		o.signedIn(o.callback("carol@example.com", "subject-carol"))
+		carol, err := o.api.srv.auth.LoginUser(context.Background(), o.user("carol@example.com"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		expect(t, o.api.do("PATCH", "/api/v1/users/alice-id", carol.AccessToken, `{"disabled":true}`), 200, "")
+		expectSigninError(t, o.callback("alice@example.com", "subject-alice-1"), reasonDisabled)
+		if u := o.user("alice@example.com"); u.Disabled == 0 {
+			t.Fatal("alice was enabled")
+		}
+
+		for _, secret := range []string{"subject-alice", "subject-mallory", "subject-carol", "SUBJECT-ALICE", "@example"} {
+			if strings.Contains(logs.String(), secret) {
+				t.Fatalf("log contains %q: %s", secret, logs.String())
+			}
+		}
+		for _, line := range []string{"auth: linked user alice-id to an oidc identity", "auth: oidc sign-in failed: email belongs to a user linked to another identity", "auth: oidc sign-in failed: empty issuer or sub", "auth: oidc sign-in failed: user alice-id is disabled"} {
+			if !strings.Contains(logs.String(), line) {
+				t.Fatalf("log lacks %q: %s", line, logs.String())
+			}
+		}
+	})
+}
+
+// The first sign-in of an identity needs an active invitation to its
+// verified address, or a user of that address that is not linked yet.
+func TestOIDCFirstSignIn(t *testing.T) {
+	oidcDrivers(t, func(t *testing.T, o *oidcSignIn) {
+		logs := captureLog(t)
+		ctx := context.Background()
+		users := func() int {
+			t.Helper()
+			list, err := o.api.store.ListUsers(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return len(list)
+		}
+
+		// An invitation creates the user with its role.
+		for _, tc := range []struct{ name, role string }{{"dave", store.RoleMember}, {"erin", store.RoleOwner}} {
+			email := tc.name + "@example.com"
+			o.invite(email, tc.role)
+			got := o.signedIn(o.callback(" "+strings.ToUpper(email)+" ", "subject-"+tc.name))
+			u := o.user(email)
+			if got.ID != u.ID || got.Email != email || u.Role != tc.role || u.Disabled != 0 || u.PasswordHash != store.NoPasswordHash || u.CreatedAt != o.api.now.Unix() {
+				t.Fatalf("%s: %+v %+v", tc.name, got, u)
+			}
+			if issuer, sub := o.identity(email); issuer != testIssuer || sub != "subject-"+tc.name {
+				t.Fatalf("%s: identity %q %q", tc.name, issuer, sub)
+			}
+			if ids := o.activeInvitations(); len(ids) != 0 {
+				t.Fatalf("%s: the invitation is still active: %v", tc.name, ids)
+			}
+			// The next sign-in finds the user without an invitation.
+			if again := o.signedIn(o.callback(email, "subject-"+tc.name)); again.ID != u.ID {
+				t.Fatalf("%s again: %+v", tc.name, again)
+			}
+		}
+		if n := users(); n != 4 {
+			t.Fatalf("users: %d", n)
+		}
+
+		// Without an invitation, or with one that is revoked, expired or
+		// already used, nobody is created.
+		expectSigninError(t, o.callback("frank@example.com", ""), reasonNotAllowed)
+		revoked := o.invite("frank@example.com", store.RoleMember)
+		expect(t, o.api.do("DELETE", "/api/v1/invitations/"+revoked, ownerToken(t, o.api), ""), 204, "")
+		expectSigninError(t, o.callback("frank@example.com", ""), reasonNotAllowed)
+		used := o.invite("frank@example.com", store.RoleMember)
+		o.exec("UPDATE invitations SET accepted_at = 1 WHERE id = '" + used + "'")
+		expectSigninError(t, o.callback("frank@example.com", ""), reasonNotAllowed)
+		// An invitation whose role is not a role is not used either.
+		o.exec("UPDATE invitations SET accepted_at = NULL, role = 'admin' WHERE id = '" + used + "'")
+		expectSigninError(t, o.callback("frank@example.com", ""), reasonNotAllowed)
+		// expires_at == now is expired.
+		o.invite("frank@example.com", store.RoleMember)
+		start := *o.api.now
+		*o.api.now = start.Add(store.InvitationLifetime * time.Second)
+		expectSigninError(t, o.callback("frank@example.com", ""), reasonNotAllowed)
+		o.noUser("frank@example.com")
+		if n := users(); n != 4 {
+			t.Fatalf("users: %d", n)
+		}
+		// One second earlier it is still active.
+		*o.api.now = start.Add((store.InvitationLifetime - 1) * time.Second)
+		if got := o.signedIn(o.callback("frank@example.com", "")); got.Email != "frank@example.com" {
+			t.Fatalf("%+v", got)
+		}
+		*o.api.now = start
+
+		// Of two active invitations to one address the newest decides and the
+		// other is revoked. The API never leaves two, so they are inserted.
+		now := o.api.now.Unix()
+		for _, inv := range []struct {
+			id, role string
+			at       int64
+		}{{"gina-old", store.RoleOwner, now - 10}, {"gina-new", store.RoleMember, now - 5}} {
+			o.exec(fmt.Sprintf("INSERT INTO invitations (id,token_hash,email,role,invited_by,created_at,expires_at) VALUES ('%s','hash-%s','gina@example.com','%s','alice-id',%d,%d)", inv.id, inv.id, inv.role, inv.at, now+1000))
+		}
+		o.signedIn(o.callback("gina@example.com", ""))
+		if u := o.user("gina@example.com"); u.Role != store.RoleMember {
+			t.Fatalf("gina: %+v", u)
+		}
+		var oldRevoked, newAccepted bool
+		if err := o.raw.QueryRowContext(ctx, "SELECT (SELECT revoked_at IS NOT NULL AND accepted_at IS NULL FROM invitations WHERE id = 'gina-old'), (SELECT accepted_at IS NOT NULL AND revoked_at IS NULL FROM invitations WHERE id = 'gina-new')").Scan(&oldRevoked, &newAccepted); err != nil || !oldRevoked || !newAccepted {
+			t.Fatalf("gina's invitations: %v %v %v", oldRevoked, newAccepted, err)
+		}
+
+		// Users that are not linked yet are linked without an invitation,
+		// with or without a password; the role and the hash stay.
+		if err := o.api.store.CreateUser(ctx, store.User{ID: "hana-id", Email: "hana@example.com", PasswordHash: store.NoPasswordHash, CreatedAt: 3, Role: store.RoleOwner}); err != nil {
+			t.Fatal(err)
+		}
+		for _, email := range []string{"carol@example.com", "hana@example.com"} {
+			before := o.user(email)
+			if got := o.signedIn(o.callback(email, "")); got.ID != before.ID {
+				t.Fatalf("%s: %+v", email, got)
+			}
+			after := o.user(email)
+			if after.Role != before.Role || after.PasswordHash != before.PasswordHash || after.CreatedAt != before.CreatedAt {
+				t.Fatalf("%s: %+v", email, after)
+			}
+			if issuer, sub := o.identity(email); issuer != testIssuer || sub != defaultSubject(email) {
+				t.Fatalf("%s: identity %q %q", email, issuer, sub)
+			}
+		}
+
+		// An unlinked user that is disabled is not linked.
+		expect(t, o.api.do("PATCH", "/api/v1/users/"+o.user("carol@example.com").ID, ownerToken(t, o.api), `{"disabled":true}`), 200, "")
+		if err := o.api.store.UnlinkOIDC(ctx, "carol@example.com"); err != nil {
+			t.Fatal(err)
+		}
+		expectSigninError(t, o.callback("carol@example.com", ""), reasonDisabled)
+		if issuer, sub := o.identity("carol@example.com"); issuer != "" || sub != "" {
+			t.Fatalf("carol was linked: %q %q", issuer, sub)
+		}
+
+		if strings.Contains(strings.ToLower(logs.String()), "@example") || strings.Contains(logs.String(), "subject-") || strings.Contains(logs.String(), "sub:") {
+			t.Fatalf("log contains an address or a sub: %s", logs.String())
+		}
+		for _, line := range []string{"auth: oidc sign-in failed: not invited", "auth: oidc sign-in failed: user is disabled", "auth: created user " + o.user("dave@example.com").ID + " from an invitation by an oidc sign-in", "auth: linked user hana-id to an oidc identity"} {
+			if !strings.Contains(logs.String(), line) {
+				t.Fatalf("log lacks %q: %s", line, logs.String())
+			}
+		}
+	})
+}
+
+// email_verified is checked at the first sign-in of an identity, before a
+// user is created or linked and before an invitation is used.
+func TestOIDCFirstSignInEmailVerified(t *testing.T) {
+	oidcDrivers(t, func(t *testing.T, o *oidcSignIn) {
+		logs := captureLog(t)
+		yes, no := true, false
+		inv := o.invite("dave@example.com", store.RoleMember)
+		unchanged := func() {
+			t.Helper()
+			o.noUser("dave@example.com")
+			if ids := o.activeInvitations(); len(ids) != 1 || ids[0] != inv {
+				t.Fatalf("invitations: %v", ids)
+			}
+			if issuer, sub := o.identity("carol@example.com"); issuer != "" || sub != "" {
+				t.Fatalf("carol was linked: %q %q", issuer, sub)
+			}
+		}
+		// Required: false and absent are rejected, for an invited address
+		// and for an unlinked user.
+		for _, verified := range []*bool{&no, nil} {
+			o.rp.setVerified(verified)
+			for _, email := range []string{"dave@example.com", "carol@example.com"} {
+				expectSigninError(t, o.callback(email, ""), reasonNotVerified)
+			}
+			unchanged()
+		}
+		// Not required: absent passes, false does not.
+		o.api.srv.cfg.OIDC.RequireEmailVerified = false
+		o.rp.setVerified(&no)
+		for _, email := range []string{"dave@example.com", "carol@example.com"} {
+			expectSigninError(t, o.callback(email, ""), reasonNotVerified)
+		}
+		unchanged()
+		o.rp.setVerified(nil)
+		if got := o.signedIn(o.callback("dave@example.com", "")); got.Email != "dave@example.com" {
+			t.Fatalf("%+v", got)
+		}
+		if got := o.signedIn(o.callback("carol@example.com", "")); got.ID != "carol-id" {
+			t.Fatalf("%+v", got)
+		}
+		// Required again: true passes.
+		o.api.srv.cfg.OIDC.RequireEmailVerified = true
+		o.rp.setVerified(&yes)
+		o.invite("erin@example.com", store.RoleMember)
+		o.signedIn(o.callback("erin@example.com", ""))
+
+		if strings.Contains(strings.ToLower(logs.String()), "@example.com") {
+			t.Fatalf("log contains an address: %s", logs.String())
+		}
+		if !strings.Contains(logs.String(), "auth: oidc sign-in failed: email not verified") {
+			t.Fatalf("log: %s", logs.String())
+		}
+	})
+}
+
+// With Google as the issuer, the first sign-in of an address outside
+// gmail.com needs the hd claim of a Google Workspace account.
+func TestOIDCFirstSignInGoogle(t *testing.T) {
+	oidcDrivers(t, func(t *testing.T, o *oidcSignIn) {
+		logs := captureLog(t)
+		o.api.srv.cfg.OIDC.Issuer = "https://accounts.google.com"
+		for _, email := range []string{"dave@example.com", "erin@gmail.com", "frank@googlemail.com", "gina@example.org", "hana@sub.gmail.com"} {
+			o.invite(email, store.RoleMember)
+		}
+		invited := len(o.activeInvitations())
+		// Without hd: only gmail.com passes. An unlinked user is held to the
+		// same rule as an invited address.
+		for _, email := range []string{"dave@example.com", "frank@googlemail.com", "hana@sub.gmail.com", "carol@example.com"} {
+			expectSigninError(t, o.callback(email, ""), reasonUnsupported)
+		}
+		o.noUser("dave@example.com")
+		o.noUser("frank@googlemail.com")
+		if issuer, sub := o.identity("carol@example.com"); issuer != "" || sub != "" {
+			t.Fatalf("carol was linked: %q %q", issuer, sub)
+		}
+		if n := len(o.activeInvitations()); n != invited {
+			t.Fatalf("invitations: %d, want %d", n, invited)
+		}
+		if got := o.signedIn(o.callback("Erin@Gmail.com", "")); got.Email != "erin@gmail.com" {
+			t.Fatalf("%+v", got)
+		}
+		// With hd they pass; its value is not compared with the address.
+		o.rp.setHD("example.com")
+		for _, email := range []string{"dave@example.com", "gina@example.org", "carol@example.com"} {
+			if got := o.signedIn(o.callback(email, "")); got.Email != email {
+				t.Fatalf("%s: %+v", email, got)
+			}
+		}
+		if issuer, sub := o.identity("dave@example.com"); issuer != "https://accounts.google.com" || sub != defaultSubject("dave@example.com") {
+			t.Fatalf("identity %q %q", issuer, sub)
+		}
+		// A linked user signs in without hd.
+		o.rp.setHD("")
+		o.signedIn(o.callback("dave@example.com", ""))
+
+		// Any other issuer needs no hd, whatever it looks like.
+		for i, issuer := range []string{testIssuer, "https://accounts.google.com/", "https://accounts.google.com.example.com"} {
+			o.api.srv.cfg.OIDC.Issuer = issuer
+			email := fmt.Sprintf("other%d@example.com", i)
+			o.invite(email, store.RoleMember)
+			if got := o.signedIn(o.callback(email, "")); got.Email != email {
+				t.Fatalf("%s: %+v", issuer, got)
+			}
+		}
+		if !strings.Contains(logs.String(), "auth: oidc sign-in failed: google account without hd") || strings.Contains(strings.ToLower(logs.String()), "gmail") || strings.Contains(strings.ToLower(logs.String()), "@example") {
+			t.Fatalf("log: %s", logs.String())
+		}
+	})
+}
+
+// Concurrent first sign-ins of several identities with one address: one
+// gets the address and the others are not allowed.
+func TestOIDCFirstSignInConcurrency(t *testing.T) {
+	oidcDrivers(t, func(t *testing.T, o *oidcSignIn) {
+		ctx := context.Background()
+		const concurrent = 8
+		// race finishes one sign-in per subject at the same time, all with
+		// email, and returns how many signed in and how many were not
+		// allowed. The fake provider answers one identity at a time, so each
+		// request has its own.
+		race := func(email string, subjects []string) (int, int) {
+			t.Helper()
+			var wg sync.WaitGroup
+			results := make(chan string, len(subjects))
+			for _, subject := range subjects {
+				srv := newServer(oidcConfig(), o.api.srv.auth, fstest.MapFS{}, nil)
+				rp := newFakeOIDC()
+				rp.set(email, nil, nil)
+				rp.setSubject(&subject)
+				srv.rp = rp
+				st, value := newOIDCState(t, srv, "/")
+				h := srv.handler()
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					w := httptest.NewRecorder()
+					h.ServeHTTP(w, callbackRequest(url.Values{"code": {"c"}, "state": {st.State}}.Encode(), value))
+					c, _ := responseCookie(w, CookieName)
+					results <- fmt.Sprintf("%d %s %v", w.Code, w.Header().Get("Location"), c != nil)
+				}()
+			}
+			wg.Wait()
+			close(results)
+			ok, notAllowed := 0, 0
+			for got := range results {
+				switch got {
+				case "303 / true":
+					ok++
+				case "303 /signin-error?reason=not_allowed false":
+					notAllowed++
+				default:
+					t.Fatalf("%s: %s", email, got)
+				}
+			}
+			return ok, notAllowed
+		}
+		subjects := func(prefix string, same bool) []string {
+			out := make([]string, concurrent)
+			for i := range out {
+				out[i] = prefix
+				if !same {
+					out[i] = fmt.Sprintf("%s-%d", prefix, i)
+				}
+			}
+			return out
+		}
+		linkedSubjects := func(email string, candidates []string) int {
+			t.Helper()
+			_, sub := o.identity(email)
+			n := 0
+			for _, s := range candidates {
+				if s == sub {
+					n++
+				}
+			}
+			return n
+		}
+
+		// One identity, one invitation: everyone signs in as the one user.
+		o.invite("dave@example.com", store.RoleMember)
+		if ok, notAllowed := race("dave@example.com", subjects("subject-dave", true)); ok != concurrent || notAllowed != 0 {
+			t.Fatalf("same identity: %d signed in, %d not allowed", ok, notAllowed)
+		}
+		// Several identities, one invitation.
+		o.invite("erin@example.com", store.RoleMember)
+		erin := subjects("subject-erin", false)
+		if ok, notAllowed := race("erin@example.com", erin); ok != 1 || notAllowed != concurrent-1 {
+			t.Fatalf("invitation: %d signed in, %d not allowed", ok, notAllowed)
+		}
+		if linkedSubjects("erin@example.com", erin) != 1 {
+			t.Fatal("erin is linked to none of the identities")
+		}
+		// Several identities, one unlinked user.
+		carol := subjects("subject-carol", false)
+		if ok, notAllowed := race("carol@example.com", carol); ok != 1 || notAllowed != concurrent-1 {
+			t.Fatalf("unlinked user: %d signed in, %d not allowed", ok, notAllowed)
+		}
+		if linkedSubjects("carol@example.com", carol) != 1 {
+			t.Fatal("carol is linked to none of the identities")
+		}
+		if users, err := o.api.store.ListUsers(ctx); err != nil || len(users) != 4 {
+			t.Fatalf("users: %d %v", len(users), err)
+		}
+	})
+}
+
+// After store.ErrConflict the identity is read once: its user signs in, a
+// disabled one does not, and without a user another identity took the
+// address.
+func TestOIDCUserAfterConflict(t *testing.T) {
+	oidcDrivers(t, func(t *testing.T, o *oidcSignIn) {
+		logs := captureLog(t)
+		ctx := context.Background()
+		o.signedIn(o.callback("alice@example.com", "subject-alice"))
+		o.signedIn(o.callback("carol@example.com", "subject-carol"))
+		expect(t, o.api.do("PATCH", "/api/v1/users/carol-id", ownerToken(t, o.api), `{"disabled":true}`), 200, "")
+
+		if u, reason, _ := o.api.srv.oidcUserAfterConflict(ctx, testIssuer, "subject-alice"); reason != "" || u.ID != "alice-id" {
+			t.Fatalf("enabled: %+v %q", u, reason)
+		}
+		if u, reason, detail := o.api.srv.oidcUserAfterConflict(ctx, testIssuer, "subject-carol"); reason != reasonDisabled || u.ID != "" || detail != "user carol-id is disabled" {
+			t.Fatalf("disabled: %+v %q %q", u, reason, detail)
+		}
+		if u, reason, _ := o.api.srv.oidcUserAfterConflict(ctx, testIssuer, "subject-nobody"); reason != reasonNotAllowed || u.ID != "" {
+			t.Fatalf("no user: %+v %q", u, reason)
+		}
+		if err := o.api.store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if u, reason, detail := o.api.srv.oidcUserAfterConflict(ctx, testIssuer, "subject-alice"); reason != reasonUnavailable || u.ID != "" || strings.Contains(detail, "subject") {
+			t.Fatalf("database error: %+v %q %q", u, reason, detail)
+		}
+		if strings.Contains(logs.String(), "subject-") {
+			t.Fatalf("log contains a sub: %s", logs.String())
+		}
+	})
+}
+
+// An invitation issued while passwords were in use admits its address at
+// the first OIDC sign-in.
+func TestOIDCPasswordModeInvitation(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			password := newUsersAPI(t, driver)
+			alice, _ := password.login("alice@example.com", "correct-password-123")
+			w := password.do("POST", "/api/v1/invitations", alice, `{"email":"dave@example.com","role":"owner"}`)
+			expect(t, w, 201, "")
+			inv := decodeJSON[createdInvitationResponse](t, w)
+			token := fragmentToken(t, inv.URL, usersOrigin+"/invite#")
+
+			srv := newServer(oidcConfig(), password.srv.auth, fstest.MapFS{}, nil)
+			rp := newFakeOIDC()
+			srv.rp = rp
+			o := &oidcSignIn{t: t, api: &usersAPI{t: t, store: password.store, srv: srv, handler: srv.handler(), now: password.now}, rp: rp}
+			if got := o.signedIn(o.callback("dave@example.com", "")); got.Email != "dave@example.com" || got.Role != store.RoleOwner {
+				t.Fatalf("%+v", got)
+			}
+			if u := o.user("dave@example.com"); u.PasswordHash != store.NoPasswordHash {
+				t.Fatalf("%+v", u)
+			}
+			// The link is used up: back on passwords it creates nobody.
+			expect(t, password.public("/auth/invitations/accept", `{"token":"`+token+`","password":"dave-password-123"}`, ""), 404, "invitation_invalid")
+		})
+	}
+}
+
+// With OIDC an invitation is registered without a link.
+func TestOIDCInvitationsAPI(t *testing.T) {
+	oidcDrivers(t, func(t *testing.T, o *oidcSignIn) {
+		api := o.api
+		owner := ownerToken(t, api)
+		carol, err := api.srv.auth.LoginUser(context.Background(), o.user("carol@example.com"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := `{"email":" Dave@Example.com ","role":"member"}`
+		expect(t, api.do("POST", "/api/v1/invitations", "", body), 401, "unauthorized")
+		expect(t, api.do("POST", "/api/v1/invitations", carol.AccessToken, body), 403, "forbidden")
+		expect(t, api.do("POST", "/api/v1/invitations", owner, `{"email":"dave","role":"member"}`), 400, "invalid_request")
+		expect(t, api.do("POST", "/api/v1/invitations", owner, `{"email":"carol@example.com","role":"member"}`), 409, "email_taken")
+		if ids := o.activeInvitations(); len(ids) != 0 {
+			t.Fatalf("invitations: %v", ids)
+		}
+
+		w := api.do("POST", "/api/v1/invitations", owner, body)
+		expect(t, w, 201, "")
+		raw, keys := jsonKeys(t, w.Body.Bytes())
+		if strings.Join(keys, ",") != "created_at,email,expires_at,id,role" || string(raw["email"]) != `"dave@example.com"` || string(raw["role"]) != `"member"` {
+			t.Fatalf("%s", w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "/invite") {
+			t.Fatalf("the response has a link: %s", w.Body.String())
+		}
+		first := decodeJSON[createdInvitationResponse](t, w)
+		if first.ExpiresAt != formatTime(api.now.Unix()+store.InvitationLifetime) {
+			t.Fatalf("%+v", first)
+		}
+		// Inviting the address again replaces the invitation.
+		second := o.invite("dave@example.com", store.RoleOwner)
+		if ids := o.activeInvitations(); len(ids) != 1 || ids[0] != second || second == first.ID {
+			t.Fatalf("invitations: %v", ids)
+		}
+		// The list and the revocation work as with passwords.
+		list := decodeJSON[invitationListResponse](t, api.do("GET", "/api/v1/invitations", owner, ""))
+		if len(list.Invitations) != 1 || list.Invitations[0].ID != second || list.Invitations[0].Email != "dave@example.com" || list.Invitations[0].Role != store.RoleOwner {
+			t.Fatalf("%+v", list)
+		}
+		expect(t, api.do("DELETE", "/api/v1/invitations/"+second, owner, ""), 204, "")
+		expectSigninError(t, o.callback("dave@example.com", ""), reasonNotAllowed)
+		// The invitation links stay off.
+		expect(t, api.public("/auth/invitations/accept", `{"token":"`+strings.Repeat("a", 43)+`","password":"dave-password-123"}`, ""), 409, "password_auth_disabled")
+		expect(t, api.public("/auth/invitations/inspect", `{"token":"`+strings.Repeat("a", 43)+`"}`, ""), 409, "password_auth_disabled")
+	})
 }

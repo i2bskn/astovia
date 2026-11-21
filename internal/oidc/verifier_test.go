@@ -271,7 +271,7 @@ func TestVerify(t *testing.T) {
 		t.Fatalf("%q %v", email, err)
 	}
 	// A single audience may also be a string.
-	singleToken := rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"k1"}`, map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "email": "alice@example.com", "nonce": testNonce}, "")
+	singleToken := rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"k1"}`, map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "sub": "user-1", "email": "alice@example.com", "nonce": testNonce}, "")
 	singleToken = strings.TrimSuffix(singleToken, ".")
 	sig, err := jwt.SigningMethodRS256.Sign(singleToken, k1.priv)
 	if err != nil {
@@ -341,6 +341,7 @@ func TestVerify(t *testing.T) {
 		"nbf in the future":   mutate(func(cl *tokenClaims) { cl.NotBefore = jwt.NewNumericDate(c.now().Add(31 * time.Second)) }),
 		"iat in the future":   mutate(func(cl *tokenClaims) { cl.IssuedAt = jwt.NewNumericDate(c.now().Add(31 * time.Second)) }),
 		"no email":            mutate(func(cl *tokenClaims) { cl.Email = "" }),
+		"no sub":              mutate(func(cl *tokenClaims) { cl.Subject = "" }),
 		"other azp":           mutate(func(cl *tokenClaims) { cl.AZP = "other-client" }),
 		"exp in the past day": mutate(func(cl *tokenClaims) { cl.ExpiresAt = jwt.NewNumericDate(c.now().Add(-24 * time.Hour)) }),
 	} {
@@ -349,7 +350,7 @@ func TestVerify(t *testing.T) {
 		}
 	}
 	// A non-string email claim.
-	numberEmail := rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"k1"}`, map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "email": 1, "nonce": testNonce}, "")
+	numberEmail := rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"k1"}`, map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "sub": "user-1", "email": 1, "nonce": testNonce}, "")
 	numberEmail = strings.TrimSuffix(numberEmail, ".")
 	if sig, err = jwt.SigningMethodRS256.Sign(numberEmail, k1.priv); err != nil {
 		t.Fatal(err)
@@ -364,7 +365,6 @@ func TestVerify(t *testing.T) {
 		"nbf soon":      mutate(func(cl *tokenClaims) { cl.NotBefore = jwt.NewNumericDate(c.now().Add(29 * time.Second)) }),
 		"iat soon":      mutate(func(cl *tokenClaims) { cl.IssuedAt = jwt.NewNumericDate(c.now().Add(29 * time.Second)) }),
 		"no nbf or iat": mutate(func(cl *tokenClaims) { cl.NotBefore, cl.IssuedAt = nil, nil }),
-		"no sub":        mutate(func(cl *tokenClaims) { cl.Subject = "" }),
 	} {
 		if _, err := v.Verify(ctx, token, testNonce); err != nil {
 			t.Errorf("%s: %v", name, err)
@@ -396,7 +396,7 @@ func TestVerify(t *testing.T) {
 			t.Fatalf("log contains %q: %s", secret, logs.String())
 		}
 	}
-	for _, reason := range []string{"oidc: rejected token: bad nonce", "oidc: rejected token: crit header", "oidc: rejected token: missing kid", "oidc: rejected token: several audiences", "oidc: rejected token: bad issuer", "oidc: rejected token: expired", "oidc: rejected token: missing email", "oidc: rejected token: bad azp"} {
+	for _, reason := range []string{"oidc: rejected token: bad nonce", "oidc: rejected token: crit header", "oidc: rejected token: missing kid", "oidc: rejected token: several audiences", "oidc: rejected token: bad issuer", "oidc: rejected token: expired", "oidc: rejected token: missing email", "oidc: rejected token: missing sub", "oidc: rejected token: bad azp"} {
 		if !strings.Contains(logs.String(), reason) {
 			t.Fatalf("log lacks %q: %s", reason, logs.String())
 		}
@@ -710,7 +710,7 @@ func TestVerifyAuthorizedParty(t *testing.T) {
 		}
 	}
 	// An empty azp is present and not the client.
-	token := rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"k1"}`, map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "email": "alice@example.com", "nonce": testNonce, "azp": ""}, "")
+	token := rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"k1"}`, map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "sub": "user-1", "email": "alice@example.com", "nonce": testNonce, "azp": ""}, "")
 	token = strings.TrimSuffix(token, ".")
 	sig, err := jwt.SigningMethodRS256.Sign(token, k1.priv)
 	if err != nil {
@@ -731,7 +731,7 @@ func TestVerifyEmailVerified(t *testing.T) {
 	// or without it when raw is empty.
 	signRaw := func(raw string) string {
 		t.Helper()
-		claims := map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "email": "alice@example.com", "nonce": testNonce}
+		claims := map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "sub": "user-1", "email": "alice@example.com", "nonce": testNonce}
 		if raw != "" {
 			claims["email_verified"] = json.RawMessage(raw)
 		}
@@ -764,6 +764,96 @@ func TestVerifyEmailVerified(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("%q: %s, want %s", tc.raw, got, tc.want)
+		}
+	}
+}
+
+// signClaims signs the claims as JSON with k, for claims the typed ones
+// cannot express.
+func signClaims(t *testing.T, k testKey, claims map[string]any) string {
+	t.Helper()
+	token := strings.TrimSuffix(rawToken(t, `{"alg":"RS256","typ":"JWT","kid":"`+k.kid+`"}`, claims, ""), ".")
+	sig, err := jwt.SigningMethodRS256.Sign(token, k.priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token + "." + b64(sig)
+}
+
+// The sub claim is required: 1 to 255 bytes of printable ASCII, returned as
+// it is.
+func TestVerifySubject(t *testing.T) {
+	logs := captureLog(t)
+	k1 := newKey(t, "k1", 2048)
+	s := newJWKSServer(t, k1.jwk())
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	v := newVerifier(s, c)
+	ctx := context.Background()
+	claims := func(sub any) map[string]any {
+		m := map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "email": "alice@example.com", "nonce": testNonce}
+		if sub != nil {
+			m["sub"] = sub
+		}
+		return m
+	}
+	for _, sub := range []string{"1", "user-1", " Padded Sub ", "UPPER", "~!@#$%^&*()_+{}|:<>?", strings.Repeat("s", 255)} {
+		id, err := v.identity(ctx, signClaims(t, k1, claims(sub)), testNonce)
+		if err != nil || id.Subject != sub {
+			t.Errorf("%q: %+v %v", sub, id, err)
+		}
+	}
+	for name, sub := range map[string]any{
+		"absent":      nil,
+		"empty":       "",
+		"256 bytes":   strings.Repeat("s", 256),
+		"non-ASCII":   "üser-1",
+		"0x1f":        "user\x1f1",
+		"0x7f":        "user\x7f1",
+		"line break":  "user\n1",
+		"number":      1,
+		"JSON null":   json.RawMessage("null"),
+		"JSON object": map[string]any{"id": "user-1"},
+	} {
+		if id, err := v.identity(ctx, signClaims(t, k1, claims(sub)), testNonce); !errors.Is(err, ErrInvalidToken) || id != (Identity{}) {
+			t.Errorf("%s: %+v %v", name, id, err)
+		}
+	}
+	for _, reason := range []string{"oidc: rejected token: missing sub", "oidc: rejected token: bad sub"} {
+		if !strings.Contains(logs.String(), reason) {
+			t.Fatalf("log lacks %q: %s", reason, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "user") || strings.Contains(logs.String(), "sss") {
+		t.Fatalf("log contains a sub: %s", logs.String())
+	}
+}
+
+// The hd claim is returned when it is a non-empty string; any other value
+// reads as absent and does not reject the token.
+func TestVerifyHostedDomain(t *testing.T) {
+	k1 := newKey(t, "k1", 2048)
+	s := newJWKSServer(t, k1.jwk())
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	v := newVerifier(s, c)
+	ctx := context.Background()
+	for _, tc := range []struct{ raw, want string }{
+		{"", ""},
+		{`"example.com"`, "example.com"},
+		{`"Example.COM"`, "Example.COM"},
+		{`""`, ""},
+		{"1", ""},
+		{"null", ""},
+		{"true", ""},
+		{`["example.com"]`, ""},
+		{`{"domain":"example.com"}`, ""},
+	} {
+		claims := map[string]any{"iss": testIssuer(s.URL), "aud": testClientID, "exp": c.now().Add(time.Hour).Unix(), "sub": "user-1", "email": "alice@example.com", "nonce": testNonce}
+		if tc.raw != "" {
+			claims["hd"] = json.RawMessage(tc.raw)
+		}
+		id, err := v.identity(ctx, signClaims(t, k1, claims), testNonce)
+		if err != nil || id.Email != "alice@example.com" || id.Subject != "user-1" || id.HostedDomain != tc.want {
+			t.Errorf("%q: %+v %v", tc.raw, id, err)
 		}
 	}
 }

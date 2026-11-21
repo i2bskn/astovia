@@ -54,6 +54,8 @@ Docker Composeが動き、80番と443番のポートを外部から受け付け�
    docker compose run --rm app users create --email you@example.com
    ```
 
+   OIDCでログインする構成（`ASTOVIA_AUTH_MODE=oidc`）では、`--no-password`を付けてパスワードなしで作成します。初回のログインで、確認済みのメールアドレスが一致するユーザーに紐付きます。
+
 5. 起動し、`https://<ASTOVIA_DOMAIN>/`を開いてログインします。
 
    ```sh

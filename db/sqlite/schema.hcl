@@ -26,12 +26,24 @@ table "users" {
     null    = false
     default = "owner"
   }
+  column "oidc_issuer" {
+    type = text
+    null = true
+  }
+  column "oidc_subject" {
+    type = text
+    null = true
+  }
   primary_key {
     columns = [column.id]
   }
   index "users_email_key" {
     unique = true
     columns = [column.email]
+  }
+  index "users_oidc_identity_key" {
+    unique = true
+    columns = [column.oidc_issuer, column.oidc_subject]
   }
 }
 table "sessions" {

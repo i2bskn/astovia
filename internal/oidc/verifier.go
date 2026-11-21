@@ -86,23 +86,35 @@ type Identity struct {
 	Email string
 	// EmailVerified is nil when the claim is absent, otherwise whether it is the JSON boolean true.
 	EmailVerified *bool
+	// Subject is the sub claim, unchanged: 1 to 255 bytes of printable
+	// ASCII. With the issuer it identifies the user at the provider.
+	Subject string
+	// HostedDomain is the hd claim when it is a non-empty JSON string, and
+	// empty otherwise.
+	HostedDomain string
 }
 
-// idClaims holds the claims read besides the registered ones. sub is not
-// read: users are matched by their email address. email_verified is read
-// raw, so that a value that is not a boolean is rejected by the caller
-// instead of failing the whole parse.
+// maxSubjectLength bounds the sub claim in bytes, as OpenID Connect does.
+const maxSubjectLength = 255
+
+// idClaims holds the claims read besides the registered ones; sub is among
+// the registered ones. email_verified is read raw, so that a value that is
+// not a boolean is rejected by the caller instead of failing the whole
+// parse. hd is read raw for the same reason: a value that is not a string is
+// read as absent.
 type idClaims struct {
 	jwt.RegisteredClaims
 	Email           string          `json:"email"`
 	Nonce           string          `json:"nonce"`
 	AuthorizedParty *string         `json:"azp"`
 	EmailVerified   json.RawMessage `json:"email_verified"`
+	HostedDomain    json.RawMessage `json:"hd"`
 }
 
 // Verify checks the signature and the claims of the ID token, including that
-// its nonce equals nonce, and returns its email claim unchanged with its
-// email_verified claim. The signing keys are read from keysURL. It returns
+// its nonce equals nonce, and returns its email and sub claims unchanged
+// with its email_verified and hd claims. The signing keys are read from
+// keysURL. It returns
 // ErrKeysUnavailable when no signing keys could be fetched and
 // ErrInvalidToken otherwise. Keys are fetched with their own timeout
 // instead of the request context, so that a client going away does not
@@ -158,7 +170,37 @@ func (v *Verifier) Verify(_ context.Context, token, nonce, keysURL string) (Iden
 	if claims.Email == "" {
 		return Identity{}, reject("missing email")
 	}
-	return Identity{Email: claims.Email, EmailVerified: emailVerified(claims.EmailVerified)}, nil
+	if claims.Subject == "" {
+		return Identity{}, reject("missing sub")
+	}
+	if !validSubject(claims.Subject) {
+		return Identity{}, reject("bad sub")
+	}
+	return Identity{Email: claims.Email, EmailVerified: emailVerified(claims.EmailVerified), Subject: claims.Subject, HostedDomain: hostedDomain(claims.HostedDomain)}, nil
+}
+
+// validSubject accepts 1-255 bytes of printable ASCII (0x20-0x7e). The value
+// is compared as it is: it is neither trimmed nor folded.
+func validSubject(v string) bool {
+	if len(v) == 0 || len(v) > maxSubjectLength {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] < 0x20 || v[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// hostedDomain reads the raw hd claim: its value when it is a non-empty
+// JSON string, and empty when it is absent or anything else.
+func hostedDomain(raw json.RawMessage) string {
+	var v string
+	if raw == nil || json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	return v
 }
 
 // emailVerified reads the raw email_verified claim: nil when it is absent,

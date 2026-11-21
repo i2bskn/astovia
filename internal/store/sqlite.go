@@ -23,7 +23,20 @@ func (q sqliteQueries) lockUser(ctx context.Context, id string) (User, error) {
 	return User(user), err
 }
 func (q sqliteQueries) createUser(ctx context.Context, user User) error {
-	return q.q.CreateUser(ctx, db.CreateUserParams{ID: user.ID, Email: user.Email, PasswordHash: user.PasswordHash, CreatedAt: user.CreatedAt, Role: user.Role})
+	return q.q.CreateUser(ctx, db.CreateUserParams{ID: user.ID, Email: user.Email, PasswordHash: user.PasswordHash, CreatedAt: user.CreatedAt, Role: user.Role, OidcIssuer: user.OidcIssuer, OidcSubject: user.OidcSubject})
+}
+func (q sqliteQueries) userByOIDC(ctx context.Context, issuer, subject string) (User, error) {
+	user, err := q.q.GetUserByOIDC(ctx, db.GetUserByOIDCParams{OidcIssuer: sql.NullString{String: issuer, Valid: true}, OidcSubject: sql.NullString{String: subject, Valid: true}})
+	return User(user), err
+}
+func (q sqliteQueries) setUserOIDC(ctx context.Context, id, issuer, subject string) error {
+	return q.q.SetUserOIDC(ctx, db.SetUserOIDCParams{OidcIssuer: sql.NullString{String: issuer, Valid: true}, OidcSubject: sql.NullString{String: subject, Valid: true}, ID: id})
+}
+func (q sqliteQueries) clearUserOIDC(ctx context.Context, id string) error {
+	return q.q.ClearUserOIDC(ctx, id)
+}
+func (q sqliteQueries) clearAllUserOIDC(ctx context.Context) error {
+	return q.q.ClearAllUserOIDC(ctx)
 }
 func (q sqliteQueries) resetPassword(ctx context.Context, id, hash string) error {
 	return q.q.ResetPassword(ctx, db.ResetPasswordParams{ID: id, PasswordHash: hash})
@@ -757,6 +770,17 @@ func (q sqliteQueries) invitationByTokenHash(ctx context.Context, hash string) (
 func (q sqliteQueries) lockInvitationByTokenHash(ctx context.Context, hash string) (Invitation, error) {
 	row, err := q.q.LockInvitationByTokenHash(ctx, hash)
 	return Invitation(row), err
+}
+func (q sqliteQueries) lockActiveInvitationsByEmail(ctx context.Context, email string, now int64) ([]Invitation, error) {
+	rows, err := q.q.LockActiveInvitationsByEmail(ctx, db.LockActiveInvitationsByEmailParams{Email: email, Now: now})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Invitation, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, Invitation(row))
+	}
+	return out, nil
 }
 func (q sqliteQueries) acceptInvitation(ctx context.Context, id, userID string, now int64) (int64, error) {
 	return q.q.AcceptInvitation(ctx, db.AcceptInvitationParams{AcceptedAt: sql.NullInt64{Int64: now, Valid: true}, AcceptedUserID: sql.NullString{String: userID, Valid: true}, ID: id, Now: now})

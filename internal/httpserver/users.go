@@ -40,14 +40,14 @@ type invitationListResponse struct {
 }
 
 // createdInvitationResponse carries the link, whose token the server returns
-// only once.
+// only once. With OIDC sign-in there is no link and url is left out.
 type createdInvitationResponse struct {
 	ID        string `json:"id"`
 	Email     string `json:"email"`
 	Role      string `json:"role"`
 	CreatedAt string `json:"created_at"`
 	ExpiresAt string `json:"expires_at"`
-	URL       string `json:"url"`
+	URL       string `json:"url,omitempty"`
 }
 
 type createdPasswordResetResponse struct {
@@ -278,7 +278,13 @@ func (s *Server) handleCreateInvitation(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
-	writeJSON(w, 201, createdInvitationResponse{ID: id, Email: email, Role: role, CreatedAt: formatTime(now), ExpiresAt: formatTime(inv.ExpiresAt), URL: s.cfg.PublicURL + "/invite#" + token})
+	out := createdInvitationResponse{ID: id, Email: email, Role: role, CreatedAt: formatTime(now), ExpiresAt: formatTime(inv.ExpiresAt)}
+	// With OIDC the invitation is matched by the email address at the first
+	// sign-in, so the token is dropped and no link is returned.
+	if s.cfg.OIDC == nil {
+		out.URL = s.cfg.PublicURL + "/invite#" + token
+	}
+	writeJSON(w, 201, out)
 }
 
 func (s *Server) handleDeleteInvitation(w http.ResponseWriter, r *http.Request) {

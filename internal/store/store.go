@@ -33,6 +33,11 @@ type User struct {
 	CreatedAt    int64
 	// Role is RoleOwner or RoleMember. CreateUser requires one of them.
 	Role string
+	// OidcIssuer and OidcSubject are the iss and sub of the OpenID Connect
+	// identity the user signs in with. Both are null until the first OIDC
+	// sign-in links them, and both are set from then on.
+	OidcIssuer  sql.NullString
+	OidcSubject sql.NullString
 }
 type Session struct {
 	ID, UserID string
@@ -157,6 +162,10 @@ type queries interface {
 	userByID(ctx context.Context, id string) (User, error)
 	lockUser(ctx context.Context, id string) (User, error)
 	createUser(ctx context.Context, user User) error
+	userByOIDC(ctx context.Context, issuer, subject string) (User, error)
+	setUserOIDC(ctx context.Context, id, issuer, subject string) error
+	clearUserOIDC(ctx context.Context, id string) error
+	clearAllUserOIDC(ctx context.Context) error
 	resetPassword(ctx context.Context, id, hash string) error
 	disableUser(ctx context.Context, id string) error
 	createSession(ctx context.Context, session Session) error
@@ -321,6 +330,7 @@ type queries interface {
 	createInvitation(ctx context.Context, inv Invitation) error
 	invitationByTokenHash(ctx context.Context, hash string) (Invitation, error)
 	lockInvitationByTokenHash(ctx context.Context, hash string) (Invitation, error)
+	lockActiveInvitationsByEmail(ctx context.Context, email string, now int64) ([]Invitation, error)
 	acceptInvitation(ctx context.Context, id, userID string, now int64) (int64, error)
 	revokeInvitation(ctx context.Context, id string, now int64) (int64, error)
 	revokeEmailInvitations(ctx context.Context, email string, now int64) error
@@ -374,7 +384,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM gmail_accounts LIMIT 0", "SELECT state_hash,user_id,verifier_sealed,expires_at,created_at FROM google_auth_states LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT user_id,scope,body,updated_at FROM ai_instructions LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at,channel FROM notifications LIMIT 0", "SELECT user_id,webpush_kinds,slack_kinds,email_kinds,slack_webhook_sealed,slack_last_error,updated_at FROM notification_channels LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role,oidc_issuer,oidc_subject FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM gmail_accounts LIMIT 0", "SELECT state_hash,user_id,verifier_sealed,expires_at,created_at FROM google_auth_states LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT user_id,scope,body,updated_at FROM ai_instructions LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at,channel FROM notifications LIMIT 0", "SELECT user_id,webpush_kinds,slack_kinds,email_kinds,slack_webhook_sealed,slack_last_error,updated_at FROM notification_channels LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -401,10 +411,15 @@ func (s *Store) transaction(ctx context.Context, fn func(queries) error) error {
 }
 
 // CreateUser stores a new enabled user. u.Role must be RoleOwner or
-// RoleMember; the column default is not relied on.
+// RoleMember; the column default is not relied on. u.OidcIssuer and
+// u.OidcSubject must be both null or both set to non-empty values
+// (ErrInvalidOIDCIdentity).
 func (s *Store) CreateUser(ctx context.Context, u User) error {
 	if !ValidRole(u.Role) {
 		return ErrInvalidRole
+	}
+	if u.OidcIssuer.Valid != u.OidcSubject.Valid || (u.OidcIssuer.Valid && (u.OidcIssuer.String == "" || u.OidcSubject.String == "")) {
+		return ErrInvalidOIDCIdentity
 	}
 	err := s.transaction(ctx, func(q queries) error { return q.createUser(ctx, u) })
 	if err != nil {

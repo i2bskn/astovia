@@ -35,6 +35,15 @@ func (q *Queries) AcceptInvitation(ctx context.Context, arg AcceptInvitationPara
 	return result.RowsAffected()
 }
 
+const clearAllUserOIDC = `-- name: ClearAllUserOIDC :exec
+UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE oidc_issuer IS NOT NULL OR oidc_subject IS NOT NULL
+`
+
+func (q *Queries) ClearAllUserOIDC(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, clearAllUserOIDC)
+	return err
+}
+
 const clearSlackWebhook = `-- name: ClearSlackWebhook :exec
 UPDATE notification_channels SET slack_webhook_sealed = NULL, slack_last_error = NULL, updated_at = ?1
 WHERE user_id = ?2
@@ -47,6 +56,15 @@ type ClearSlackWebhookParams struct {
 
 func (q *Queries) ClearSlackWebhook(ctx context.Context, arg ClearSlackWebhookParams) error {
 	_, err := q.db.ExecContext(ctx, clearSlackWebhook, arg.UpdatedAt, arg.UserID)
+	return err
+}
+
+const clearUserOIDC = `-- name: ClearUserOIDC :exec
+UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE id = ?1
+`
+
+func (q *Queries) ClearUserOIDC(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, clearUserOIDC, id)
 	return err
 }
 
@@ -846,7 +864,8 @@ func (q *Queries) CreateSlackConnection(ctx context.Context, arg CreateSlackConn
 }
 
 const createUser = `-- name: CreateUser :exec
-INSERT INTO users (id,email,password_hash,disabled,created_at,role) VALUES (?,?,?,0,?,?)
+INSERT INTO users (id,email,password_hash,disabled,created_at,role,oidc_issuer,oidc_subject)
+VALUES (?1,?2,?3,0,?4,?5,?6,?7)
 `
 
 type CreateUserParams struct {
@@ -855,6 +874,8 @@ type CreateUserParams struct {
 	PasswordHash string
 	CreatedAt    int64
 	Role         string
+	OidcIssuer   sql.NullString
+	OidcSubject  sql.NullString
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
@@ -864,6 +885,8 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) error {
 		arg.PasswordHash,
 		arg.CreatedAt,
 		arg.Role,
+		arg.OidcIssuer,
+		arg.OidcSubject,
 	)
 	return err
 }
@@ -1958,7 +1981,7 @@ func (q *Queries) GetSlackConnection(ctx context.Context, userID string) (SlackC
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE email = ?1
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE email = ?1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -1971,12 +1994,14 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.Role,
+		&i.OidcIssuer,
+		&i.OidcSubject,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE id = ?1
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE id = ?1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -1989,12 +2014,40 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.Role,
+		&i.OidcIssuer,
+		&i.OidcSubject,
+	)
+	return i, err
+}
+
+const getUserByOIDC = `-- name: GetUserByOIDC :one
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users
+WHERE oidc_issuer = ?1 AND oidc_subject = ?2
+`
+
+type GetUserByOIDCParams struct {
+	OidcIssuer  sql.NullString
+	OidcSubject sql.NullString
+}
+
+func (q *Queries) GetUserByOIDC(ctx context.Context, arg GetUserByOIDCParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserByOIDC, arg.OidcIssuer, arg.OidcSubject)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.PasswordHash,
+		&i.Disabled,
+		&i.CreatedAt,
+		&i.Role,
+		&i.OidcIssuer,
+		&i.OidcSubject,
 	)
 	return i, err
 }
 
 const getUsersByIDs = `-- name: GetUsersByIDs :many
-SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE instr(',' || CAST(?1 AS TEXT) || ',', ',' || id || ',') > 0
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE instr(',' || CAST(?1 AS TEXT) || ',', ',' || id || ',') > 0
 `
 
 func (q *Queries) GetUsersByIDs(ctx context.Context, ids string) ([]User, error) {
@@ -2013,6 +2066,8 @@ func (q *Queries) GetUsersByIDs(ctx context.Context, ids string) ([]User, error)
 			&i.Disabled,
 			&i.CreatedAt,
 			&i.Role,
+			&i.OidcIssuer,
+			&i.OidcSubject,
 		); err != nil {
 			return nil, err
 		}
@@ -3924,7 +3979,7 @@ func (q *Queries) ListTrackedSourcePrefixItems(ctx context.Context, arg ListTrac
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, email, password_hash, disabled, created_at, role FROM users ORDER BY created_at, id LIMIT ?1
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users ORDER BY created_at, id LIMIT ?1
 `
 
 func (q *Queries) ListUsers(ctx context.Context, pageSize int64) ([]User, error) {
@@ -3943,6 +3998,8 @@ func (q *Queries) ListUsers(ctx context.Context, pageSize int64) ([]User, error)
 			&i.Disabled,
 			&i.CreatedAt,
 			&i.Role,
+			&i.OidcIssuer,
+			&i.OidcSubject,
 		); err != nil {
 			return nil, err
 		}
@@ -4063,6 +4120,51 @@ func (q *Queries) LockActionItemBySourceKey(ctx context.Context, arg LockActionI
 		&i.Importance,
 	)
 	return i, err
+}
+
+const lockActiveInvitationsByEmail = `-- name: LockActiveInvitationsByEmail :many
+SELECT id, token_hash, email, role, invited_by, created_at, expires_at, accepted_at, accepted_user_id, revoked_at FROM invitations
+WHERE email = ?1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?2
+ORDER BY id
+`
+
+type LockActiveInvitationsByEmailParams struct {
+	Email string
+	Now   int64
+}
+
+func (q *Queries) LockActiveInvitationsByEmail(ctx context.Context, arg LockActiveInvitationsByEmailParams) ([]Invitation, error) {
+	rows, err := q.db.QueryContext(ctx, lockActiveInvitationsByEmail, arg.Email, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Invitation
+	for rows.Next() {
+		var i Invitation
+		if err := rows.Scan(
+			&i.ID,
+			&i.TokenHash,
+			&i.Email,
+			&i.Role,
+			&i.InvitedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+			&i.AcceptedAt,
+			&i.AcceptedUserID,
+			&i.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const lockActivePasswordResets = `-- name: LockActivePasswordResets :many
@@ -4371,7 +4473,7 @@ func (q *Queries) LockSlackConnection(ctx context.Context, userID string) (Slack
 }
 
 const lockUserByID = `-- name: LockUserByID :one
-SELECT id, email, password_hash, disabled, created_at, role FROM users WHERE id = ?1
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE id = ?1
 `
 
 func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {
@@ -4384,12 +4486,14 @@ func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.Role,
+		&i.OidcIssuer,
+		&i.OidcSubject,
 	)
 	return i, err
 }
 
 const lockUsersForOwnerChange = `-- name: LockUsersForOwnerChange :many
-SELECT id, email, password_hash, disabled, created_at, role FROM users
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users
 WHERE id = ?1 OR id = ?2 OR (role = 'owner' AND disabled = 0)
 ORDER BY id
 `
@@ -4415,6 +4519,8 @@ func (q *Queries) LockUsersForOwnerChange(ctx context.Context, arg LockUsersForO
 			&i.Disabled,
 			&i.CreatedAt,
 			&i.Role,
+			&i.OidcIssuer,
+			&i.OidcSubject,
 		); err != nil {
 			return nil, err
 		}
@@ -4832,6 +4938,21 @@ type RevokeUserSessionsParams struct {
 
 func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessionsParams) error {
 	_, err := q.db.ExecContext(ctx, revokeUserSessions, arg.RevokedAt, arg.UserID)
+	return err
+}
+
+const setUserOIDC = `-- name: SetUserOIDC :exec
+UPDATE users SET oidc_issuer = ?1, oidc_subject = ?2 WHERE id = ?3
+`
+
+type SetUserOIDCParams struct {
+	OidcIssuer  sql.NullString
+	OidcSubject sql.NullString
+	ID          string
+}
+
+func (q *Queries) SetUserOIDC(ctx context.Context, arg SetUserOIDCParams) error {
+	_, err := q.db.ExecContext(ctx, setUserOIDC, arg.OidcIssuer, arg.OidcSubject, arg.ID)
 	return err
 }
 

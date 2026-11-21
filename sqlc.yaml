@@ -176,6 +176,14 @@ sql:
             go_type:
               import: database/sql
               type: NullString
+          - column: users.oidc_issuer
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: users.oidc_subject
+            go_type:
+              import: database/sql
+              type: NullString
           - column: invitations.accepted_at
             go_type:
               import: database/sql
