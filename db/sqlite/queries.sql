@@ -558,3 +558,51 @@ UPDATE password_resets SET used_at = sqlc.arg(used_at) WHERE id = sqlc.arg(id) A
 SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, revoked_at FROM password_resets
 WHERE user_id = sqlc.arg(user_id) AND used_at > sqlc.arg(since)
 ORDER BY used_at DESC, id DESC LIMIT 1;
+-- name: GetMFATOTP :one
+SELECT user_id, secret_sealed, last_step, created_at FROM mfa_totp WHERE user_id = sqlc.arg(user_id);
+-- name: CreateMFATOTP :exec
+INSERT INTO mfa_totp (user_id,secret_sealed,last_step,created_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(secret_sealed),sqlc.arg(last_step),sqlc.arg(created_at));
+-- name: ReplaceMFATOTP :execrows
+UPDATE mfa_totp SET secret_sealed = sqlc.arg(secret_sealed), last_step = sqlc.arg(last_step), created_at = sqlc.arg(created_at)
+WHERE user_id = sqlc.arg(user_id);
+-- name: UseMFATOTPStep :execrows
+UPDATE mfa_totp SET last_step = sqlc.arg(step) WHERE user_id = sqlc.arg(user_id) AND last_step < sqlc.arg(step);
+-- name: DeleteMFATOTP :execrows
+DELETE FROM mfa_totp WHERE user_id = sqlc.arg(user_id);
+-- name: ListMFATOTPUserIDs :many
+SELECT user_id FROM mfa_totp;
+-- name: ListMFAWebAuthnCredentials :many
+SELECT id, user_id, credential_id, credential, name, created_at, last_used_at FROM mfa_webauthn_credentials
+WHERE user_id = sqlc.arg(user_id) ORDER BY created_at, id;
+-- name: CountMFAWebAuthnCredentials :one
+SELECT COUNT(*) FROM mfa_webauthn_credentials WHERE user_id = sqlc.arg(user_id);
+-- name: CreateMFAWebAuthnCredential :execrows
+INSERT INTO mfa_webauthn_credentials (id,user_id,credential_id,credential,name,created_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(credential_id),sqlc.arg(credential),sqlc.arg(name),sqlc.arg(created_at))
+ON CONFLICT (credential_id) DO NOTHING;
+-- name: UpdateMFAWebAuthnCredential :execrows
+UPDATE mfa_webauthn_credentials SET credential = sqlc.arg(credential), last_used_at = sqlc.arg(last_used_at)
+WHERE user_id = sqlc.arg(user_id) AND credential_id = sqlc.arg(credential_id);
+-- name: DeleteMFAWebAuthnCredential :execrows
+DELETE FROM mfa_webauthn_credentials WHERE user_id = sqlc.arg(user_id) AND id = sqlc.arg(id);
+-- name: DeleteUserMFAWebAuthnCredentials :exec
+DELETE FROM mfa_webauthn_credentials WHERE user_id = sqlc.arg(user_id);
+-- name: ListMFAWebAuthnUserIDs :many
+SELECT DISTINCT user_id FROM mfa_webauthn_credentials;
+-- name: CreateMFARecoveryCode :exec
+INSERT INTO mfa_recovery_codes (id,user_id,code_hash,created_at)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(code_hash),sqlc.arg(created_at));
+-- name: CountUnusedMFARecoveryCodes :one
+SELECT COUNT(*) FROM mfa_recovery_codes WHERE user_id = sqlc.arg(user_id) AND used_at IS NULL;
+-- name: UseMFARecoveryCode :execrows
+UPDATE mfa_recovery_codes SET used_at = sqlc.arg(used_at)
+WHERE user_id = sqlc.arg(user_id) AND code_hash = sqlc.arg(code_hash) AND used_at IS NULL;
+-- name: DeleteUserMFARecoveryCodes :exec
+DELETE FROM mfa_recovery_codes WHERE user_id = sqlc.arg(user_id);
+-- name: DeleteExpiredMFAUsedChallenges :exec
+DELETE FROM mfa_used_challenges WHERE expires_at <= sqlc.arg(now);
+-- name: CreateMFAUsedChallenge :execrows
+INSERT INTO mfa_used_challenges (challenge_hash,expires_at)
+VALUES (sqlc.arg(challenge_hash),sqlc.arg(expires_at))
+ON CONFLICT (challenge_hash) DO NOTHING;

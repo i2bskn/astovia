@@ -46,7 +46,7 @@ func main() {
 func run(args []string) error {
 	users := len(args) > 0 && args[0] == "users"
 	if !users && len(args) > 0 && (len(args) != 1 || args[0] != "serve") {
-		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable/role/unlink --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]")
+		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable/role/unlink/reset-mfa --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]")
 	}
 	c, e := config.Load(!users)
 	if e != nil {
@@ -195,12 +195,32 @@ whose sub depends on the client ID, or an account was created again.
 
 `
 
+// resetMFAHelp is printed with the flags of users reset-mfa.
+const resetMFAHelp = `Usage: astovia users reset-mfa --email ADDRESS
+
+Removes the two-step verification of one user: the authenticator app, the
+passkeys and security keys, and the recovery codes. Use it for a user who lost
+every second factor and every recovery code; nobody can do this from the
+screens.
+
+  - A user who must have two-step verification (ASTOVIA_MFA_REQUIRED) enrolls
+    again at the next password sign-in. Other users sign in with the password
+    alone from then on.
+  - A password reset does not remove two-step verification. If someone who
+    knew the password of a user enrolled a second factor of their own, recover
+    the account with both "astovia users reset-password" and
+    "astovia users reset-mfa".
+  - Sessions, API tokens and MCP connections are kept. reset-mfa does not stop
+    anyone; use "astovia users disable" for that.
+
+`
+
 func account(ctx context.Context, s *store.Store, args []string, in io.Reader) error {
 	if len(args) < 1 {
-		return errors.New("users command requires create, reset-password, disable, enable, role, or unlink")
+		return errors.New("users command requires create, reset-password, disable, enable, role, unlink, or reset-mfa")
 	}
 	op := args[0]
-	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" && op != "role" && op != "unlink" {
+	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" && op != "role" && op != "unlink" && op != "reset-mfa" {
 		return errors.New("unknown users command")
 	}
 	f := flag.NewFlagSet(op, flag.ContinueOnError)
@@ -212,6 +232,12 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 	if op == "unlink" {
 		f.Usage = func() {
 			fmt.Fprint(f.Output(), unlinkHelp)
+			f.PrintDefaults()
+		}
+	}
+	if op == "reset-mfa" {
+		f.Usage = func() {
+			fmt.Fprint(f.Output(), resetMFAHelp)
 			f.PrintDefaults()
 		}
 	}
@@ -275,7 +301,7 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		return e
 	}
 	hash := ""
-	if op == "disable" || op == "enable" || op == "role" {
+	if op == "disable" || op == "enable" || op == "role" || op == "reset-mfa" {
 		if *stdin {
 			return errors.New(op + " does not accept --password-stdin")
 		}
@@ -321,6 +347,15 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		}
 	case "enable":
 		e = s.EnableUser(ctx, u)
+		if e != nil {
+			if errors.Is(e, store.ErrNotFound) {
+				return e
+			}
+			return errors.New("could not update user")
+		}
+	case "reset-mfa":
+		// The sessions and tokens are kept, as with unlink.
+		e = s.ResetMFA(ctx, u)
 		if e != nil {
 			if errors.Is(e, store.ErrNotFound) {
 				return e

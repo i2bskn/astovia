@@ -53,8 +53,9 @@ func newUsersAPI(t *testing.T, driver string) *usersAPI {
 	now := time.Date(2026, 10, 23, 1, 2, 3, 0, time.UTC)
 	a.Now = func() time.Time { return now }
 	srv := newServer(config.Config{PublicURL: usersOrigin, Secure: true}, a, fstest.MapFS{}, nil)
-	// The rate limit has its own test.
+	// The rate limits have their own tests.
 	srv.accountLimiter = newKeyLimiter(10000, time.Minute)
+	srv.mfaPeerLimiter = newKeyLimiter(10000, time.Minute)
 	return &usersAPI{t: t, store: s, dsn: dsn, srv: srv, handler: srv.handler(), now: &now}
 }
 
@@ -185,7 +186,7 @@ func testUsersAPI(t *testing.T, driver string) {
 	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if keys := sortedKeys(raw["users"][0]); !reflect.DeepEqual(keys, []string{"created_at", "disabled", "email", "id", "role"}) || string(raw["users"][0]["disabled"]) != "false" {
+	if keys := sortedKeys(raw["users"][0]); !reflect.DeepEqual(keys, []string{"created_at", "disabled", "email", "id", "mfa_enabled", "role"}) || string(raw["users"][0]["disabled"]) != "false" || string(raw["users"][0]["mfa_enabled"]) != "false" {
 		t.Fatalf("user keys: %v", keys)
 	}
 

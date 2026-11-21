@@ -426,3 +426,275 @@ test('no Access logout is exported', async () => {
   assert.equal('logoutAccess' in module, false);
   assert.equal('startAccessLogin' in module, false);
 });
+
+// ---------- Two-step verification ----------
+
+const mfaBody = (overrides = {}) => ({ mfa: { token: 'v1.test-mfa-token', enrolled: true, methods: { totp: true, webauthn: false, recovery: true }, webauthn_available: false, ...overrides } });
+const pendingMFA = { token: 'v1.test-mfa-token', enrolled: true, methods: { totp: true, webauthn: false, recovery: true }, webauthnAvailable: false };
+const mustEnroll = mfaBody({ enrolled: false, methods: { totp: false, webauthn: false, recovery: false }, webauthn_available: true });
+const codes = Array.from({ length: 10 }, (_, i) => `abcd-efgh-jkmn-pqr${i}`);
+const coded = (status, code) => json({ error: { code, message: 'x' } }, status);
+
+// pendingHarness signs in up to the second factor. routes maps a path to
+// the function that answers it.
+async function pendingHarness(routes, first = mfaBody()) {
+  const calls = [];
+  const h = await harness(async (path, init) => {
+    calls.push([path, init?.body ? JSON.parse(init.body) : null]);
+    if (path === '/auth/login') return json(first);
+    if (routes[path]) return routes[path]();
+    if (path === '/api/v1/me') return json(user);
+    return json({}, 404);
+  });
+  await h.auth.login('test-user@example.com', 'test-password');
+  return { ...h, calls };
+}
+
+test('a login that needs a second factor neither signs in nor tells the other tabs', async () => {
+  const { auth, messages, calls } = await pendingHarness({});
+  const state = auth.getSnapshot();
+  assert.equal(state.status, 'anonymous');
+  assert.equal(state.user, null);
+  assert.equal(state.busy, null);
+  assert.equal(state.error, null);
+  assert.deepEqual(state.mfa, pendingMFA);
+  assert.deepEqual(messages, []);
+  // No profile is read: there is no session.
+  assert.deepEqual(calls.map(([path]) => path), ['/auth/login']);
+});
+
+test('a login that must enroll first keeps that it is not enrolled', async () => {
+  const { auth, messages } = await pendingHarness({}, mustEnroll);
+  assert.deepEqual(auth.getSnapshot().mfa, { token: 'v1.test-mfa-token', enrolled: false, methods: { totp: false, webauthn: false, recovery: false }, webauthnAvailable: true });
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.deepEqual(messages, []);
+});
+
+test('malformed second factor responses neither sign in nor wait for a factor', async () => {
+  const { webauthn_available: _available, ...withoutAvailable } = mfaBody().mfa;
+  const { methods: _methods, ...withoutMethods } = mfaBody().mfa;
+  for (const body of [
+    { mfa: null },
+    { mfa: {} },
+    mfaBody({ token: '' }),
+    mfaBody({ token: 1 }),
+    mfaBody({ enrolled: 'yes' }),
+    { mfa: withoutAvailable },
+    { mfa: withoutMethods },
+    mfaBody({ methods: { totp: true, webauthn: false } }),
+    mfaBody({ methods: { totp: 1, webauthn: false, recovery: false } }),
+    // Nothing can be given before a factor is enrolled.
+    mfaBody({ enrolled: false }),
+    // A session and a request for a second factor at once.
+    { ...session, ...mfaBody() },
+  ]) {
+    const { auth, messages, calls } = await pendingHarness({}, body);
+    assert.equal(auth.getSnapshot().status, 'anonymous', JSON.stringify(body));
+    assert.equal(auth.getSnapshot().mfa, null, JSON.stringify(body));
+    assert.ok(auth.getSnapshot().error, JSON.stringify(body));
+    assert.deepEqual(messages, []);
+    assert.deepEqual(calls.map(([path]) => path), ['/auth/login']);
+  }
+  const { readPendingMFA } = await harness(async () => json({}, 404));
+  assert.deepEqual(readPendingMFA(mfaBody().mfa), pendingMFA);
+  assert.throws(() => readPendingMFA([]));
+});
+
+test('completeLink waits for the second factor without signing in', async () => {
+  const calls = [];
+  const { auth, messages } = await harness(async (path) => {
+    calls.push(path);
+    if (path === '/auth/password-resets/complete') return json(mfaBody());
+    return json(user);
+  });
+  await auth.completeLink('/auth/password-resets/complete', 'pwr_token', 'new-password-123');
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.equal(auth.getSnapshot().busy, null);
+  assert.deepEqual(auth.getSnapshot().mfa, pendingMFA);
+  assert.deepEqual(messages, []);
+  assert.deepEqual(calls, ['/auth/password-resets/complete']);
+});
+
+test('the second factor signs in like login and leaves the screen right before', async () => {
+  const { auth, messages, calls, locks } = await pendingHarness({ '/auth/mfa/totp': () => json(session) });
+  const seen = [];
+  await auth.verifyMFA('/auth/mfa/totp', { code: '123456' }, () => { seen.push(auth.getSnapshot().status); });
+  assert.deepEqual(seen, ['anonymous']);
+  assert.equal(auth.getSnapshot().status, 'authenticated');
+  assert.deepEqual(auth.getSnapshot().user, user);
+  assert.equal(auth.getSnapshot().mfa, null);
+  assert.deepEqual(messages, ['session-changed']);
+  assert.deepEqual(calls.slice(1), [['/auth/mfa/totp', { code: '123456', mfa_token: 'v1.test-mfa-token' }], ['/api/v1/me', null]]);
+  assert.deepEqual(locks, ['astovia-auth', 'astovia-auth']);
+});
+
+test('a wrong code is thrown with its error code and keeps the sign-in waiting', async () => {
+  const { auth, messages, APIError, isSuperseded } = await pendingHarness({
+    '/auth/mfa/totp': () => coded(401, 'mfa_code_invalid'),
+    '/auth/mfa/recovery': () => coded(429, 'rate_limited'),
+  });
+  await assert.rejects(auth.verifyMFA('/auth/mfa/totp', { code: '000000' }),
+    (error) => error instanceof APIError && error.status === 401 && error.code === 'mfa_code_invalid' && !isSuperseded(error));
+  await assert.rejects(auth.verifyMFA('/auth/mfa/recovery', { code: 'x' }), (error) => error instanceof APIError && error.status === 429);
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.deepEqual(auth.getSnapshot().mfa, pendingMFA);
+  assert.equal(auth.getSnapshot().error, null);
+  assert.deepEqual(messages, []);
+});
+
+test('a malformed session after the second factor does not sign in', async () => {
+  const { auth, messages } = await pendingHarness({ '/auth/mfa/totp': () => json({ ...session, user: { id: 'x' } }) });
+  await assert.rejects(auth.verifyMFA('/auth/mfa/totp', { code: '123456' }));
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.deepEqual(messages, []);
+});
+
+test('an expired MFA token leads back to the login form', async () => {
+  for (const run of [
+    (auth) => auth.verifyMFA('/auth/mfa/totp', { code: '123456' }),
+    (auth) => auth.beginMFA('/auth/mfa/webauthn/begin'),
+    (auth) => auth.enrollMFA('/auth/mfa/enroll/totp/finish', { setup_token: 's', code: '123456' }),
+  ]) {
+    const expired = () => coded(401, 'mfa_token_invalid');
+    const { auth, messages, isSuperseded } = await pendingHarness({ '/auth/mfa/totp': expired, '/auth/mfa/webauthn/begin': expired, '/auth/mfa/enroll/totp/finish': expired });
+    await assert.rejects(run(auth), (error) => isSuperseded(error));
+    assert.equal(auth.getSnapshot().status, 'anonymous');
+    assert.equal(auth.getSnapshot().mfa, null);
+    assert.equal(auth.getSnapshot().error, '時間が切れました。もう一度ログインしてください。');
+    assert.deepEqual(messages, []);
+  }
+});
+
+test('a session that could not be started leads back to the login form', async () => {
+  const failed = () => coded(503, 'signin_unavailable');
+  const verify = await pendingHarness({ '/auth/mfa/recovery': failed });
+  await assert.rejects(verify.auth.verifyMFA('/auth/mfa/recovery', { code: 'x' }), (error) => verify.isSuperseded(error));
+  assert.equal(verify.auth.getSnapshot().mfa, null);
+  assert.equal(verify.auth.getSnapshot().error, 'ログインできませんでした。もう一度ログインしてください。');
+
+  const enroll = await pendingHarness({ '/auth/mfa/enroll/webauthn/finish': failed }, mustEnroll);
+  await assert.rejects(enroll.auth.enrollMFA('/auth/mfa/enroll/webauthn/finish', { state: 's', credential: {}, name: 'Key' }), (error) => enroll.isSuperseded(error));
+  assert.equal(enroll.auth.getSnapshot().mfa, null);
+  assert.equal(enroll.auth.getSnapshot().error, '登録は完了しました。もう一度ログインしてください。リカバリーコードは、ログイン後に二段階認証の画面で再発行してください。');
+
+  // An enrollment that was not stored keeps the sign-in waiting.
+  const unavailable = await pendingHarness({ '/auth/mfa/enroll/totp/finish': () => coded(503, 'unavailable') }, mustEnroll);
+  await assert.rejects(unavailable.auth.enrollMFA('/auth/mfa/enroll/totp/finish', { setup_token: 's', code: '123456' }),
+    (error) => error instanceof unavailable.APIError && error.code === 'unavailable');
+  assert.notEqual(unavailable.auth.getSnapshot().mfa, null);
+  assert.equal(unavailable.auth.getSnapshot().error, null);
+});
+
+test('beginMFA returns the body and sends the MFA token', async () => {
+  const { auth, calls, messages } = await pendingHarness({ '/auth/mfa/enroll/totp/begin': () => json({ secret: 'S', otpauth_url: 'u', setup_token: 't' }) }, mustEnroll);
+  assert.deepEqual(await auth.beginMFA('/auth/mfa/enroll/totp/begin'), { secret: 'S', otpauth_url: 'u', setup_token: 't' });
+  assert.deepEqual(calls.at(-1), ['/auth/mfa/enroll/totp/begin', { mfa_token: 'v1.test-mfa-token' }]);
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.notEqual(auth.getSnapshot().mfa, null);
+  assert.deepEqual(messages, []);
+});
+
+test('an enrollment before the first sign-in stays signed out until the codes are saved', async () => {
+  const { auth, messages, calls } = await pendingHarness({ '/auth/mfa/enroll/totp/finish': () => json({ ...session, recovery_codes: codes }) }, mustEnroll);
+  assert.deepEqual(await auth.enrollMFA('/auth/mfa/enroll/totp/finish', { setup_token: 'setup', code: '123456' }), codes);
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  // The server has started the session; the tab does not use it yet.
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.equal(auth.getSnapshot().user, null);
+  assert.notEqual(auth.getSnapshot().mfa, null);
+  assert.deepEqual(messages, []);
+  assert.deepEqual(calls.at(-1), ['/auth/mfa/enroll/totp/finish', { setup_token: 'setup', code: '123456', mfa_token: 'v1.test-mfa-token' }]);
+  assert.equal(calls.some(([path]) => path === '/api/v1/me'), false);
+
+  const seen = [];
+  await auth.finishEnrollment(() => { seen.push(auth.getSnapshot().status); });
+  assert.deepEqual(seen, ['anonymous']);
+  assert.equal(auth.getSnapshot().status, 'authenticated');
+  assert.deepEqual(auth.getSnapshot().user, user);
+  assert.equal(auth.getSnapshot().mfa, null);
+  assert.deepEqual(messages, ['session-changed']);
+  assert.deepEqual(calls.at(-1), ['/api/v1/me', null]);
+  // The held session is used once.
+  await assert.rejects(auth.finishEnrollment());
+});
+
+test('an enrollment response without recovery codes is rejected', async () => {
+  for (const body of [session, { ...session, recovery_codes: null }, { ...session, recovery_codes: [] }, { ...session, recovery_codes: ['a', 1] }, { recovery_codes: codes }]) {
+    const { auth, messages } = await pendingHarness({ '/auth/mfa/enroll/totp/finish': () => json(body) }, mustEnroll);
+    await assert.rejects(auth.enrollMFA('/auth/mfa/enroll/totp/finish', { setup_token: 'setup', code: '123456' }));
+    assert.equal(auth.getSnapshot().status, 'anonymous');
+    assert.deepEqual(messages, []);
+    await assert.rejects(auth.finishEnrollment());
+    assert.equal(auth.getSnapshot().status, 'anonymous');
+  }
+});
+
+test('another tab signing out or in drops the pending second factor and the held session', async () => {
+  for (const message of ['logout', 'session-changed']) {
+    const { auth, receive, messages } = await pendingHarness({
+      '/auth/mfa/enroll/totp/finish': () => json({ ...session, recovery_codes: codes }),
+      '/auth/refresh': () => json({}, 401),
+    }, mustEnroll);
+    await auth.enrollMFA('/auth/mfa/enroll/totp/finish', { setup_token: 'setup', code: '123456' });
+    receive(message);
+    assert.equal(auth.getSnapshot().mfa, null);
+    await assert.rejects(auth.finishEnrollment());
+    await until(() => auth.getSnapshot().status === 'anonymous');
+    assert.equal(auth.getSnapshot().user, null);
+    assert.deepEqual(messages, []);
+  }
+});
+
+test('starting over drops the second factor and a late answer does not sign in', async () => {
+  const answer = deferred();
+  const { auth, messages, isSuperseded } = await pendingHarness({ '/auth/mfa/totp': () => answer.promise });
+  const pending = auth.verifyMFA('/auth/mfa/totp', { code: '123456' });
+  await new Promise((resolve) => setImmediate(resolve));
+  auth.cancelMFA();
+  assert.equal(auth.getSnapshot().mfa, null);
+  assert.equal(auth.getSnapshot().error, null);
+  answer.resolve(json(session));
+  await assert.rejects(pending, (error) => isSuperseded(error));
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.deepEqual(messages, []);
+  // Without a pending sign-in there is nothing to send.
+  await assert.rejects(auth.verifyMFA('/auth/mfa/totp', { code: '123456' }), (error) => isSuperseded(error));
+  await assert.rejects(auth.beginMFA('/auth/mfa/webauthn/begin'), (error) => isSuperseded(error));
+});
+
+test('a new login replaces the pending second factor', async () => {
+  let logins = 0;
+  const { auth } = await harness(async (path) => {
+    if (path === '/auth/login') { logins += 1; return logins === 1 ? json(mfaBody()) : json(session); }
+    return json(user);
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  assert.notEqual(auth.getSnapshot().mfa, null);
+  await auth.login('test-user@example.com', 'test-password');
+  assert.equal(auth.getSnapshot().status, 'authenticated');
+  assert.equal(auth.getSnapshot().mfa, null);
+});
+
+test('the secrets of the second factor stay in memory', async () => {
+  const written = [];
+  const store = () => ({ getItem: () => null, removeItem: () => {}, setItem: (key, value) => { written.push([key, value]); } });
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: store() });
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: store() });
+  const logged = [];
+  const original = { log: console.log, info: console.info, warn: console.warn, error: console.error, debug: console.debug };
+  for (const name of Object.keys(original)) console[name] = (...values) => { logged.push(values); };
+  try {
+    const { auth } = await pendingHarness({
+      '/auth/mfa/enroll/totp/begin': () => json({ secret: 'JBSWY3DPEHPK3PXP', otpauth_url: 'otpauth://totp/x', setup_token: 'v1.setup' }),
+      '/auth/mfa/enroll/totp/finish': () => json({ ...session, recovery_codes: codes }),
+    }, mustEnroll);
+    await auth.beginMFA('/auth/mfa/enroll/totp/begin');
+    await auth.enrollMFA('/auth/mfa/enroll/totp/finish', { setup_token: 'v1.setup', code: '123456' });
+    await auth.finishEnrollment();
+  } finally {
+    Object.assign(console, original);
+    delete globalThis.localStorage;
+  }
+  assert.deepEqual(written, []);
+  assert.deepEqual(logged, []);
+});

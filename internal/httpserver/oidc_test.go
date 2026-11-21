@@ -629,7 +629,7 @@ func testOIDCCallback(t *testing.T, driver string) {
 		t.Fatal("the hash matched")
 	}
 	for _, password := range []string{"!access", "correct-password-123", "x"} {
-		if _, err = api.srv.auth.Login(ctx, "dave@example.com", password); !errors.Is(err, store.ErrUnauthorized) {
+		if _, err = api.srv.auth.Verify(ctx, "dave@example.com", password); !errors.Is(err, store.ErrUnauthorized) {
 			t.Fatalf("password %q: %v", password, err)
 		}
 	}
@@ -799,7 +799,7 @@ func testPasswordEndpointsWithOIDC(t *testing.T, driver string) {
 	if _, err := api.store.UserByEmail(ctx, "dave@example.com"); err == nil {
 		t.Fatal("dave was created")
 	}
-	if _, err := api.srv.auth.Login(ctx, "carol@example.com", "correct-password-123"); err != nil {
+	if _, err := api.srv.auth.Verify(ctx, "carol@example.com", "correct-password-123"); err != nil {
 		t.Fatalf("carol's password changed: %v", err)
 	}
 

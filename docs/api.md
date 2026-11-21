@@ -1,6 +1,6 @@
 # APIリファレンス
 
-内蔵のOAuthの認可サーバーと、URLと応答をまとめます。
+内蔵のOAuthの認可サーバー、URLと応答、二段階認証をまとめます。
 
 ## OAuth
 
@@ -37,17 +37,33 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 | `GET /assets/*`、`/favicon.ico`等 | 埋め込みWeb画面の静的ファイル（`/sw.js`、`/manifest.webmanifest`を含む）。存在しないファイルは404 |
 | `GET /admin/*` | 以前の版のURL。対応する新しいURLへ308でリダイレクト（不明なものは`/`へ）。`/admin/oauth/authorize`は`/consent`へ。`/admin/sw.js`は古い登録の更新用に`/sw.js`と同じ内容を返す |
 | `GET /healthz` | プロセスの稼働確認のみ。非公開情報は返さない |
-| `POST /auth/login` | 本文は`{ "email": "alice@example.com", "password": "…" }` |
+| `POST /auth/login` | 本文は`{ "email": "alice@example.com", "password": "…" }`。第2要素が要るユーザーにはセッションを発行せず、200`{mfa: …}`を返す（[二段階認証](#二段階認証)） |
 | `POST /auth/refresh` | Cookieのトークンを更新。本文は`{}` |
 | `POST /auth/logout` | セッション失効とCookie削除。本文は`{}` |
 | `POST /auth/invitations/inspect` | 本文`{token}`で招待の`{email, role, expires_at}`を返す。無効・期限切れ・受諾済み・取り消し済み・存在しない招待は区別せず404`invitation_invalid` |
-| `POST /auth/invitations/accept` | 本文`{token, password}`でユーザーを作成し、Loginと同じ応答とCookieを返す。同じメールアドレスのユーザーがいれば409`email_taken`、パスワードが12〜72バイトでなければ400。リクエストに付いてきた既存のRefresh Cookieのセッションは失効させる。作成後のログインだけに失敗した場合は503（ログイン画面からログインできる） |
+| `POST /auth/invitations/accept` | 本文`{token, password}`でユーザーを作成し、Loginと同じ応答とCookieを返す。同じメールアドレスのユーザーがいれば409`email_taken`、パスワードが12〜72バイトでなければ400。リクエストに付いてきた既存のRefresh Cookieのセッションは失効させる。作成後のログインだけに失敗した場合は503（ログイン画面からログインできる）。第2要素が要るユーザーにはLoginと同じく200`{mfa: …}`を返す |
 | `POST /auth/password-resets/inspect` | 本文`{token}`で再設定の`{email}`を返す。無効・期限切れ・使用済み・取り消し済みのリンクと、無効化されたユーザーのリンクは区別せず404`reset_invalid` |
-| `POST /auth/password-resets/complete` | 本文`{token, password}`でパスワードを再設定し、Loginと同じ応答とCookieを返す。既存のRefresh Cookieの扱いと503はacceptと同じ |
+| `POST /auth/password-resets/complete` | 本文`{token, password}`でパスワードを再設定し、Loginと同じ応答とCookieを返す。既存のRefresh Cookieの扱い・503・`{mfa: …}`の応答はacceptと同じ。二段階認証の設定は残る |
+| `POST /auth/mfa/totp` | 本文`{mfa_token, code}`。認証アプリのコードを確かめ、Loginと同じ応答とCookieを返す |
+| `POST /auth/mfa/recovery` | 本文`{mfa_token, code}`。リカバリーコードを使用済みにして、Loginと同じ応答とCookieを返す |
+| `POST /auth/mfa/webauthn/begin` | 本文`{mfa_token}`。パスキー・セキュリティキーでの確認を始め、200`{options, state}`を返す。`options`は`PublicKeyCredentialRequestOptions`のJSON形式 |
+| `POST /auth/mfa/webauthn/finish` | 本文`{mfa_token, state, credential}`（32KiB以内）。署名を確かめ、Loginと同じ応答とCookieを返す。同じ応答の再送は401`mfa_code_invalid` |
+| `POST /auth/mfa/enroll/totp/begin` | 本文`{mfa_token}`。初回登録の認証アプリの秘密を作り、200`{secret, otpauth_url, setup_token}`を返す |
+| `POST /auth/mfa/enroll/totp/finish` | 本文`{mfa_token, setup_token, code}`。認証アプリを登録し、Loginの応答に`recovery_codes`（10個）を足したものとCookieを返す |
+| `POST /auth/mfa/enroll/webauthn/begin` | 本文`{mfa_token}`。初回登録のパスキー・セキュリティキーの登録を始め、200`{options, state}`を返す。`options`は`PublicKeyCredentialCreationOptions`のJSON形式 |
+| `POST /auth/mfa/enroll/webauthn/finish` | 本文`{mfa_token, state, credential, name}`（32KiB以内）。登録し、Loginの応答に`recovery_codes`（10個）を足したものとCookieを返す |
 | `GET /api/v1/me` | 本人の`{id, email, role, password_reset}`。Bearer Access JWTが必要 |
-| `GET /api/v1/users` | ユーザーの一覧`{users: [{id, email, role, disabled, created_at}]}`（作成日時の古い順、1000件まで）。オーナーのAccess JWTが必要（メンバーは403`forbidden`、APIトークンは401。以下のユーザー管理APIも同じ） |
+| `GET /api/v1/users` | ユーザーの一覧`{users: [{id, email, role, disabled, created_at, mfa_enabled}]}`（作成日時の古い順、1000件まで）。`mfa_enabled`は二段階認証の方法（認証アプリかパスキー・セキュリティキー）が1つ以上あるか。オーナーのAccess JWTが必要（メンバーは403`forbidden`、APIトークンは401。以下のユーザー管理APIも同じ） |
 | `PATCH /api/v1/users/{id}` | 本文`{role}`か`{disabled}`のどちらか1つで変更し、変更後のユーザーを返す。今と同じ値なら何もせず200。最後の有効なオーナーをメンバーにすると409`last_owner`、自分の無効化は409`self`、存在しないユーザーは404 |
 | `POST /api/v1/users/{id}/password-resets` | パスワード再設定リンクを発行し201`{url, expires_at}`を返す（本文なし）。`url`は一度だけ返す。無効化されたユーザーは409`user_disabled` |
+| `GET /api/v1/mfa` | 本人の二段階認証`{required, totp, webauthn, recovery_codes_remaining, webauthn_available}`。`totp`は`{created_at}`か`null`、`webauthn`は`{id, name, created_at, last_used_at}`の配列。Access JWTが必要（APIトークンは401。以下の`/api/v1/mfa/*`も同じ） |
+| `POST /api/v1/mfa/totp/begin` | 本文`{password}`で認証アプリの登録を始め、200`{secret, otpauth_url, setup_token}`を返す。登録済みでも受け付ける（入れ替え） |
+| `POST /api/v1/mfa/totp/finish` | 本文`{setup_token, code}`で認証アプリを登録し、200`{recovery_codes}`を返す。最初の方法のときだけ10個の配列で、それ以外は`null`。登録済みなら秘密を置き換える |
+| `POST /api/v1/mfa/totp/delete` | 本文`{password}`で認証アプリを削除し204を返す。登録がなければ404 |
+| `POST /api/v1/mfa/webauthn/begin` | 本文`{password}`でパスキー・セキュリティキーの登録を始め、200`{options, state}`を返す。10個あれば409`mfa_limit` |
+| `POST /api/v1/mfa/webauthn/finish` | 本文`{state, credential, name}`（32KiB以内）で登録し、201`{credential: {id, name, created_at, last_used_at}, recovery_codes}`を返す。`recovery_codes`は最初の方法のときだけ配列で、それ以外は`null` |
+| `POST /api/v1/mfa/webauthn/{id}/delete` | 本文`{password}`でパスキー・セキュリティキーを削除し204を返す。他のユーザーのものと存在しないものは404 |
+| `POST /api/v1/mfa/recovery-codes` | 本文`{password}`でリカバリーコードを再発行し、200`{recovery_codes}`を返す。前のコードは使えなくなる。方法が1つもなければ409`mfa_not_enrolled` |
 | `GET /api/v1/invitations` | 有効な招待の一覧`{invitations: [{id, email, role, created_at, expires_at, invited_by_email}]}`（新しい順、200件まで） |
 | `POST /api/v1/invitations` | 本文`{email, role}`で招待を作成し201`{id, email, role, created_at, expires_at, url}`を返す。`url`は一度だけ返す。同じメールアドレスのユーザーがいれば（無効化中も含め）409`email_taken`。OIDCでログインする構成（`ASTOVIA_AUTH_MODE=oidc`）では`url`のない201`{id, email, role, created_at, expires_at}`を返す。招待したメールアドレスの人は、確認済みのメールアドレスが一致する初回のOIDCログインでユーザーとして追加される |
 | `DELETE /api/v1/invitations/{id}` | 有効な招待を取り消し204を返す。無い・既に無効な招待は404 |
@@ -111,3 +127,77 @@ Astoviaは`/mcp`のための認可サーバーを内蔵しています。OAuth 2
 LoginとRefresh（と招待の受諾・パスワード再設定の完了）は`{access_token, expires_in, user: {id, email, role, password_reset}}`を返します。`role`は`owner`か`member`、`password_reset`は直近14日以内にパスワード再設定リンクで再設定していれば最新の1件の`{at, by_email}`（発行したオーナーのメールアドレス）、なければ`null`です。
 
 対応事項は`{id, content, status, importance, note, due_at, refs, version, created_at, updated_at, source, auto, kind, event, parent_id, parent, children}`で（`importance`は重要度で`"high"`／`"normal"`／`"low"`。作成時に省略すると`"normal"`。`parent_id`は親タスクのidか`null`、`parent`は親タスクの`{id, content, status}`か`null`、`children`は子タスクがあれば`{total, done, remaining, next_due_at}`（`total`は対象外を除いた子の数、`remaining`は未完了とタスク候補の数、`next_due_at`は未完了とタスク候補の子の一番近い期限か`null`）、なければ`null`。`status`は`open`／`candidate`（AIが見つけた未確定のタスク候補）／`done`／`dismissed`。`source`は連携が作ったものなら`"github"`か`"slack"`、それ以外は`null`。`auto`は自動で完了・対象外にしたものなら`{reason, ref_url, at}`、それ以外は`null`。`kind`は`"task"`か`"event"`（予定タスク）で、`event`は予定タスクなら`{title, start_at, end_at}`（`end_at`は終了時刻がなければ`null`）、それ以外は`null`。`kind`と`event`は作成・更新の本文では受け付けません。MCPの応答も同じ形です）、日時はUTCのRFC 3339です。`/api/v1/action-items*`はすべてBearer Access JWTまたはAPIトークンが必要で、作成・更新の本文は`application/json`の64KiB以内とします。`content`は1〜500文字（空白のみは不可）、`note`は4000文字以内、`due_at`はオフセット付きのRFC 3339、`refs`は`{service, account?, conversation_id?, conversation_name?, message_id?, url?}`の配列（10件まで、`url`はhttp／https。`conversation_name`は`#general`のような表示用の会話名で、画面ではアカウント名の代わりに表示します）、`parent_id`は自分の対応事項で親を持たないもののid（入れ子は2段までで、子を持つ対応事項には付けられません。違反は400）、`importance`は`"high"`／`"normal"`／`"low"`のいずれか（`null`やそれ以外は400）です。一覧は作成日時の降順で、同じ作成日時の間はidの降順（DBの照合順序に従う）に並びます。続きは`next_cursor`を`cursor`に渡して取得します。他のユーザーの対応事項と存在しない対応事項は、どちらも404になります。削除APIはなく、対象外は`status`の`dismissed`で表します。`status`を変更すると（REST・MCPとも）、その対応事項は連携による自動完了・再オープンの対象から外れ、`auto`は`null`に戻ります。ただし`candidate`と`open`の間の変更（タスク候補をタスクにする、その取り消し）では、Slackの返信による自動完了の対象のままです。開始時刻を過ぎた予定タスクを完了・対象外から`open`か`candidate`に戻すと、`kind`は`"task"`になります。エラーは`{error: {code, message}}`です（`/oauth/*`の処理内で返すエラーだけは、OAuthの形式`{error, error_description}`です）。認証・非公開API・MCP・`/oauth/*`の応答には`Cache-Control: no-store`を付けます。存在しないAPI・連携用URLに対して、管理画面のHTMLを返すことはありません。`//`や`..`を含む正規化されていないパスは、メソッドにかかわらず正規化後のパスへ307でリダイレクトし、`%2F`でエスケープしたスラッシュを含むパスはどのURLにも一致せず404になります。
+
+## 二段階認証
+
+パスワードでログインする構成（`ASTOVIA_AUTH_MODE`が`password`）で使えます。OIDCの構成では`/auth/mfa/*`と`/api/v1/mfa*`が409`password_auth_disabled`を返します（`/api/v1/mfa*`は認証が先で、未認証は401）。
+
+第2要素はパスキー・セキュリティキー（WebAuthn）と認証アプリ（TOTP。SHA-1・6桁・30秒で、前後1ステップを受け付けます）です。リカバリーコードは第2要素に数えません。`ASTOVIA_MFA_REQUIRED`（`off`・`owners`・`all`）で必須の対象を決めます。
+
+### ログインの応答
+
+`POST /auth/login`・`POST /auth/invitations/accept`・`POST /auth/password-resets/complete`は、第2要素が要るときにセッションを発行しません。Refresh Cookieも設定せず、200で次の形を返します。
+
+```json
+{"mfa": {"token": "v1.…", "enrolled": true, "methods": {"totp": true, "webauthn": false, "recovery": true}, "webauthn_available": true}}
+```
+
+- `enrolled`が`true`なら、`methods`が真の方法のどれかを`/auth/mfa/totp`・`/auth/mfa/webauthn/*`・`/auth/mfa/recovery`で確かめるとセッションが出ます。
+- `enrolled`が`false`は、必須の対象でまだ方法を登録していないユーザーです。`methods`はすべて偽で、`/auth/mfa/enroll/*`で登録するとセッションが出ます。
+- `webauthn_available`は、このサーバーでパスキー・セキュリティキーを使えるかです。`ASTOVIA_PUBLIC_URL`のホストがIPアドレスでなく、スキームが`https`かホストが`localhost`のときに真です。偽のサーバーでは、WebAuthnのbeginとfinishが400`webauthn_unavailable`を返します。
+- `token`（MFAトークン）は`/auth/mfa/*`の本文の`mfa_token`に入れます。期限は`enrolled`が`true`なら10分、`false`なら30分です。使い捨てではありません。パスワードの変更とユーザーの無効化で無効になります。
+- `/auth/refresh`とOIDCのログインは第2要素を求めません。方法の登録・削除・必須化は、既存のセッション・APIトークン・MCPの接続を失効させません。
+- パスワードを再設定しても二段階認証は残ります。再設定の完了も上の応答を返します。
+
+### `/auth/mfa/*`（セッションの前）
+
+どれも`POST`で、本文は`application/json`の4KiB以内（WebAuthnのfinishは32KiB以内）です。`Origin`が`ASTOVIA_PUBLIC_URL`と違えば403、`Content-Type`が違えば415です。
+
+- `/auth/mfa/enroll/*`は、方法が1つもなく必須の対象であるユーザーだけが使えます。方法があれば409`mfa_already_enrolled`、必須でなければ403`mfa_not_required`です。
+- WebAuthnの`options`は仕様のJSON形式で、バイナリ（`challenge`・`user.id`・クレデンシャルのID）はパディングなしのbase64urlです。`credential`には`PublicKeyCredential.toJSON()`と同じ形を送ります。`state`の期限は5分です。`name`は前後の空白を除いて1〜64文字です。
+- `setup_token`の期限は30分です。登録の確認に使ったコードは、直後のログインには使えません。
+- リカバリーコードは`xxxx-xxxx-xxxx-xxxx`の形で、1個につき1回だけ使えます。大文字・空白・ハイフンの有無は区別しません。DBにはハッシュだけを保存します。
+
+| エラー | 状況 |
+| --- | --- |
+| 401`mfa_token_invalid` | MFAトークンが不正・期限切れ、またはユーザーのパスワードか状態が変わった。ログインからやり直す |
+| 401`mfa_code_invalid` | コード・署名が正しくない、その方法が登録されていない、使用済みのコード、WebAuthnの応答の再送 |
+| 400`mfa_state_invalid` | `state`・`setup_token`が不正・期限切れ・別のユーザーのもの |
+| 409`mfa_limit`、409`mfa_credential_exists` | パスキー・セキュリティキーが10個ある、同じものが登録済み |
+| 429`rate_limited` | 試行回数の上限。`Retry-After`付き |
+| 503`signin_unavailable` | 確認か登録は済んだが、セッションの発行だけに失敗した。使ったコードは戻らず、登録は残る。ログインからやり直す（登録の場合、リカバリーコードはログイン後に再発行する） |
+| 503`unavailable` | それ以外の失敗。登録では何も保存していない |
+
+### `/api/v1/mfa*`（ログイン後）
+
+登録の開始・削除・リカバリーコードの再発行は、本文の`password`で現在のパスワードを確かめます（72バイトまで）。finishは`setup_token`・`state`がその確認を引き継ぎます。
+
+資格情報の誤りに401を使いません（Web画面は`/api/v1/*`の401をAccess JWTの期限切れとして扱うためです）。
+
+| エラー | 状況 |
+| --- | --- |
+| 400`password_invalid` | 現在のパスワードが違う |
+| 400`mfa_code_invalid` | 認証アプリのコード・WebAuthnの応答が正しくない |
+| 400`mfa_state_invalid` | `state`・`setup_token`が不正・期限切れ・別のユーザーのもの |
+| 400`webauthn_unavailable` | このサーバーではパスキー・セキュリティキーを使えない（削除はできる） |
+| 409`mfa_required` | 必須の対象のユーザーが最後の方法を削除しようとした |
+| 409`mfa_limit`、409`mfa_credential_exists`、409`mfa_not_enrolled` | 10個ある、同じものが登録済み、方法がないのにコードを再発行しようとした |
+| 429`rate_limited` | 試行回数の上限。`Retry-After`付き |
+
+最後の方法を削除すると、リカバリーコードも削除します。
+
+### 試行回数と受け入れているリスク
+
+- 第2要素の確認（`/auth/mfa/totp`・`/auth/mfa/recovery`・`/auth/mfa/webauthn/finish`・`/auth/mfa/enroll/totp/finish`・`/api/v1/mfa/totp/finish`）は、ユーザーごとに15分で5回までです（`Retry-After: 900`）。成功した試行も数えます。
+- 現在のパスワードの確認は、ユーザーごとに5分で10回までです（`Retry-After: 300`）。
+- `/auth/mfa/*`全体は、接続元IPごとに1分で10回までです（`Retry-After: 60`）。リバースプロキシ配下では、全員がプロキシのIPとしてまとめて数えられます。
+- 回数はプロセスのメモリに持ちます。再起動で消え、複数のインスタンスでは共有しません。
+- パスワードを知っている相手は、認証アプリのコードを15分に5回試せます。1回あたり約100万分の3で当たるので、試し続けられると1日で約0.14%、30日で約4%の確率で通ります。失敗が続いたら止める仕組みはありません。ログの`auth: mfa: totp failed user=<id>`が続いていたら、そのユーザーのパスワードを変えてください。
+- 同じ相手が上限まで失敗させ続けている間は、本人も第2要素を通れません。この場合の対処もパスワードの変更です。
+- ログにはユーザーIDだけを出します。失敗は`auth: mfa: <totp|recovery|webauthn> failed user=<id>`、登録・削除・再発行は`auth: mfa: <内容> user=<id>`です。コード・トークン・秘密は出しません。
+
+### 解除と復旧
+
+- すべての方法とリカバリーコードを失くしたユーザーの解除は、CLIの`astovia users reset-mfa --email ADDRESS`だけです。オーナーの画面とAPIからはできません。解除後、必須の対象のユーザーは次のパスワードログインで登録し直します。それ以外のユーザーはパスワードだけでログインできます。
+- 方法を登録していないユーザーのパスワードを知った相手は、必須の構成では自分の方法を登録できます。この場合、パスワードを再設定しても相手の方法とリカバリーコードが残ります。復旧には`users reset-password`と`users reset-mfa`の両方が必要です。
+- `ASTOVIA_JWT_SECRET`を変えると認証アプリのコードが使えなくなります。パスキー・セキュリティキーとリカバリーコードは使えます。該当するユーザーは`users reset-mfa`で解除して登録し直します。

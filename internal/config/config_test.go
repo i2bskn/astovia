@@ -452,3 +452,41 @@ func TestMailConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestMFARequired(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://example.com")
+	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
+	const invalid = "ASTOVIA_MFA_REQUIRED must be off, owners or all"
+	for _, serve := range []bool{true, false} {
+		for _, mode := range []string{"password", "oidc"} {
+			if mode == "oidc" {
+				setOIDC(t, "oidc", "https://idp.example.com", "client", "secret")
+			} else {
+				setOIDC(t, "", "", "", "")
+			}
+			for input, want := range map[string]string{
+				"": MFAOff, "off": MFAOff, "OFF": MFAOff, "  off ": MFAOff, " \t": MFAOff,
+				"owners": MFAOwners, "Owners": MFAOwners, " owners\n": MFAOwners,
+				"all": MFAAll, "ALL": MFAAll, "\tall ": MFAAll,
+			} {
+				t.Setenv("ASTOVIA_MFA_REQUIRED", input)
+				c, err := Load(serve)
+				if err != nil || c.MFARequired != want {
+					t.Fatalf("serve=%v mode=%s %q: %q %v", serve, mode, input, c.MFARequired, err)
+				}
+			}
+			for _, input := range []string{"owner", "on", "true", "1", "required", "owners,all", "o w n e r s", "全員"} {
+				t.Setenv("ASTOVIA_MFA_REQUIRED", input)
+				if _, err := Load(serve); err == nil || err.Error() != invalid {
+					t.Fatalf("serve=%v mode=%s %q: %v", serve, mode, input, err)
+				}
+			}
+		}
+	}
+	if MFAOff != "off" || MFAOwners != "owners" || MFAAll != "all" {
+		t.Fatalf("values: %q %q %q", MFAOff, MFAOwners, MFAAll)
+	}
+}

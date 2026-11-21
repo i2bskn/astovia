@@ -509,7 +509,7 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
   .route-table th, .route-table td { padding: 10px 6px; }
   .route-table tbody th { padding-left: 10px; font-size: 13px; }
   .settings-tabs { display: none; }
-  /* The account screen has no list page on phones, so its two tabs stay. */
+  /* The account screen has no list page on phones, so its tabs stay. */
   .settings-tabs.account-tabs { display: flex; }
   .settings-header[data-page] { margin: -8px 0 8px; }
   .settings-header[data-page] h1, .settings-header[data-page] .page-lead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -547,3 +547,37 @@ input:disabled, textarea:disabled, select:disabled { background: var(--surface-2
 .gate-card > .notice { margin: 20px 0 0; }
 .reset-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 20px; }
 .reset-notice p { flex: 1 1 18em; min-width: 0; }
+
+/* ---------- Two-step verification ---------- */
+/* On the gate: the buttons that choose a method, and the links under a form. */
+.gate-choices { display: grid; gap: 10px; min-width: 0; margin-top: 28px; }
+.gate-choices .field-hint { margin: 0; }
+.gate-choices .token-created { margin: 0 0 6px; }
+.gate-choices + .gate-form { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
+.gate-links { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 16px; margin-top: 20px; padding-top: 10px; border-top: 1px solid var(--line); }
+.gate-links .link-button { min-height: 44px; }
+.code-input { font-family: var(--mono); letter-spacing: .06em; }
+/* The QR code is black on white in both color schemes, so that it stays
+   readable; its quiet zone is part of the drawing. */
+.totp-setup { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; min-width: 0; margin-bottom: 18px; }
+.qr-code { display: block; flex: none; width: 200px; max-width: 100%; height: auto; border: 1px solid var(--line-strong); border-radius: 8px; }
+.totp-setup-body { display: grid; flex: 1 1 220px; gap: 12px; min-width: 0; }
+.totp-setup-note { color: var(--ink-2); font-size: 13px; }
+/* As many columns as fit; one at 320px. */
+.recovery-codes { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(11.5em, 100%), 1fr)); gap: 4px 16px; min-width: 0; margin: 0; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font-family: var(--mono); font-size: 13px; }
+.recovery-codes code { font-family: inherit; overflow-wrap: anywhere; user-select: all; }
+/* On the account screen: a form that asks for the current password. */
+.mfa-form { min-width: 0; margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.mfa-form-note { margin-bottom: 14px; }
+.mfa-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
+.mfa-facts { margin-bottom: 16px; }
+.mfa-hint { margin: 0 0 8px; text-align: right; }
+.action-confirm { flex: 1 1 100%; min-width: 0; }
+.action-confirm .mfa-form { margin-top: 0; }
+@media (max-width: 767px) {
+  .mfa-hint { text-align: left; }
+}
+/* Three account tabs do not fit the narrowest phones at the usual size. */
+@media (max-width: 359px) {
+  .account-tabs .settings-tab { padding: 8px 7px; font-size: 13px; }
+}

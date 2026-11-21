@@ -834,6 +834,73 @@ func (q sqliteQueries) latestUsedPasswordReset(ctx context.Context, userID strin
 	return PasswordReset(row), err
 }
 
+func (q sqliteQueries) mfaTOTP(ctx context.Context, userID string) (MFATOTP, error) {
+	row, err := q.q.GetMFATOTP(ctx, userID)
+	return MFATOTP(row), err
+}
+func (q sqliteQueries) createMFATOTP(ctx context.Context, t MFATOTP) error {
+	return q.q.CreateMFATOTP(ctx, db.CreateMFATOTPParams(t))
+}
+func (q sqliteQueries) replaceMFATOTP(ctx context.Context, t MFATOTP) (int64, error) {
+	return q.q.ReplaceMFATOTP(ctx, db.ReplaceMFATOTPParams{SecretSealed: t.SecretSealed, LastStep: t.LastStep, CreatedAt: t.CreatedAt, UserID: t.UserID})
+}
+func (q sqliteQueries) useMFATOTPStep(ctx context.Context, userID string, step int64) (int64, error) {
+	return q.q.UseMFATOTPStep(ctx, db.UseMFATOTPStepParams{Step: step, UserID: userID})
+}
+func (q sqliteQueries) deleteMFATOTP(ctx context.Context, userID string) (int64, error) {
+	return q.q.DeleteMFATOTP(ctx, userID)
+}
+func (q sqliteQueries) listMFATOTPUserIDs(ctx context.Context) ([]string, error) {
+	return q.q.ListMFATOTPUserIDs(ctx)
+}
+func (q sqliteQueries) listWebAuthnCredentials(ctx context.Context, userID string) ([]WebAuthnCredential, error) {
+	rows, err := q.q.ListMFAWebAuthnCredentials(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]WebAuthnCredential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, WebAuthnCredential(row))
+	}
+	return out, nil
+}
+func (q sqliteQueries) countWebAuthnCredentials(ctx context.Context, userID string) (int64, error) {
+	return q.q.CountMFAWebAuthnCredentials(ctx, userID)
+}
+func (q sqliteQueries) createWebAuthnCredential(ctx context.Context, c WebAuthnCredential) (int64, error) {
+	return q.q.CreateMFAWebAuthnCredential(ctx, db.CreateMFAWebAuthnCredentialParams{ID: c.ID, UserID: c.UserID, CredentialID: c.CredentialID, Credential: c.Credential, Name: c.Name, CreatedAt: c.CreatedAt})
+}
+func (q sqliteQueries) updateWebAuthnCredential(ctx context.Context, userID, credentialID, credential string, now int64) (int64, error) {
+	return q.q.UpdateMFAWebAuthnCredential(ctx, db.UpdateMFAWebAuthnCredentialParams{Credential: credential, LastUsedAt: sql.NullInt64{Int64: now, Valid: true}, UserID: userID, CredentialID: credentialID})
+}
+func (q sqliteQueries) deleteWebAuthnCredential(ctx context.Context, userID, id string) (int64, error) {
+	return q.q.DeleteMFAWebAuthnCredential(ctx, db.DeleteMFAWebAuthnCredentialParams{UserID: userID, ID: id})
+}
+func (q sqliteQueries) deleteUserWebAuthnCredentials(ctx context.Context, userID string) error {
+	return q.q.DeleteUserMFAWebAuthnCredentials(ctx, userID)
+}
+func (q sqliteQueries) listWebAuthnUserIDs(ctx context.Context) ([]string, error) {
+	return q.q.ListMFAWebAuthnUserIDs(ctx)
+}
+func (q sqliteQueries) createRecoveryCode(ctx context.Context, userID string, c RecoveryCode, now int64) error {
+	return q.q.CreateMFARecoveryCode(ctx, db.CreateMFARecoveryCodeParams{ID: c.ID, UserID: userID, CodeHash: c.Hash, CreatedAt: now})
+}
+func (q sqliteQueries) countUnusedRecoveryCodes(ctx context.Context, userID string) (int64, error) {
+	return q.q.CountUnusedMFARecoveryCodes(ctx, userID)
+}
+func (q sqliteQueries) useRecoveryCode(ctx context.Context, userID, hash string, now int64) (int64, error) {
+	return q.q.UseMFARecoveryCode(ctx, db.UseMFARecoveryCodeParams{UsedAt: sql.NullInt64{Int64: now, Valid: true}, UserID: userID, CodeHash: hash})
+}
+func (q sqliteQueries) deleteUserRecoveryCodes(ctx context.Context, userID string) error {
+	return q.q.DeleteUserMFARecoveryCodes(ctx, userID)
+}
+func (q sqliteQueries) deleteExpiredUsedChallenges(ctx context.Context, now int64) error {
+	return q.q.DeleteExpiredMFAUsedChallenges(ctx, now)
+}
+func (q sqliteQueries) createUsedChallenge(ctx context.Context, hash string, expiresAt int64) (int64, error) {
+	return q.q.CreateMFAUsedChallenge(ctx, db.CreateMFAUsedChallengeParams{ChallengeHash: hash, ExpiresAt: expiresAt})
+}
+
 // users converts the rows of a user list query.
 func (sqliteQueries) users(rows []db.User, err error) ([]User, error) {
 	if err != nil {

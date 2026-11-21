@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"errors"
+	"github.com/i2bskn/astovia/internal/mfa"
 	"net"
 	"net/mail"
 	"net/netip"
@@ -31,7 +32,18 @@ type Config struct {
 	// Mail is the service that sends notification mail, or nil when
 	// ASTOVIA_MAIL_PROVIDER is not set (no e-mail notifications).
 	Mail *MailConfig
+	// MFARequired is who must have a second factor for password sign-in
+	// (ASTOVIA_MFA_REQUIRED): MFAOff, MFAOwners or MFAAll. The zero value is
+	// treated as MFAOff. It is validated but not used with OIDC sign-in.
+	MFARequired string
 }
+
+// Values of ASTOVIA_MFA_REQUIRED.
+const (
+	MFAOff    = mfa.PolicyOff
+	MFAOwners = mfa.PolicyOwners
+	MFAAll    = mfa.PolicyAll
+)
 
 // MailConfig is the service that sends notification mail, chosen by the
 // operator. The API key is never logged or put in an error.
@@ -114,6 +126,9 @@ func Load(requireSecret bool) (Config, error) {
 		return c, err
 	}
 	if c.Mail, err = mailConfig(); err != nil {
+		return c, err
+	}
+	if c.MFARequired, err = mfaRequired(); err != nil {
 		return c, err
 	}
 	if requireSecret {
@@ -335,6 +350,20 @@ func validMailFromName(v string) bool {
 		}
 	}
 	return n >= 1 && n <= 100
+}
+
+// mfaRequired reads ASTOVIA_MFA_REQUIRED: unset, empty or off requires no
+// second factor, owners requires one of the owners and all of every user.
+// The value is trimmed and lower-cased; any other value is an error, in
+// either sign-in mode and for the users commands as well.
+func mfaRequired() (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("ASTOVIA_MFA_REQUIRED"))); v {
+	case "", MFAOff:
+		return MFAOff, nil
+	case MFAOwners, MFAAll:
+		return v, nil
+	}
+	return "", errors.New("ASTOVIA_MFA_REQUIRED must be off, owners or all")
 }
 
 // boolEnv reads a boolean variable: true or 1 is true, and unset, empty,

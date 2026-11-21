@@ -132,11 +132,21 @@ func (f *contractFixture) reopen() (*store.Store, *Service) {
 
 func (f *contractFixture) login(email, password string) Result {
 	f.t.Helper()
-	r, err := f.auth.Login(f.ctx, email, password)
+	r, err := verifyAndLogin(f.ctx, f.auth, email, password)
 	if err != nil {
 		f.t.Fatalf("login %s: %v", email, err)
 	}
 	return r
+}
+
+// verifyAndLogin checks the password and starts a session, as the HTTP
+// layer does for a user without a second factor.
+func verifyAndLogin(ctx context.Context, a *Service, email, password string) (Result, error) {
+	u, err := a.Verify(ctx, email, password)
+	if err != nil {
+		return Result{}, err
+	}
+	return a.LoginUser(ctx, u)
 }
 
 func (f *contractFixture) assertActive(token, wantID string) {
@@ -184,7 +194,7 @@ func TestContracts(t *testing.T) {
 				f := newContractFixture(t, driver, "alice")
 				f.login("alice@example.com", "correct-password-123")
 				for _, name := range []string{"alice@example.com", "missing@example.com"} {
-					if _, err := f.auth.Login(f.ctx, name, "wrong-password"); !errors.Is(err, store.ErrUnauthorized) {
+					if _, err := f.auth.Verify(f.ctx, name, "wrong-password"); !errors.Is(err, store.ErrUnauthorized) {
 						t.Fatalf("invalid login %s: %v", name, err)
 					}
 				}
@@ -264,13 +274,13 @@ func TestContracts(t *testing.T) {
 					t.Fatal(err)
 				}
 				f.assertRejected(bob.AccessToken, "access after disable")
-				if _, err := f.auth.Login(f.ctx, "bob@example.com", "correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
+				if _, err := f.auth.Verify(f.ctx, "bob@example.com", "correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
 					t.Fatalf("disabled login: %v", err)
 				}
 				if err := f.store.ChangeUser(f.ctx, "bob@example.com", f.hash, false, f.now.Unix()); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := f.auth.Login(f.ctx, "bob@example.com", "correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
+				if _, err := f.auth.Verify(f.ctx, "bob@example.com", "correct-password-123"); !errors.Is(err, store.ErrUnauthorized) {
 					t.Fatalf("reset enabled disabled user: %v", err)
 				}
 			})
@@ -463,8 +473,8 @@ func TestInputBoundaries(t *testing.T) {
 			f := newContractFixture(t, driver, "alice")
 			r := f.login("alice@example.com", "correct-password-123")
 			for name, password := range map[string]string{"empty": "", "73 bytes": strings.Repeat("p", 73)} {
-				if _, err := f.auth.Login(f.ctx, "alice@example.com", password); !errors.Is(err, store.ErrUnauthorized) {
-					t.Fatalf("Login with %s password: %v", name, err)
+				if _, err := f.auth.Verify(f.ctx, "alice@example.com", password); !errors.Is(err, store.ErrUnauthorized) {
+					t.Fatalf("Verify with %s password: %v", name, err)
 				}
 			}
 			for name, raw := range map[string]string{
@@ -559,7 +569,7 @@ func activeAuthFixture(t *testing.T, driver string, names ...string) (*Service, 
 		if err = s.CreateUser(ctx, store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: hash, CreatedAt: now.Unix(), Role: store.RoleOwner}); err != nil {
 			t.Fatal(err)
 		}
-		result, err := a.Login(ctx, name+"@example.com", "correct-password-123")
+		result, err := verifyAndLogin(ctx, a, name+"@example.com", "correct-password-123")
 		if err != nil {
 			t.Fatal(err)
 		}

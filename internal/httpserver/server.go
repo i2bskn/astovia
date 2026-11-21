@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/auth"
@@ -98,6 +99,17 @@ type Server struct {
 	// rp is the OIDC relying party of cfg.OIDC; it is set exactly when
 	// cfg.OIDC is. Tests replace it.
 	rp relyingParty
+	// mfaPeerLimiter limits the /auth/mfa/* endpoints together, per peer
+	// like limiter. mfaLimiter limits the attempts to give a second factor
+	// code per user (5 in 15 minutes), and mfaPasswordLimiter the password
+	// checks of the two-step verification settings per user (10 in 5
+	// minutes); both count successful attempts as well.
+	mfaPeerLimiter     *loginLimiter
+	mfaLimiter         *loginLimiter
+	mfaPasswordLimiter *loginLimiter
+	// webauthn is the WebAuthn relying party of cfg.PublicURL. It is nil
+	// when passkeys and security keys cannot be used at that address.
+	webauthn *webauthn.WebAuthn
 }
 
 // userResponse is the public representation of the signed-in user.
@@ -177,7 +189,9 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: aiClient, box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute), aiTryLimiter: newKeyLimiter(5, time.Minute), aiEndpointLimiter: newKeyLimiter(10, time.Minute),
 		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute), slackSearchLimiter: newKeyLimiter(5, time.Minute), slackConversationsLimiter: newKeyLimiter(10, time.Minute),
 		slackHistoryLimiter: newKeyLimiter(4, time.Minute), slackUsersLimiter: newKeyLimiter(30, time.Minute),
-		gmailMCPLimiter: newKeyLimiter(gmailMCPUnits, time.Minute), gmailTokens: &gmailTokenCache{}}
+		gmailMCPLimiter: newKeyLimiter(gmailMCPUnits, time.Minute), gmailTokens: &gmailTokenCache{},
+		mfaPeerLimiter: newLoginLimiter(), mfaLimiter: newKeyLimiter(5, 15*time.Minute), mfaPasswordLimiter: newKeyLimiter(10, 5*time.Minute),
+		webauthn: newWebAuthn(c.PublicURL)}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -200,6 +214,17 @@ func (s *Server) handler() http.Handler {
 		mux.Handle("/auth/oidc/login", allow(http.MethodGet, http.HandlerFunc(s.handleOIDCLogin)))
 		mux.Handle(config.OIDCCallbackPath, allow(http.MethodGet, http.HandlerFunc(s.handleOIDCCallback)))
 	}
+	// The second factor of a password sign-in, given or enrolled before the
+	// session exists; the MFA token in the body identifies the user. They
+	// share mfaPeerLimiter.
+	mux.Handle("/auth/mfa/totp", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFATOTP)))))
+	mux.Handle("/auth/mfa/recovery", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFARecovery)))))
+	mux.Handle("/auth/mfa/enroll/totp/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollTOTPBegin)))))
+	mux.Handle("/auth/mfa/enroll/totp/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollTOTPFinish)))))
+	mux.Handle("/auth/mfa/webauthn/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAWebAuthnBegin)))))
+	mux.Handle("/auth/mfa/webauthn/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAWebAuthnFinish)))))
+	mux.Handle("/auth/mfa/enroll/webauthn/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollWebAuthnBegin)))))
+	mux.Handle("/auth/mfa/enroll/webauthn/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollWebAuthnFinish)))))
 	mux.Handle("/auth/refresh", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleRefresh))))
 	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))
 	// The invitation and password reset links are used before signing in.
@@ -213,6 +238,16 @@ func (s *Server) handler() http.Handler {
 	// manage credentials or the account use requireUser. The user management
 	// routes use requireOwner, which is requireUser plus the owner role.
 	mux.Handle("/api/v1/me", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleMe))))
+	// Two-step verification of the signed-in user, password sign-in only.
+	// The removals are POSTs because they carry the current password.
+	mux.Handle("/api/v1/mfa", allow(http.MethodGet, s.requireUser(s.passwordAuth(http.HandlerFunc(s.handleGetMFA)))))
+	mux.Handle("/api/v1/mfa/totp/begin", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleBeginTOTP))))))
+	mux.Handle("/api/v1/mfa/totp/finish", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleFinishTOTP))))))
+	mux.Handle("/api/v1/mfa/totp/delete", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleDeleteTOTP))))))
+	mux.Handle("/api/v1/mfa/webauthn/begin", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleBeginWebAuthn))))))
+	mux.Handle("/api/v1/mfa/webauthn/finish", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleFinishWebAuthn))))))
+	mux.Handle("/api/v1/mfa/webauthn/{id}/delete", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleDeleteWebAuthn))))))
+	mux.Handle("/api/v1/mfa/recovery-codes", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleRecoveryCodes))))))
 	mux.Handle("/api/v1/users", allow(http.MethodGet, s.requireOwner(http.HandlerFunc(s.handleListUsers))))
 	mux.Handle("/api/v1/users/{id}", allow(http.MethodPatch, s.requireOwner(requireJSON(http.HandlerFunc(s.handlePatchUser)))))
 	// The password reset link takes no body, so no content type is required.
@@ -523,12 +558,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_request", "Credentials exceed the supported length.")
 		return
 	}
-	result, err := s.auth.Login(r.Context(), in.Email, in.Password)
+	u, err := s.auth.Verify(r.Context(), in.Email, in.Password)
 	if err != nil {
 		s.authError(w, r, err)
 		return
 	}
-	s.writeAuthResult(w, r, result)
+	s.passwordSignIn(w, r, u, func(err error) { s.authError(w, r, err) })
 }
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var empty struct{}

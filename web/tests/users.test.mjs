@@ -4,7 +4,7 @@ import { createUsersClient, isForbidden, userActions, usersErrorMessage } from '
 
 globalThis.location = { origin: 'https://astovia.test' };
 
-const user = (id, role, disabled = false) => ({ id, email: `${id}@example.com`, role, disabled, created_at: '2026-10-23T01:02:03Z' });
+const user = (id, role, disabled = false) => ({ id, email: `${id}@example.com`, role, disabled, created_at: '2026-10-23T01:02:03Z', mfa_enabled: false });
 
 test('nobody disables itself and the last enabled owner stays an owner', () => {
   const me = user('me', 'owner');
@@ -70,6 +70,12 @@ test('unexpected responses are rejected', async () => {
   const reply = (data) => createUsersClient(async () => data);
   await assert.rejects(reply({ users: [{ ...user('a', 'admin') }] }).listUsers());
   await assert.rejects(reply({ users: [{ ...user('a', 'owner'), disabled: 0 }] }).listUsers());
+  // mfa_enabled must be a boolean, in the list and in a changed user.
+  const { mfa_enabled: _mfa, ...withoutMFA } = user('a', 'owner');
+  await assert.rejects(reply({ users: [withoutMFA] }).listUsers());
+  await assert.rejects(reply({ users: [{ ...user('a', 'owner'), mfa_enabled: 1 }] }).listUsers());
+  await assert.rejects(reply(withoutMFA).updateUser('a', { disabled: false }));
+  assert.equal((await reply({ users: [{ ...user('a', 'owner'), mfa_enabled: true }] }).listUsers())[0].mfa_enabled, true);
   await assert.rejects(reply({ url: 'https://evil.test/reset-password#pwr_x', expires_at: 'x' }).createPasswordReset('a'));
   await assert.rejects(reply({ url: 'https://astovia.test/invite#inv_x', expires_at: 'x' }).createPasswordReset('a'));
   await assert.rejects(reply({ id: 'i', email: 'c@example.com', role: 'member', created_at: 'x', expires_at: 'y', url: 'https://astovia.test/reset-password#pwr_x' }).createInvitation('c@example.com', 'member', 'password'));

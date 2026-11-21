@@ -18,6 +18,7 @@ services:
       ASTOVIA_OIDC_CLIENT_ID: ${ASTOVIA_OIDC_CLIENT_ID:-}
       ASTOVIA_OIDC_CLIENT_SECRET: ${ASTOVIA_OIDC_CLIENT_SECRET:-}
       ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED: ${ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED:-}
+      ASTOVIA_MFA_REQUIRED: ${ASTOVIA_MFA_REQUIRED:-}
       # ASTOVIA_ALLOWED_EMAILS was removed. It is passed only so that a value
       # left in .env stops Astovia with instructions instead of being ignored
       # silently.

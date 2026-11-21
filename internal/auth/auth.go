@@ -175,14 +175,20 @@ func New(s *store.Store, secret []byte, issuer string) (*Service, error) {
 	}
 	return &Service{Store: s, secret: secret, issuer: issuer, dummy: d, Now: time.Now}, nil
 }
-func (s *Service) Login(ctx context.Context, email, password string) (Result, error) {
+
+// Verify checks the password of the user with email and returns the stored
+// user. It starts no session: the caller decides whether a second factor is
+// needed first and then calls LoginUser. A missing user, a wrong password
+// and a disabled user all fail with store.ErrUnauthorized, after the same
+// bcrypt work.
+func (s *Service) Verify(ctx context.Context, email, password string) (store.User, error) {
 	normalized, e := Email(email)
 	if e != nil || len(password) < 1 || len(password) > 72 {
-		return Result{}, store.ErrUnauthorized
+		return store.User{}, store.ErrUnauthorized
 	}
 	u, e := s.Store.UserByEmail(ctx, normalized)
 	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		return Result{}, e
+		return store.User{}, e
 	}
 	hash := s.dummy
 	if e == nil {
@@ -190,15 +196,16 @@ func (s *Service) Login(ctx context.Context, email, password string) (Result, er
 	}
 	check := bcrypt.CompareHashAndPassword(hash, []byte(password))
 	if e != nil || check != nil || u.Disabled != 0 {
-		return Result{}, store.ErrUnauthorized
+		return store.User{}, store.ErrUnauthorized
 	}
-	return s.LoginUser(ctx, u)
+	return u, nil
 }
 
-// LoginUser starts a session for u without a password, after the caller
-// has verified the user another way: accepting an invitation or completing
-// a password reset. u must be the stored user, including its current
-// password hash; the store rejects a disabled user or a changed hash.
+// LoginUser starts a session for u, after the caller has verified the user:
+// with the password (Verify) and, when one is needed, a second factor, by
+// accepting an invitation or by completing a password reset. u must be the
+// stored user, including its current password hash; the store rejects a
+// disabled user or a changed hash.
 func (s *Service) LoginUser(ctx context.Context, u store.User) (Result, error) {
 	sid, e := Random()
 	if e != nil {

@@ -15,6 +15,7 @@ import ConsentPage from './ConsentPage';
 import { dateTime } from './format';
 import GoogleCallbackPage from './GoogleCallbackPage';
 import { linkPageAt } from './links';
+import MFAStep from './MFAStep';
 import { resetNoticeKey, resetNoticeText, showResetNotice } from './resetNotice';
 import { AutoIcon, SettingsIcon, SidebarIcon, SparkleIcon, TasksIcon } from './icons';
 import Phrased from './Phrased';
@@ -352,6 +353,15 @@ export default function App() {
   const linkPage = linkPageAt(pathname);
   const config = configState.config;
   const oidc = config?.mode === 'oidc';
+  // linkUsed remembers that the link of this screen was used and its
+  // sign-in went on to the second factor. Once that sign-in is over, the
+  // link screen has nothing left to show and / takes over: the workspace
+  // when the factor was given, and the login form when the sign-in was
+  // dropped (the user starts over, it expires, another tab signs out).
+  const [linkUsed, setLinkUsed] = useState(false);
+  const linkPending = linkPage !== null && state.mfa !== null;
+  if (linkPending && !linkUsed) setLinkUsed(true);
+  if (linkPage === null && linkUsed) setLinkUsed(false);
 
   // Nothing is shown before the sign-in mode is known.
   if (configState.status !== 'ready' || !config) {
@@ -362,6 +372,12 @@ export default function App() {
   if (isSigninErrorPath(pathname)) return <Gate><SigninErrorPage config={config} /></Gate>;
 
   if (linkPage && oidc) return <Gate><OIDCLinkNotice /></Gate>;
+
+  // A password sign-in that waits for its second factor comes before the
+  // link screens, the login form and the consent page.
+  if (state.mfa && !oidc) return <Gate><MFAStep key={state.mfa.token} pending={state.mfa} /></Gate>;
+
+  if (linkPage && linkUsed) return <Navigate to="/" replace />;
 
   if (linkPage) {
     return <Gate>

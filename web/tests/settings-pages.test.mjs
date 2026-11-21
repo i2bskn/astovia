@@ -14,7 +14,9 @@ test('settings has four pages under /settings', () => {
 });
 
 test('the account screen has its own pages under /account', () => {
-  assert.deepEqual(accountPages.map((p) => p.path), ['', 'users']);
+  assert.deepEqual(accountPages.map((p) => p.path), ['', 'security', 'users']);
+  assert.equal(accountPageAt('/account/security'), 'security');
+  assert.equal(accountPageAt('/account/security/'), 'security');
   assert.equal(accountPageAt('/account'), 'account');
   assert.equal(accountPageAt('/account/'), 'account');
   assert.equal(accountPageAt('/account/users'), 'users');
@@ -91,7 +93,15 @@ test('the integrations page sums up the mail accounts', () => {
 });
 
 test('the user management page is shown to owners only', () => {
-  assert.deepEqual(visibleAccountPages('owner').map((p) => p.value), ['account', 'users']);
-  assert.deepEqual(visibleAccountPages('member').map((p) => p.value), ['account']);
+  assert.deepEqual(visibleAccountPages('owner', 'password').map((p) => p.value), ['account', 'security', 'users']);
+  assert.deepEqual(visibleAccountPages('member', 'password').map((p) => p.value), ['account', 'security']);
   assert.equal(accountPages.find((p) => p.value === 'users').label, 'ユーザー管理');
+});
+
+test('two-step verification is a page of password sign-in only', () => {
+  assert.equal(accountPages.find((p) => p.value === 'security').label, '二段階認証');
+  assert.deepEqual(visibleAccountPages('owner', 'oidc').map((p) => p.value), ['account', 'users']);
+  assert.deepEqual(visibleAccountPages('member', 'oidc').map((p) => p.value), ['account']);
+  // The old Settings URLs never had this page.
+  assert.equal(legacyAccountPath('/settings/security'), null);
 });

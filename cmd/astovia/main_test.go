@@ -61,7 +61,11 @@ func TestUsersCommand(t *testing.T) {
 			}
 			login := func(password string) error {
 				t.Helper()
-				_, err := a.Login(ctx, "alice@example.com", password)
+				u, err := a.Verify(ctx, "alice@example.com", password)
+				if err != nil {
+					return err
+				}
+				_, err = a.LoginUser(ctx, u)
 				return err
 			}
 
@@ -91,7 +95,7 @@ func TestUsersCommand(t *testing.T) {
 				{"disable with password-stdin", []string{"disable", "--email", "alice@example.com", "--password-stdin"}, "disable does not accept --password-stdin"},
 				{"extra arguments", []string{"create", "--email", "alice@example.com", "extra"}, "unexpected arguments"},
 				{"unknown subcommand", []string{"rename", "--email", "alice@example.com"}, "unknown users command"},
-				{"no subcommand", nil, "users command requires create, reset-password, disable, enable, role, or unlink"},
+				{"no subcommand", nil, "users command requires create, reset-password, disable, enable, role, unlink, or reset-mfa"},
 				{"username flag", []string{"create", "--username", "alice@example.com", "--password-stdin"}, "flag provided but not defined: -username"},
 				{"invalid email on create", []string{"create", "--email", "alice", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
 				{"invalid email on reset-password", []string{"reset-password", "--email", "alice@", "--password-stdin"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
@@ -182,7 +186,7 @@ func TestUsersCommand(t *testing.T) {
 func TestRunUsage(t *testing.T) {
 	for _, args := range [][]string{{"serve", "x"}, {"foo"}} {
 		err := run(args)
-		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable/role/unlink --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]" {
+		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable/role/unlink/reset-mfa --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]" {
 			t.Fatalf("%q: got %v", args, err)
 		}
 	}
@@ -231,7 +235,11 @@ func TestUsersRoleCommand(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			session, err := a.Login(ctx, "bob@example.com", "correct-password-123")
+			verified, err := a.Verify(ctx, "bob@example.com", "correct-password-123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := a.LoginUser(ctx, verified)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -330,7 +338,7 @@ func TestUsersNoPasswordAndUnlink(t *testing.T) {
 				}
 			}
 			for _, password := range []string{store.NoPasswordHash, "correct-password-123", ""} {
-				if _, err = a.Login(ctx, "alice@example.com", password); !errors.Is(err, store.ErrUnauthorized) {
+				if _, err = a.Verify(ctx, "alice@example.com", password); !errors.Is(err, store.ErrUnauthorized) {
 					t.Fatalf("password %q: %v", password, err)
 				}
 			}
@@ -399,6 +407,112 @@ func TestUsersNoPasswordAndUnlink(t *testing.T) {
 			}
 			if err = call("unlink", "--all"); err != nil {
 				t.Fatalf("unlink --all again: %v", err)
+			}
+		})
+	}
+}
+
+func TestUsersResetMFA(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			s, _ := testutil.Database(t, driver)
+			a, err := auth.New(s, make([]byte, 32), "http://localhost:8080")
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := func(args ...string) error {
+				t.Helper()
+				return account(ctx, s, args, strings.NewReader(""))
+			}
+			hash, err := auth.Password("correct-password-123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().Unix()
+			for _, name := range []string{"alice", "bob"} {
+				id := name + "-id"
+				if err = s.CreateUser(ctx, store.User{ID: id, Email: name + "@example.com", PasswordHash: hash, CreatedAt: now, Role: store.RoleOwner}); err != nil {
+					t.Fatal(err)
+				}
+				codes := []store.RecoveryCode{{ID: name + "-code", Hash: name + "-code-hash"}}
+				if _, err = s.EnrollTOTP(ctx, store.MFATOTP{UserID: id, SecretSealed: "sealed", LastStep: 1, CreatedAt: now}, codes, false); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = s.EnrollWebAuthn(ctx, store.WebAuthnCredential{ID: name + "-credential", UserID: id, CredentialID: name + "-key", Credential: "{}", Name: "Key", CreatedAt: now}, nil, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			alice, err := s.UserByEmail(ctx, "alice@example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := a.LoginUser(ctx, alice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			enrolled := func(id string) bool {
+				t.Helper()
+				status, err := s.MFAStatus(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if status.Enrolled() != (status.RecoveryCodes > 0) {
+					t.Fatalf("%s: %+v", id, status)
+				}
+				return status.Enrolled()
+			}
+
+			for _, tc := range []struct {
+				name string
+				args []string
+				want string
+			}{
+				{"no email", []string{"reset-mfa"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"invalid email", []string{"reset-mfa", "--email", "alice"}, "email must be a valid ASCII address such as alice@example.com, up to 254 characters"},
+				{"role", []string{"reset-mfa", "--email", "alice@example.com", "--role", "owner"}, "reset-mfa does not accept --role"},
+				{"password-stdin", []string{"reset-mfa", "--email", "alice@example.com", "--password-stdin"}, "reset-mfa does not accept --password-stdin"},
+				{"no-password", []string{"reset-mfa", "--email", "alice@example.com", "--no-password"}, "reset-mfa does not accept --no-password"},
+				{"all", []string{"reset-mfa", "--email", "alice@example.com", "--all"}, "reset-mfa does not accept --all"},
+				{"all without email", []string{"reset-mfa", "--all"}, "reset-mfa does not accept --all"},
+				{"extra arguments", []string{"reset-mfa", "--email", "alice@example.com", "extra"}, "unexpected arguments"},
+			} {
+				if err = call(tc.args...); err == nil || err.Error() != tc.want {
+					t.Fatalf("%s: got %v, want %q", tc.name, err, tc.want)
+				}
+			}
+			if err = call("reset-mfa", "--email", "missing@example.com"); !errors.Is(err, store.ErrNotFound) || err.Error() != "user not found" {
+				t.Fatalf("missing user: %v", err)
+			}
+			if !enrolled("alice-id") || !enrolled("bob-id") {
+				t.Fatal("rejected commands reset a user")
+			}
+
+			// reset-mfa clears one user, twice without an error, and keeps
+			// the session and the password.
+			for range 2 {
+				if err = call("reset-mfa", "--email", "Alice@Example.com"); err != nil {
+					t.Fatalf("reset-mfa: %v", err)
+				}
+			}
+			if enrolled("alice-id") || !enrolled("bob-id") {
+				t.Fatal("reset-mfa")
+			}
+			if _, err = a.Refresh(ctx, session.Refresh); err != nil {
+				t.Fatalf("refresh after reset-mfa: %v", err)
+			}
+			if _, err = a.Verify(ctx, "alice@example.com", "correct-password-123"); err != nil {
+				t.Fatalf("password after reset-mfa: %v", err)
+			}
+			// A disabled user can be reset as well.
+			if err = s.ChangeUser(ctx, "bob@example.com", "", true, now); err != nil {
+				t.Fatal(err)
+			}
+			if err = call("reset-mfa", "--email", "bob@example.com"); err != nil {
+				t.Fatalf("reset-mfa of a disabled user: %v", err)
+			}
+			if enrolled("bob-id") {
+				t.Fatal("reset-mfa of a disabled user")
 			}
 		})
 	}

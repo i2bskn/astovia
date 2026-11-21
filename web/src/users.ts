@@ -13,6 +13,9 @@ export interface ManagedUser {
   role: Role;
   disabled: boolean;
   created_at: string;
+  // mfa_enabled tells whether the user has a second factor for password
+  // sign-in.
+  mfa_enabled: boolean;
 }
 
 export interface Invitation {
@@ -58,7 +61,7 @@ function isRole(value: unknown): value is Role {
 
 function isManagedUser(value: unknown): value is ManagedUser {
   return isRecord(value) && typeof value.id === 'string' && value.id !== '' && typeof value.email === 'string' &&
-    isRole(value.role) && typeof value.disabled === 'boolean' && typeof value.created_at === 'string';
+    isRole(value.role) && typeof value.disabled === 'boolean' && typeof value.created_at === 'string' && typeof value.mfa_enabled === 'boolean';
 }
 
 function isInvitation(value: unknown): value is Invitation {

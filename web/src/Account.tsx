@@ -2,14 +2,17 @@ import { useId, useSyncExternalStore } from 'react';
 import { Navigate, NavLink, Route, Routes, useLocation } from 'react-router';
 import { auth } from './auth';
 import type { Role } from './auth';
-import { UserIcon, UsersIcon } from './icons';
+import { authConfig } from './authConfig';
+import { ShieldIcon, UserIcon, UsersIcon } from './icons';
 import Phrased from './Phrased';
+import SecuritySettings from './SecuritySettings';
 import { accountPageAt, visibleAccountPages } from './settingsPages';
 import type { AccountPage } from './settingsPages';
 import UserSettings from './UserSettings';
 
 const pageIcons: Record<AccountPage, () => React.JSX.Element> = {
   account: () => <UserIcon />,
+  security: () => <ShieldIcon />,
   users: () => <UsersIcon />,
 };
 
@@ -30,13 +33,15 @@ function AccountSettings({ email }: { email: string }) {
   </section>;
 }
 
-// Account holds the signed-in account and, for owners, user management.
-// Members have one page and see no tabs; a member opening the user
-// management URL goes back to /account.
+// Account holds the signed-in account, its two-step verification (with
+// password sign-in) and, for owners, user management. A page that is not
+// shown to the user goes back to /account when its URL is opened: user
+// management for members, two-step verification with single sign-on.
 export default function Account({ userID, email, role }: { userID: string; email: string; role: Role }) {
   const location = useLocation();
   const page = accountPageAt(location.pathname);
-  const pages = visibleAccountPages(role);
+  const mode = useSyncExternalStore(authConfig.subscribe, authConfig.getSnapshot).config?.mode === 'oidc' ? 'oidc' : 'password';
+  const pages = visibleAccountPages(role, mode);
 
   return <>
     <header className="page-header" data-page={page ?? undefined}>
@@ -48,6 +53,7 @@ export default function Account({ userID, email, role }: { userID: string; email
     </nav> : null}
     <Routes>
       <Route index element={<AccountSettings email={email} />} />
+      {mode === 'password' ? <Route path="security" element={<SecuritySettings />} /> : null}
       {role === 'owner' ? <Route path="users" element={<UserSettings userID={userID} />} /> : null}
       <Route path="*" element={<Navigate to="/account" replace />} />
     </Routes>

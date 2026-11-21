@@ -205,6 +205,17 @@ func (q *Queries) CountGmailAccounts(ctx context.Context, userID string) (int64,
 	return count, err
 }
 
+const countMFAWebAuthnCredentials = `-- name: CountMFAWebAuthnCredentials :one
+SELECT COUNT(*) FROM mfa_webauthn_credentials WHERE user_id = $1
+`
+
+func (q *Queries) CountMFAWebAuthnCredentials(ctx context.Context, userID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMFAWebAuthnCredentials, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countNotificationsByDedupeKey = `-- name: CountNotificationsByDedupeKey :one
 SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND dedupe_key = $2
 `
@@ -227,6 +238,17 @@ SELECT COUNT(*) FROM web_push_subscriptions WHERE user_id = $1
 
 func (q *Queries) CountPushSubscriptions(ctx context.Context, userID string) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countPushSubscriptions, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countUnusedMFARecoveryCodes = `-- name: CountUnusedMFARecoveryCodes :one
+SELECT COUNT(*) FROM mfa_recovery_codes WHERE user_id = $1 AND used_at IS NULL
+`
+
+func (q *Queries) CountUnusedMFARecoveryCodes(ctx context.Context, userID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countUnusedMFARecoveryCodes, userID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -588,6 +610,99 @@ func (q *Queries) CreateInvitation(ctx context.Context, arg CreateInvitationPara
 		arg.ExpiresAt,
 	)
 	return err
+}
+
+const createMFARecoveryCode = `-- name: CreateMFARecoveryCode :exec
+INSERT INTO mfa_recovery_codes (id,user_id,code_hash,created_at)
+VALUES ($1,$2,$3,$4)
+`
+
+type CreateMFARecoveryCodeParams struct {
+	ID        string
+	UserID    string
+	CodeHash  string
+	CreatedAt int64
+}
+
+func (q *Queries) CreateMFARecoveryCode(ctx context.Context, arg CreateMFARecoveryCodeParams) error {
+	_, err := q.db.ExecContext(ctx, createMFARecoveryCode,
+		arg.ID,
+		arg.UserID,
+		arg.CodeHash,
+		arg.CreatedAt,
+	)
+	return err
+}
+
+const createMFATOTP = `-- name: CreateMFATOTP :exec
+INSERT INTO mfa_totp (user_id,secret_sealed,last_step,created_at)
+VALUES ($1,$2,$3,$4)
+`
+
+type CreateMFATOTPParams struct {
+	UserID       string
+	SecretSealed string
+	LastStep     int64
+	CreatedAt    int64
+}
+
+func (q *Queries) CreateMFATOTP(ctx context.Context, arg CreateMFATOTPParams) error {
+	_, err := q.db.ExecContext(ctx, createMFATOTP,
+		arg.UserID,
+		arg.SecretSealed,
+		arg.LastStep,
+		arg.CreatedAt,
+	)
+	return err
+}
+
+const createMFAUsedChallenge = `-- name: CreateMFAUsedChallenge :execrows
+INSERT INTO mfa_used_challenges (challenge_hash,expires_at)
+VALUES ($1,$2)
+ON CONFLICT (challenge_hash) DO NOTHING
+`
+
+type CreateMFAUsedChallengeParams struct {
+	ChallengeHash string
+	ExpiresAt     int64
+}
+
+func (q *Queries) CreateMFAUsedChallenge(ctx context.Context, arg CreateMFAUsedChallengeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, createMFAUsedChallenge, arg.ChallengeHash, arg.ExpiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const createMFAWebAuthnCredential = `-- name: CreateMFAWebAuthnCredential :execrows
+INSERT INTO mfa_webauthn_credentials (id,user_id,credential_id,credential,name,created_at)
+VALUES ($1,$2,$3,$4,$5,$6)
+ON CONFLICT (credential_id) DO NOTHING
+`
+
+type CreateMFAWebAuthnCredentialParams struct {
+	ID           string
+	UserID       string
+	CredentialID string
+	Credential   string
+	Name         string
+	CreatedAt    int64
+}
+
+func (q *Queries) CreateMFAWebAuthnCredential(ctx context.Context, arg CreateMFAWebAuthnCredentialParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, createMFAWebAuthnCredential,
+		arg.ID,
+		arg.UserID,
+		arg.CredentialID,
+		arg.Credential,
+		arg.Name,
+		arg.CreatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const createNotificationSettingsIfMissing = `-- name: CreateNotificationSettingsIfMissing :exec
@@ -963,6 +1078,15 @@ func (q *Queries) DeleteExpiredGoogleAuthStates(ctx context.Context, arg DeleteE
 	return err
 }
 
+const deleteExpiredMFAUsedChallenges = `-- name: DeleteExpiredMFAUsedChallenges :exec
+DELETE FROM mfa_used_challenges WHERE expires_at <= $1
+`
+
+func (q *Queries) DeleteExpiredMFAUsedChallenges(ctx context.Context, now int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredMFAUsedChallenges, now)
+	return err
+}
+
 const deleteExpiredOAuthGrants = `-- name: DeleteExpiredOAuthGrants :exec
 DELETE FROM oauth_grants WHERE user_id = $1 AND expires_at <= $2
 `
@@ -1060,6 +1184,35 @@ type DeleteItemPendingNotificationsParams struct {
 func (q *Queries) DeleteItemPendingNotifications(ctx context.Context, arg DeleteItemPendingNotificationsParams) error {
 	_, err := q.db.ExecContext(ctx, deleteItemPendingNotifications, arg.UserID, arg.ActionItemID)
 	return err
+}
+
+const deleteMFATOTP = `-- name: DeleteMFATOTP :execrows
+DELETE FROM mfa_totp WHERE user_id = $1
+`
+
+func (q *Queries) DeleteMFATOTP(ctx context.Context, userID string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteMFATOTP, userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteMFAWebAuthnCredential = `-- name: DeleteMFAWebAuthnCredential :execrows
+DELETE FROM mfa_webauthn_credentials WHERE user_id = $1 AND id = $2
+`
+
+type DeleteMFAWebAuthnCredentialParams struct {
+	UserID string
+	ID     string
+}
+
+func (q *Queries) DeleteMFAWebAuthnCredential(ctx context.Context, arg DeleteMFAWebAuthnCredentialParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteMFAWebAuthnCredential, arg.UserID, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const deleteOAuthGrant = `-- name: DeleteOAuthGrant :execrows
@@ -1173,6 +1326,24 @@ DELETE FROM google_auth_states WHERE user_id = $1
 
 func (q *Queries) DeleteUserGoogleAuthStates(ctx context.Context, userID string) error {
 	_, err := q.db.ExecContext(ctx, deleteUserGoogleAuthStates, userID)
+	return err
+}
+
+const deleteUserMFARecoveryCodes = `-- name: DeleteUserMFARecoveryCodes :exec
+DELETE FROM mfa_recovery_codes WHERE user_id = $1
+`
+
+func (q *Queries) DeleteUserMFARecoveryCodes(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserMFARecoveryCodes, userID)
+	return err
+}
+
+const deleteUserMFAWebAuthnCredentials = `-- name: DeleteUserMFAWebAuthnCredentials :exec
+DELETE FROM mfa_webauthn_credentials WHERE user_id = $1
+`
+
+func (q *Queries) DeleteUserMFAWebAuthnCredentials(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserMFAWebAuthnCredentials, userID)
 	return err
 }
 
@@ -1749,6 +1920,22 @@ func (q *Queries) GetInvitationByTokenHash(ctx context.Context, tokenHash string
 		&i.AcceptedAt,
 		&i.AcceptedUserID,
 		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const getMFATOTP = `-- name: GetMFATOTP :one
+SELECT user_id, secret_sealed, last_step, created_at FROM mfa_totp WHERE user_id = $1
+`
+
+func (q *Queries) GetMFATOTP(ctx context.Context, userID string) (MfaTotp, error) {
+	row := q.db.QueryRowContext(ctx, getMFATOTP, userID)
+	var i MfaTotp
+	err := row.Scan(
+		&i.UserID,
+		&i.SecretSealed,
+		&i.LastStep,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -3490,6 +3677,96 @@ func (q *Queries) ListGoogleAuthStateHashes(ctx context.Context, userID string) 
 	return items, nil
 }
 
+const listMFATOTPUserIDs = `-- name: ListMFATOTPUserIDs :many
+SELECT user_id FROM mfa_totp
+`
+
+func (q *Queries) ListMFATOTPUserIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listMFATOTPUserIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var user_id string
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMFAWebAuthnCredentials = `-- name: ListMFAWebAuthnCredentials :many
+SELECT id, user_id, credential_id, credential, name, created_at, last_used_at FROM mfa_webauthn_credentials
+WHERE user_id = $1 ORDER BY created_at, id
+`
+
+func (q *Queries) ListMFAWebAuthnCredentials(ctx context.Context, userID string) ([]MfaWebauthnCredential, error) {
+	rows, err := q.db.QueryContext(ctx, listMFAWebAuthnCredentials, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MfaWebauthnCredential
+	for rows.Next() {
+		var i MfaWebauthnCredential
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.CredentialID,
+			&i.Credential,
+			&i.Name,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMFAWebAuthnUserIDs = `-- name: ListMFAWebAuthnUserIDs :many
+SELECT DISTINCT user_id FROM mfa_webauthn_credentials
+`
+
+func (q *Queries) ListMFAWebAuthnUserIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listMFAWebAuthnUserIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var user_id string
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listNotificationUserIDs = `-- name: ListNotificationUserIDs :many
 SELECT user_id FROM web_push_subscriptions
 WHERE user_id IN (SELECT id FROM users WHERE disabled = 0)
@@ -4776,6 +5053,31 @@ func (q *Queries) ReplaceInstanceSecret(ctx context.Context, arg ReplaceInstance
 	return result.RowsAffected()
 }
 
+const replaceMFATOTP = `-- name: ReplaceMFATOTP :execrows
+UPDATE mfa_totp SET secret_sealed = $1, last_step = $2, created_at = $3
+WHERE user_id = $4
+`
+
+type ReplaceMFATOTPParams struct {
+	SecretSealed string
+	LastStep     int64
+	CreatedAt    int64
+	UserID       string
+}
+
+func (q *Queries) ReplaceMFATOTP(ctx context.Context, arg ReplaceMFATOTPParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, replaceMFATOTP,
+		arg.SecretSealed,
+		arg.LastStep,
+		arg.CreatedAt,
+		arg.UserID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const replaceSlackConnection = `-- name: ReplaceSlackConnection :exec
 UPDATE slack_connections SET generation = $1, token_sealed = $2, token_last4 = $3, team_id = $4, team_name = $5, team_url = $6, slack_user_id = $7, slack_user_name = $8, scopes = $9, immediate_notify = $10, detect_mentions = $11, detect_dms = $12, detect_group_dms = $13, status = $14, last_error = $15, failure_count = $16, connected_at = $17, next_poll_at = $18, last_synced_at = $19, last_tracked_at = $20, updated_at = $21
 WHERE user_id = $22
@@ -5431,6 +5733,31 @@ func (q *Queries) UpdateGmailTokenSealed(ctx context.Context, arg UpdateGmailTok
 	return result.RowsAffected()
 }
 
+const updateMFAWebAuthnCredential = `-- name: UpdateMFAWebAuthnCredential :execrows
+UPDATE mfa_webauthn_credentials SET credential = $1, last_used_at = $2
+WHERE user_id = $3 AND credential_id = $4
+`
+
+type UpdateMFAWebAuthnCredentialParams struct {
+	Credential   string
+	LastUsedAt   sql.NullInt64
+	UserID       string
+	CredentialID string
+}
+
+func (q *Queries) UpdateMFAWebAuthnCredential(ctx context.Context, arg UpdateMFAWebAuthnCredentialParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateMFAWebAuthnCredential,
+		arg.Credential,
+		arg.LastUsedAt,
+		arg.UserID,
+		arg.CredentialID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateNotificationResult = `-- name: UpdateNotificationResult :exec
 UPDATE notifications SET attempts = $1, last_error = $2, scheduled_at = $3, sent_at = $4
 WHERE id = $5 AND sent_at IS NULL
@@ -5660,6 +5987,42 @@ type UpsertSlackWebhookParams struct {
 func (q *Queries) UpsertSlackWebhook(ctx context.Context, arg UpsertSlackWebhookParams) error {
 	_, err := q.db.ExecContext(ctx, upsertSlackWebhook, arg.UserID, arg.SlackWebhookSealed, arg.UpdatedAt)
 	return err
+}
+
+const useMFARecoveryCode = `-- name: UseMFARecoveryCode :execrows
+UPDATE mfa_recovery_codes SET used_at = $1
+WHERE user_id = $2 AND code_hash = $3 AND used_at IS NULL
+`
+
+type UseMFARecoveryCodeParams struct {
+	UsedAt   sql.NullInt64
+	UserID   string
+	CodeHash string
+}
+
+func (q *Queries) UseMFARecoveryCode(ctx context.Context, arg UseMFARecoveryCodeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, useMFARecoveryCode, arg.UsedAt, arg.UserID, arg.CodeHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const useMFATOTPStep = `-- name: UseMFATOTPStep :execrows
+UPDATE mfa_totp SET last_step = $1 WHERE user_id = $2 AND last_step < $1
+`
+
+type UseMFATOTPStepParams struct {
+	Step   int64
+	UserID string
+}
+
+func (q *Queries) UseMFATOTPStep(ctx context.Context, arg UseMFATOTPStepParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, useMFATOTPStep, arg.Step, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const usePasswordReset = `-- name: UsePasswordReset :execrows

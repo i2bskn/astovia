@@ -156,6 +156,36 @@ type Invitation struct {
 	RevokedAt      sql.NullInt64
 }
 
+type MfaRecoveryCode struct {
+	ID        string
+	UserID    string
+	CodeHash  string
+	CreatedAt int64
+	UsedAt    sql.NullInt64
+}
+
+type MfaTotp struct {
+	UserID       string
+	SecretSealed string
+	LastStep     int64
+	CreatedAt    int64
+}
+
+type MfaUsedChallenge struct {
+	ChallengeHash string
+	ExpiresAt     int64
+}
+
+type MfaWebauthnCredential struct {
+	ID           string
+	UserID       string
+	CredentialID string
+	Credential   string
+	Name         string
+	CreatedAt    int64
+	LastUsedAt   sql.NullInt64
+}
+
 type Notification struct {
 	ID           string
 	UserID       string

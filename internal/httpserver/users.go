@@ -20,6 +20,9 @@ type adminUserResponse struct {
 	Role      string `json:"role"`
 	Disabled  bool   `json:"disabled"`
 	CreatedAt string `json:"created_at"`
+	// MFAEnabled tells whether the user has a second factor, whatever the
+	// sign-in mode.
+	MFAEnabled bool `json:"mfa_enabled"`
 }
 
 type adminUserListResponse struct {
@@ -65,8 +68,8 @@ type inspectedPasswordResetResponse struct {
 	Email string `json:"email"`
 }
 
-func toAdminUserResponse(u store.User) adminUserResponse {
-	return adminUserResponse{ID: u.ID, Email: u.Email, Role: u.Role, Disabled: u.Disabled != 0, CreatedAt: formatTime(u.CreatedAt)}
+func toAdminUserResponse(u store.User, mfaEnabled bool) adminUserResponse {
+	return adminUserResponse{ID: u.ID, Email: u.Email, Role: u.Role, Disabled: u.Disabled != 0, CreatedAt: formatTime(u.CreatedAt), MFAEnabled: mfaEnabled}
 }
 
 // usersError writes the response for an unexpected store error of the user
@@ -125,9 +128,15 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		usersError(w, "list", u.ID, err)
 		return
 	}
+	// The second factors are read with their own queries instead of a join.
+	enabled, err := s.auth.Store.MFAEnabledUserIDs(r.Context())
+	if err != nil {
+		usersError(w, "list", u.ID, err)
+		return
+	}
 	out := adminUserListResponse{Users: make([]adminUserResponse, 0, len(users))}
 	for _, v := range users {
-		out.Users = append(out.Users, toAdminUserResponse(v))
+		out.Users = append(out.Users, toAdminUserResponse(v, enabled[v.ID]))
 	}
 	writeJSON(w, 200, out)
 }
@@ -166,6 +175,13 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "not_found", "User not found.")
 		return
 	}
+	// The second factors are not changed by this request, so they are read
+	// before it.
+	status, err := s.auth.Store.MFAStatus(r.Context(), id)
+	if err != nil {
+		usersError(w, "update", u.ID, err)
+		return
+	}
 	updated, err := s.auth.Store.UpdateUser(r.Context(), u.ID, id, change, s.auth.Now().Unix())
 	if err != nil {
 		if !ownerError(w, err) {
@@ -173,7 +189,7 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, 200, toAdminUserResponse(updated))
+	writeJSON(w, 200, toAdminUserResponse(updated, status.Enrolled()))
 }
 
 func (s *Server) handleCreatePasswordReset(w http.ResponseWriter, r *http.Request) {
@@ -346,9 +362,11 @@ func linkPassword(w http.ResponseWriter, password string) (string, bool) {
 }
 
 // signInAfterLink revokes the session of the refresh cookie the browser
-// sent, if any, and signs u in. It is called only after the invitation or
-// reset was committed. A failure is a 503 whatever its cause: the account
-// change stays committed and the screen sends the user to the login form.
+// sent, if any, and signs u in through passwordSignIn, which asks for the
+// second factor when one is needed. It is called only after the invitation
+// or reset was committed. A failure is a 503 whatever its cause: the
+// account change stays committed and the screen sends the user to the
+// login form.
 func (s *Server) signInAfterLink(w http.ResponseWriter, r *http.Request, op string, u store.User) {
 	// A browser signed in to another account must not keep that session
 	// next to the new one.
@@ -356,12 +374,7 @@ func (s *Server) signInAfterLink(w http.ResponseWriter, r *http.Request, op stri
 		linkError(w, op+": revoke previous session", err)
 		return
 	}
-	result, err := s.auth.LoginUser(r.Context(), u)
-	if err != nil {
-		linkError(w, op+": sign in", err)
-		return
-	}
-	s.writeAuthResult(w, r, result)
+	s.passwordSignIn(w, r, u, func(err error) { linkError(w, op+": sign in", err) })
 }
 
 func (s *Server) handleInspectInvitation(w http.ResponseWriter, r *http.Request) {

@@ -118,6 +118,9 @@ export default function AccountLinkPage({ page }: { page: LinkPage }) {
     setSubmitting(true);
     try {
       await auth.completeLink(text.submit, token, password);
+      // A second factor is needed: its screen replaces this one, which is
+      // left only once it is given.
+      if (auth.getSnapshot().mfa) return;
       void navigate('/', { replace: true });
       return;
     } catch (error) {
@@ -179,7 +182,7 @@ export default function AccountLinkPage({ page }: { page: LinkPage }) {
       <div><dt>権限</dt><dd>{roleLabels[inspected.role]}</dd></div>
       <div><dt>リンクの期限</dt><dd>{dateTime(inspected.expiresAt, new Date())}</dd></div>
     </dl> : null}
-    {page === 'reset' ? <p className="notice warning"><Phrased text="再設定すると、他の端末からはログアウトされ、API トークンや AI クライアントの接続、AI の設定、通知を受け取る端末の登録は削除されます。" /></p> : null}
+    {page === 'reset' ? <p className="notice warning"><Phrased text="再設定すると、他の端末からはログアウトされ、API トークンや AI クライアントの接続、AI の設定、通知を受け取る端末の登録は削除されます。二段階認証の設定は残ります。" /></p> : null}
     <form className="gate-form" onSubmit={(event) => { void submit(event); }} aria-busy={submitting} noValidate>
       <div className="field">
         <label htmlFor={emailID}>メールアドレス</label>

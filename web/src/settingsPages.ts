@@ -13,20 +13,24 @@ export const settingsPages: readonly { value: SettingsPage; label: string; path:
   { value: 'ai-clients', label: 'AI クライアント', path: 'ai-clients', summary: '接続のしかたと API トークン' },
 ];
 
-// Pages of the account screen: the signed-in account and, for owners, the
-// users of this Astovia. path is relative to /account.
-export type AccountPage = 'account' | 'users';
+// Pages of the account screen: the signed-in account, its two-step
+// verification and, for owners, the users of this Astovia. path is relative
+// to /account.
+export type AccountPage = 'account' | 'security' | 'users';
 
 export const accountPages: readonly { value: AccountPage; label: string; path: string }[] = [
   { value: 'account', label: 'アカウント', path: '' },
+  { value: 'security', label: '二段階認証', path: 'security' },
   { value: 'users', label: 'ユーザー管理', path: 'users' },
 ];
 
-// visibleAccountPages returns the account pages of a user with role. The
-// server refuses the user management APIs to members as well; hiding the
-// page only keeps members from a page they cannot use.
-export function visibleAccountPages(role: 'owner' | 'member'): typeof accountPages {
-  return role === 'owner' ? accountPages : accountPages.filter((p) => p.value !== 'users');
+// visibleAccountPages returns the account pages of a user with role on a
+// server that signs users in with mode. The server refuses the user
+// management APIs to members as well; hiding the page only keeps members
+// from a page they cannot use. Two-step verification belongs to password
+// sign-in: with single sign-on (oidc) the provider is in charge of it.
+export function visibleAccountPages(role: 'owner' | 'member', mode: 'password' | 'oidc'): typeof accountPages {
+  return accountPages.filter((p) => (p.value !== 'users' || role === 'owner') && (p.value !== 'security' || mode === 'password'));
 }
 
 // accountPageAt returns the account page a pathname shows, or null for

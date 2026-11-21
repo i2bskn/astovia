@@ -144,8 +144,10 @@ function InvitationRow({ invitation, confirming, busy, onAsk, onCancel, onRevoke
 // Confirm names the operation of a row waiting for its second press.
 type Confirm = 'disable' | 'demote-self' | 'reset';
 
-function UserRow({ user, actions, confirming, busy, onAsk, onCancel, onChange, onReset }: {
+function UserRow({ user, oidc, actions, confirming, busy, onAsk, onCancel, onChange, onReset }: {
   user: ManagedUser;
+  // oidc hides two-step verification, which belongs to password sign-in.
+  oidc: boolean;
   actions: ReturnType<typeof userActions>;
   confirming: Confirm | null;
   busy: boolean;
@@ -185,6 +187,7 @@ function UserRow({ user, actions, confirming, busy, onAsk, onCancel, onChange, o
       <dl className="action-meta">
         <div><dt>権限</dt><dd>{roleLabels[user.role]}</dd></div>
         <div><dt>状態</dt><dd className={user.disabled ? 'status-error' : undefined}>{user.disabled ? '無効' : '有効'}</dd></div>
+        {oidc ? null : <div><dt>二段階認証</dt><dd>{user.mfa_enabled ? '有効' : 'なし'}</dd></div>}
         <div><dt>作成</dt><dd>{formatDate(user.created_at)}</dd></div>
       </dl>
       {confirming === 'disable' ? <p className="action-note"><Phrased text="無効にすると、すぐにログアウトされ、API トークン、AI クライアントの接続、GitHub・Slack・Chatwork・メールの連携、AI の設定、通知を受け取る端末の登録を削除します。タスクと通知の設定は残ります。再開しても、削除したものは戻りません。" /></p> : null}
@@ -255,7 +258,7 @@ function UsersSection({ userID, oidc, users, loading, loadError, onChanged }: {
     {error ? <p className="notice error" role="alert">{error}</p> : null}
     {loadError ? <p className="notice error" role="alert">{loadError}</p> : null}
     {users.length > 0 ? <ul className="action-list">
-      {users.map((user) => <UserRow key={user.id} user={user}
+      {users.map((user) => <UserRow key={user.id} user={user} oidc={oidc}
         actions={oidc ? { ...userActions(user, users, userID), reset: false } : userActions(user, users, userID)}
         confirming={confirming?.id === user.id ? confirming.confirm : null}
         busy={busyID === user.id}

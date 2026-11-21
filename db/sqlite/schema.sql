@@ -408,3 +408,48 @@ CREATE TABLE "password_resets" (
 CREATE UNIQUE INDEX "password_resets_token_hash_key" ON "password_resets" ("token_hash");
 -- Create index "password_resets_user_id_idx" to table: "password_resets"
 CREATE INDEX "password_resets_user_id_idx" ON "password_resets" ("user_id");
+-- Create "mfa_totp" table
+CREATE TABLE "mfa_totp" (
+  "user_id" text NOT NULL,
+  "secret_sealed" text NOT NULL,
+  "last_step" integer NOT NULL,
+  "created_at" integer NOT NULL,
+  PRIMARY KEY ("user_id"),
+  CONSTRAINT "mfa_totp_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create "mfa_webauthn_credentials" table
+CREATE TABLE "mfa_webauthn_credentials" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "credential_id" text NOT NULL,
+  "credential" text NOT NULL,
+  "name" text NOT NULL,
+  "created_at" integer NOT NULL,
+  "last_used_at" integer NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "mfa_webauthn_credentials_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "mfa_webauthn_credentials_credential_id_key" to table: "mfa_webauthn_credentials"
+CREATE UNIQUE INDEX "mfa_webauthn_credentials_credential_id_key" ON "mfa_webauthn_credentials" ("credential_id");
+-- Create index "mfa_webauthn_credentials_user_id_idx" to table: "mfa_webauthn_credentials"
+CREATE INDEX "mfa_webauthn_credentials_user_id_idx" ON "mfa_webauthn_credentials" ("user_id");
+-- Create "mfa_recovery_codes" table
+CREATE TABLE "mfa_recovery_codes" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "code_hash" text NOT NULL,
+  "created_at" integer NOT NULL,
+  "used_at" integer NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "mfa_recovery_codes_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id")
+);
+-- Create index "mfa_recovery_codes_code_hash_key" to table: "mfa_recovery_codes"
+CREATE UNIQUE INDEX "mfa_recovery_codes_code_hash_key" ON "mfa_recovery_codes" ("code_hash");
+-- Create index "mfa_recovery_codes_user_id_idx" to table: "mfa_recovery_codes"
+CREATE INDEX "mfa_recovery_codes_user_id_idx" ON "mfa_recovery_codes" ("user_id");
+-- Create "mfa_used_challenges" table
+CREATE TABLE "mfa_used_challenges" (
+  "challenge_hash" text NOT NULL,
+  "expires_at" integer NOT NULL,
+  PRIMARY KEY ("challenge_hash")
+);

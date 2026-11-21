@@ -836,6 +836,73 @@ func (q postgresQueries) latestUsedPasswordReset(ctx context.Context, userID str
 	return PasswordReset(row), err
 }
 
+func (q postgresQueries) mfaTOTP(ctx context.Context, userID string) (MFATOTP, error) {
+	row, err := q.q.GetMFATOTP(ctx, userID)
+	return MFATOTP(row), err
+}
+func (q postgresQueries) createMFATOTP(ctx context.Context, t MFATOTP) error {
+	return q.q.CreateMFATOTP(ctx, db.CreateMFATOTPParams(t))
+}
+func (q postgresQueries) replaceMFATOTP(ctx context.Context, t MFATOTP) (int64, error) {
+	return q.q.ReplaceMFATOTP(ctx, db.ReplaceMFATOTPParams{SecretSealed: t.SecretSealed, LastStep: t.LastStep, CreatedAt: t.CreatedAt, UserID: t.UserID})
+}
+func (q postgresQueries) useMFATOTPStep(ctx context.Context, userID string, step int64) (int64, error) {
+	return q.q.UseMFATOTPStep(ctx, db.UseMFATOTPStepParams{Step: step, UserID: userID})
+}
+func (q postgresQueries) deleteMFATOTP(ctx context.Context, userID string) (int64, error) {
+	return q.q.DeleteMFATOTP(ctx, userID)
+}
+func (q postgresQueries) listMFATOTPUserIDs(ctx context.Context) ([]string, error) {
+	return q.q.ListMFATOTPUserIDs(ctx)
+}
+func (q postgresQueries) listWebAuthnCredentials(ctx context.Context, userID string) ([]WebAuthnCredential, error) {
+	rows, err := q.q.ListMFAWebAuthnCredentials(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]WebAuthnCredential, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, WebAuthnCredential(row))
+	}
+	return out, nil
+}
+func (q postgresQueries) countWebAuthnCredentials(ctx context.Context, userID string) (int64, error) {
+	return q.q.CountMFAWebAuthnCredentials(ctx, userID)
+}
+func (q postgresQueries) createWebAuthnCredential(ctx context.Context, c WebAuthnCredential) (int64, error) {
+	return q.q.CreateMFAWebAuthnCredential(ctx, db.CreateMFAWebAuthnCredentialParams{ID: c.ID, UserID: c.UserID, CredentialID: c.CredentialID, Credential: c.Credential, Name: c.Name, CreatedAt: c.CreatedAt})
+}
+func (q postgresQueries) updateWebAuthnCredential(ctx context.Context, userID, credentialID, credential string, now int64) (int64, error) {
+	return q.q.UpdateMFAWebAuthnCredential(ctx, db.UpdateMFAWebAuthnCredentialParams{Credential: credential, LastUsedAt: sql.NullInt64{Int64: now, Valid: true}, UserID: userID, CredentialID: credentialID})
+}
+func (q postgresQueries) deleteWebAuthnCredential(ctx context.Context, userID, id string) (int64, error) {
+	return q.q.DeleteMFAWebAuthnCredential(ctx, db.DeleteMFAWebAuthnCredentialParams{UserID: userID, ID: id})
+}
+func (q postgresQueries) deleteUserWebAuthnCredentials(ctx context.Context, userID string) error {
+	return q.q.DeleteUserMFAWebAuthnCredentials(ctx, userID)
+}
+func (q postgresQueries) listWebAuthnUserIDs(ctx context.Context) ([]string, error) {
+	return q.q.ListMFAWebAuthnUserIDs(ctx)
+}
+func (q postgresQueries) createRecoveryCode(ctx context.Context, userID string, c RecoveryCode, now int64) error {
+	return q.q.CreateMFARecoveryCode(ctx, db.CreateMFARecoveryCodeParams{ID: c.ID, UserID: userID, CodeHash: c.Hash, CreatedAt: now})
+}
+func (q postgresQueries) countUnusedRecoveryCodes(ctx context.Context, userID string) (int64, error) {
+	return q.q.CountUnusedMFARecoveryCodes(ctx, userID)
+}
+func (q postgresQueries) useRecoveryCode(ctx context.Context, userID, hash string, now int64) (int64, error) {
+	return q.q.UseMFARecoveryCode(ctx, db.UseMFARecoveryCodeParams{UsedAt: sql.NullInt64{Int64: now, Valid: true}, UserID: userID, CodeHash: hash})
+}
+func (q postgresQueries) deleteUserRecoveryCodes(ctx context.Context, userID string) error {
+	return q.q.DeleteUserMFARecoveryCodes(ctx, userID)
+}
+func (q postgresQueries) deleteExpiredUsedChallenges(ctx context.Context, now int64) error {
+	return q.q.DeleteExpiredMFAUsedChallenges(ctx, now)
+}
+func (q postgresQueries) createUsedChallenge(ctx context.Context, hash string, expiresAt int64) (int64, error) {
+	return q.q.CreateMFAUsedChallenge(ctx, db.CreateMFAUsedChallengeParams{ChallengeHash: hash, ExpiresAt: expiresAt})
+}
+
 // users converts the rows of a user list query.
 func (postgresQueries) users(rows []db.User, err error) ([]User, error) {
 	if err != nil {

@@ -1284,3 +1284,125 @@ table "password_resets" {
     columns = [column.user_id]
   }
 }
+table "mfa_totp" {
+  schema = schema.main
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "secret_sealed" {
+    type = text
+    null = false
+  }
+  column "last_step" {
+    type = integer
+    null = false
+  }
+  column "created_at" {
+    type = integer
+    null = false
+  }
+  primary_key {
+    columns = [column.user_id]
+  }
+  foreign_key "mfa_totp_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+}
+table "mfa_webauthn_credentials" {
+  schema = schema.main
+  column "id" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "credential_id" {
+    type = text
+    null = false
+  }
+  column "credential" {
+    type = text
+    null = false
+  }
+  column "name" {
+    type = text
+    null = false
+  }
+  column "created_at" {
+    type = integer
+    null = false
+  }
+  column "last_used_at" {
+    type = integer
+    null = true
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "mfa_webauthn_credentials_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "mfa_webauthn_credentials_credential_id_key" {
+    unique  = true
+    columns = [column.credential_id]
+  }
+  index "mfa_webauthn_credentials_user_id_idx" {
+    columns = [column.user_id]
+  }
+}
+table "mfa_recovery_codes" {
+  schema = schema.main
+  column "id" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "code_hash" {
+    type = text
+    null = false
+  }
+  column "created_at" {
+    type = integer
+    null = false
+  }
+  column "used_at" {
+    type = integer
+    null = true
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "mfa_recovery_codes_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "mfa_recovery_codes_code_hash_key" {
+    unique  = true
+    columns = [column.code_hash]
+  }
+  index "mfa_recovery_codes_user_id_idx" {
+    columns = [column.user_id]
+  }
+}
+table "mfa_used_challenges" {
+  schema = schema.main
+  column "challenge_hash" {
+    type = text
+    null = false
+  }
+  column "expires_at" {
+    type = integer
+    null = false
+  }
+  primary_key {
+    columns = [column.challenge_hash]
+  }
+}
