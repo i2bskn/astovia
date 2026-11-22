@@ -16,7 +16,7 @@ services:
       timeout: 2s
       retries: 30
   go:
-    image: golang:1.26.10
+    image: golang:1.26.11
     working_dir: /src
     volumes:
       - .:/src

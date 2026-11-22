@@ -196,8 +196,12 @@ SELECT token_hash, kind, grant_id, user_id, created_at, expires_at FROM oauth_to
 -- name: LockOAuthTokenByHash :one
 SELECT token_hash, kind, grant_id, user_id, created_at, expires_at FROM oauth_tokens
 WHERE token_hash = sqlc.arg(token_hash) AND user_id = sqlc.arg(user_id);
--- name: DeleteOAuthToken :execrows
-DELETE FROM oauth_tokens WHERE token_hash = sqlc.arg(token_hash) AND user_id = sqlc.arg(user_id);
+-- name: MarkOAuthRefreshUsed :execrows
+UPDATE oauth_tokens SET kind = 'refresh_used'
+WHERE token_hash = sqlc.arg(token_hash) AND user_id = sqlc.arg(user_id) AND kind = 'refresh';
+-- name: CapGrantOAuthTokens :exec
+UPDATE oauth_tokens SET expires_at = sqlc.arg(max_expires_at)
+WHERE grant_id = sqlc.arg(grant_id) AND user_id = sqlc.arg(user_id) AND expires_at > sqlc.arg(max_expires_at);
 -- name: DeleteGrantOAuthTokens :exec
 DELETE FROM oauth_tokens WHERE grant_id = sqlc.arg(grant_id) AND user_id = sqlc.arg(user_id);
 -- name: DeleteExpiredOAuthTokens :exec

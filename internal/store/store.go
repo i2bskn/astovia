@@ -226,7 +226,8 @@ type queries interface {
 	createOAuthToken(ctx context.Context, t OAuthToken) error
 	oauthTokenByHash(ctx context.Context, hash string) (OAuthToken, error)
 	lockOAuthTokenByHash(ctx context.Context, hash, userID string) (OAuthToken, error)
-	deleteOAuthToken(ctx context.Context, userID, hash string) (int64, error)
+	markOAuthRefreshUsed(ctx context.Context, userID, hash string) (int64, error)
+	capGrantOAuthTokens(ctx context.Context, userID, grantID string, maxExpiresAt int64) error
 	deleteGrantOAuthTokens(ctx context.Context, userID, grantID string) error
 	deleteExpiredOAuthTokens(ctx context.Context, userID string, now int64) error
 	deleteUserOAuthTokens(ctx context.Context, userID string) error

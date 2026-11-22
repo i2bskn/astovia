@@ -565,3 +565,34 @@ func TestLegacyAdminRedirects(t *testing.T) {
 		t.Fatalf("/admin/sw.js: %d %v", w.Code, w.Header())
 	}
 }
+
+// Strict-Transport-Security is sent on every response of an https public URL
+// whose host is not a loopback host.
+func TestHSTS(t *testing.T) {
+	for _, tc := range []struct {
+		publicURL string
+		secure    bool
+		want      string
+	}{
+		{"https://astovia.example.com", true, "max-age=31536000"},
+		{"https://astovia.example.com:8443", true, "max-age=31536000"},
+		{"https://203.0.113.1", true, "max-age=31536000"},
+		{"http://localhost:8080", false, ""},
+		{"http://127.0.0.1:8080", false, ""},
+		{"https://localhost:8443", true, ""},
+		{"https://app.localhost", true, ""},
+		{"https://127.0.0.1", true, ""},
+		{"https://127.1.2.3:8443", true, ""},
+		{"https://[::1]:8443", true, ""},
+	} {
+		handler := New(config.Config{PublicURL: tc.publicURL, Secure: tc.secure}, nil, fstest.MapFS{"index.html": {Data: []byte("<html>Astovia</html>")}}, nil)
+		for _, path := range []string{"/healthz", "/", "/api/v1/me", "/no/such/path"} {
+			r := httptest.NewRequest("GET", path, nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if got := w.Header().Get("Strict-Transport-Security"); got != tc.want {
+				t.Fatalf("%s %s: Strict-Transport-Security=%q, want %q", tc.publicURL, path, got, tc.want)
+			}
+		}
+	}
+}

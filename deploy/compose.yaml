@@ -36,10 +36,16 @@ services:
       ASTOVIA_MAIL_FROM_NAME: ${ASTOVIA_MAIL_FROM_NAME:-}
       ASTOVIA_CLOUDFLARE_ACCOUNT_ID: ${ASTOVIA_CLOUDFLARE_ACCOUNT_ID:-}
       ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS: ${ASTOVIA_AI_ALLOW_PRIVATE_ENDPOINTS:-}
+      # The app port is not published, so requests reach the app only through
+      # Caddy on the Docker network. Trusting the private ranges lets the
+      # per-client rate limits read X-Forwarded-For; Caddy (2.5 and later)
+      # replaces the header it got from an untrusted client with the address
+      # it saw. Remove this line if you publish the app port directly.
+      ASTOVIA_TRUSTED_PROXIES: ${ASTOVIA_TRUSTED_PROXIES:-172.16.0.0/12,192.168.0.0/16,10.0.0.0/8}
     volumes:
       - data:/app/data
   caddy:
-    image: caddy:2.11.6-alpine
+    image: caddy:2.11.9-alpine
     restart: unless-stopped
     ports:
       - "80:80"

@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,7 @@ var testSecret = []byte(strings.Repeat("s", 32))
 type oauthAPI struct {
 	t       *testing.T
 	store   *store.Store
+	dsn     string
 	srv     *Server
 	handler http.Handler
 	now     *time.Time
@@ -44,7 +46,7 @@ type oauthAPI struct {
 
 func newOAuthAPI(t *testing.T, driver string) *oauthAPI {
 	t.Helper()
-	s, _ := testutil.Database(t, driver)
+	s, dsn := testutil.Database(t, driver)
 	hash, err := auth.Password("correct-password-123")
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +57,7 @@ func newOAuthAPI(t *testing.T, driver string) *oauthAPI {
 		}
 	}
 	now := time.Date(2026, 10, 23, 1, 2, 3, 0, time.UTC)
-	api := &oauthAPI{t: t, store: s, now: &now, docs: map[string]oauth.Document{
+	api := &oauthAPI{t: t, store: s, dsn: dsn, now: &now, docs: map[string]oauth.Document{
 		claudeClient: {Name: "Claude Code", RedirectURIs: []string{"http://localhost/callback", "http://127.0.0.1/callback"}, TTL: time.Hour},
 	}}
 	api.srv = api.newServer(s, testOrigin)
@@ -240,20 +242,6 @@ func expectOAuthError(t *testing.T, w *httptest.ResponseRecorder, status int, co
 	}
 }
 
-// expectRedirectError checks an authorization error sent to redirectURI.
-func expectRedirectError(t *testing.T, w *httptest.ResponseRecorder, redirectURI, code, state string) {
-	t.Helper()
-	loc, err := url.Parse(w.Header().Get("Location"))
-	if w.Code != 302 || err != nil {
-		t.Fatalf("got %d %v", w.Code, w.Header())
-	}
-	q := loc.Query()
-	loc.RawQuery = ""
-	if loc.String() != redirectURI || q.Get("error") != code || q.Get("error_description") == "" || q.Get("iss") != testOrigin || q.Get("state") != state || q.Has("code") {
-		t.Fatalf("redirect %s, want %s error=%s state=%q", w.Header().Get("Location"), redirectURI, code, state)
-	}
-}
-
 func expectMCPUnauthorized(t *testing.T, h http.Handler, token string) {
 	t.Helper()
 	if w := mcpPost(t, h, token, "", ""); w.Code != 401 || w.Header().Get("WWW-Authenticate") != mcpInvalidToken {
@@ -405,7 +393,8 @@ func TestOAuthAuthorize(t *testing.T) {
 		t.Run(name, func(t *testing.T) { expectOAuthError(t, api.authorize(tc.q), 400, tc.code) })
 	}
 
-	// Errors sent back to the redirect URI with state and iss.
+	// Errors after the redirect URI is matched are not sent back to it
+	// either: anyone can register a client.
 	for name, tc := range map[string]struct {
 		q    url.Values
 		code string
@@ -421,16 +410,9 @@ func TestOAuthAuthorize(t *testing.T) {
 		"resource":            {with("resource", "https://other.test/mcp"), "invalid_target"},
 		"resource path":       {with("resource", testOrigin+"/api"), "invalid_target"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			w := api.authorize(tc.q)
-			expectRedirectError(t, w, "https://tool.example/cb", tc.code, "st")
-			if loc, _ := url.Parse(w.Header().Get("Location")); loc.Query().Get("keep") != "1" {
-				t.Fatalf("existing query lost: %s", loc)
-			}
-		})
+		t.Run(name, func(t *testing.T) { expectOAuthError(t, api.authorize(tc.q), 400, tc.code) })
 	}
-	w := api.authorize(with("state", strings.Repeat("s", 513)))
-	expectRedirectError(t, w, "https://tool.example/cb", "invalid_request", "")
+	expectOAuthError(t, api.authorize(with("state", strings.Repeat("s", 513))), 400, "invalid_request")
 
 	// Accepted: loopback with another port, the resource in any accepted
 	// form, an empty resource, and no scope (mcp).
@@ -570,8 +552,8 @@ func testOAuthToken(t *testing.T, driver string) {
 	api.advance(oauth.CodeLifetime)
 	expectOAuthError(t, api.exchange(claudeClient, code, loopback, verifier), 400, "invalid_grant")
 
-	// Refresh rotation: the old refresh token is rejected and the new tokens
-	// keep working.
+	// Refresh rotation: the new tokens and the old access token keep
+	// working; presenting the old refresh token again revokes the connection.
 	api.alice = api.login("alice")
 	code, verifier = api.connect(api.alice, claudeClient, loopback, "mcp offline_access")
 	issued := tokensOf(t, api.exchange(claudeClient, code, loopback, verifier))
@@ -589,17 +571,36 @@ func testOAuthToken(t *testing.T, driver string) {
 	if rotated.Scope != "mcp offline_access" || rotated.RefreshToken == "" || rotated.RefreshToken == issued.RefreshToken {
 		t.Fatalf("rotated: %+v", rotated)
 	}
-	expectOAuthError(t, api.refresh(claudeClient, issued.RefreshToken), 400, "invalid_grant")
 	expectMCPOK(t, api.handler, rotated.AccessToken)
 	expectMCPOK(t, api.handler, issued.AccessToken)
-	if again := tokensOf(t, api.refresh(claudeClient, rotated.RefreshToken)); again.RefreshToken == "" {
+	again := tokensOf(t, api.refresh(claudeClient, rotated.RefreshToken))
+	if again.RefreshToken == "" {
 		t.Fatal("new refresh token rejected")
 	}
 	// A refresh token is not an access token.
 	expectMCPUnauthorized(t, api.handler, rotated.RefreshToken)
+	expectMCPUnauthorized(t, api.handler, issued.RefreshToken)
+	// Another client presenting an exchanged refresh token changes nothing.
+	expectOAuthError(t, api.refresh(other, issued.RefreshToken), 400, "invalid_grant")
+	expectMCPOK(t, api.handler, again.AccessToken)
+	// The client presenting it again revokes the connection: no token of it
+	// works any more.
+	expectOAuthError(t, api.refresh(claudeClient, issued.RefreshToken), 400, "invalid_grant")
+	for _, token := range []string{issued.AccessToken, rotated.AccessToken, again.AccessToken} {
+		expectMCPUnauthorized(t, api.handler, token)
+	}
+	expectOAuthError(t, api.refresh(claudeClient, again.RefreshToken), 400, "invalid_grant")
+	if w := api.do("GET", "/api/v1/oauth/connections", api.alice, ""); strings.TrimSpace(w.Body.String()) != `{"items":[]}` {
+		t.Fatalf("connections after reuse: %s", w.Body.String())
+	}
+
 	// Access tokens expire after an hour.
-	api.advance(time.Hour)
-	expectMCPUnauthorized(t, api.handler, issued.AccessToken)
+	code, verifier = api.connect(api.alice, claudeClient, loopback, "mcp offline_access")
+	hourly := tokensOf(t, api.exchange(claudeClient, code, loopback, verifier))
+	api.advance(time.Hour - time.Second)
+	expectMCPOK(t, api.handler, hourly.AccessToken)
+	api.advance(time.Second)
+	expectMCPUnauthorized(t, api.handler, hourly.AccessToken)
 
 	// Without offline_access: a seven-day access token and no refresh token.
 	api.alice = api.login("alice")
@@ -612,6 +613,76 @@ func testOAuthToken(t *testing.T, driver string) {
 	expectMCPOK(t, api.handler, long.AccessToken)
 	api.advance(time.Second)
 	expectMCPUnauthorized(t, api.handler, long.AccessToken)
+}
+
+// TestOAuthGrantMaxLifetime checks that a connection ends
+// store.OAuthGrantMaxLifetime after the consent however often it is
+// refreshed.
+func TestOAuthGrantMaxLifetime(t *testing.T) {
+	api := newOAuthAPI(t, "sqlite")
+	const loopback = "http://localhost/callback"
+	consent := *api.now
+	limit := consent.Add(store.OAuthGrantMaxLifetime)
+	code, verifier := api.connect(api.alice, claudeClient, loopback, "mcp offline_access")
+	issued := tokensOf(t, api.exchange(claudeClient, code, loopback, verifier))
+	// Refreshing within the refresh token lifetime keeps the connection.
+	api.advance(89 * 24 * time.Hour)
+	issued = tokensOf(t, api.refresh(claudeClient, issued.RefreshToken))
+	if issued.ExpiresIn != 3600 {
+		t.Fatalf("expires_in far from the limit: %d", issued.ExpiresIn)
+	}
+	api.advance(89 * 24 * time.Hour)
+	issued = tokensOf(t, api.refresh(claudeClient, issued.RefreshToken))
+	// Near the limit, the access token and expires_in are cut down to it.
+	*api.now = limit.Add(-30 * time.Minute)
+	issued = tokensOf(t, api.refresh(claudeClient, issued.RefreshToken))
+	if issued.ExpiresIn != 1800 || issued.RefreshToken == "" {
+		t.Fatalf("expires_in near the limit: %+v", issued)
+	}
+	expectMCPOK(t, api.handler, issued.AccessToken)
+	alice := api.login("alice")
+	w := api.do("GET", "/api/v1/oauth/connections", alice, "")
+	var list connectionListResponse
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list.Items) != 1 || list.Items[0].ExpiresAt != limit.UTC().Format(time.RFC3339) {
+		t.Fatalf("connection near the limit: %d %s, want expires_at %s", w.Code, w.Body.String(), limit.UTC().Format(time.RFC3339))
+	}
+	// At the limit the connection cannot be refreshed or used.
+	*api.now = limit
+	expectOAuthError(t, api.refresh(claudeClient, issued.RefreshToken), 400, "invalid_grant")
+	expectMCPUnauthorized(t, api.handler, issued.AccessToken)
+}
+
+// A refresh after the limit is refused even when the stored refresh token
+// has not expired, as with a token stored before the limit existed.
+func TestOAuthGrantMaxLifetimeLegacyToken(t *testing.T) {
+	api := newOAuthAPI(t, "sqlite")
+	const loopback = "http://localhost/callback"
+	limit := api.now.Add(store.OAuthGrantMaxLifetime)
+	code, verifier := api.connect(api.alice, claudeClient, loopback, "mcp offline_access")
+	issued := tokensOf(t, api.exchange(claudeClient, code, loopback, verifier))
+	api.advance(89 * 24 * time.Hour)
+	issued = tokensOf(t, api.refresh(claudeClient, issued.RefreshToken))
+	// Simulate rows written by an earlier release, which extended the
+	// connection by 90 days on every refresh.
+	db, err := sql.Open("sqlite", api.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	later := limit.Add(30 * 24 * time.Hour).Unix()
+	if _, err := db.Exec("UPDATE oauth_tokens SET expires_at = ? WHERE kind = 'refresh'", later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE oauth_grants SET expires_at = ?", later); err != nil {
+		t.Fatal(err)
+	}
+	*api.now = limit
+	expectOAuthError(t, api.refresh(claudeClient, issued.RefreshToken), 400, "invalid_grant")
+	// Refused without revoking: the refresh token is still there.
+	*api.now = limit.Add(-time.Second)
+	if again := tokensOf(t, api.refresh(claudeClient, issued.RefreshToken)); again.ExpiresIn != 1 {
+		t.Fatalf("expires_in one second before the limit: %d", again.ExpiresIn)
+	}
 }
 
 func TestOAuthTokenRequests(t *testing.T) {
@@ -840,10 +911,13 @@ func testOAuthFlow(t *testing.T, driver string) {
 		t.Fatalf("item via REST: %d", w.Code)
 	}
 
-	// Refresh and reject the old refresh token.
+	// Refresh. Presenting the old refresh token again is checked at the end,
+	// as it revokes the connection.
+	refreshForm := func(refreshToken string) url.Values {
+		return url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "client_secret": {secret}, "refresh_token": {refreshToken}}
+	}
 	api.advance(time.Minute)
-	rotated := tokensOf(t, api.token(url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "client_secret": {secret}, "refresh_token": {issued.RefreshToken}}, ""))
-	expectOAuthError(t, api.token(url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "client_secret": {secret}, "refresh_token": {issued.RefreshToken}}, ""), 400, "invalid_grant")
+	rotated := tokensOf(t, api.token(refreshForm(issued.RefreshToken), ""))
 	expectMCPOK(t, api.handler, rotated.AccessToken)
 
 	// The connection is listed with its last use.
@@ -873,9 +947,27 @@ func testOAuthFlow(t *testing.T, driver string) {
 		t.Fatalf("delete: %d", w.Code)
 	}
 	expectMCPUnauthorized(t, api.handler, rotated.AccessToken)
-	expectOAuthError(t, api.token(url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "client_secret": {secret}, "refresh_token": {rotated.RefreshToken}}, ""), 400, "invalid_grant")
+	expectOAuthError(t, api.token(refreshForm(rotated.RefreshToken), ""), 400, "invalid_grant")
 	if w = api.do("GET", "/api/v1/oauth/connections", api.alice, ""); strings.TrimSpace(w.Body.String()) != `{"items":[]}` {
 		t.Fatalf("after delete: %s", w.Body.String())
+	}
+
+	// A new connection: presenting an exchanged refresh token again revokes
+	// it, and the connection leaves the list.
+	code, verifier := api.connect(api.alice, clientID, cb, "mcp offline_access")
+	first := tokensOf(t, api.token(url.Values{"grant_type": {"authorization_code"}, "client_id": {clientID}, "client_secret": {secret}, "code": {code}, "redirect_uri": {cb}, "code_verifier": {verifier}}, ""))
+	api.advance(time.Minute)
+	second := tokensOf(t, api.token(refreshForm(first.RefreshToken), ""))
+	expectMCPOK(t, api.handler, second.AccessToken)
+	if w = api.do("GET", "/api/v1/oauth/connections", api.alice, ""); json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list.Items) != 1 {
+		t.Fatalf("connections before reuse: %s", w.Body.String())
+	}
+	expectOAuthError(t, api.token(refreshForm(first.RefreshToken), ""), 400, "invalid_grant")
+	expectMCPUnauthorized(t, api.handler, first.AccessToken)
+	expectMCPUnauthorized(t, api.handler, second.AccessToken)
+	expectOAuthError(t, api.token(refreshForm(second.RefreshToken), ""), 400, "invalid_grant")
+	if w = api.do("GET", "/api/v1/oauth/connections", api.alice, ""); strings.TrimSpace(w.Body.String()) != `{"items":[]}` {
+		t.Fatalf("connections after reuse: %s", w.Body.String())
 	}
 }
 

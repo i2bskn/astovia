@@ -180,7 +180,7 @@ func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *htt
 // handleRegister implements Dynamic Client Registration (RFC 7591).
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Counted before any validation, so malformed requests count as well.
-	if !s.registerLimiter.allow(r.RemoteAddr) {
+	if !s.registerLimiter.allow(s.clientAddr(r)) {
 		w.Header().Set("Retry-After", "60")
 		oauthFail(w, 429, "invalid_request", "Too many registrations. Try again later.")
 		return
@@ -306,9 +306,10 @@ func (s *Server) resolveClient(ctx context.Context, remoteAddr, clientID string)
 }
 
 // handleAuthorize validates an authorization request and sends the browser
-// to the consent page. Errors about the client or redirect URI are answered
-// here without redirecting (no open redirect); later errors go back to the
-// redirect URI.
+// to the consent page. Every error is answered here with a JSON 400 and is
+// never sent to the redirect URI: anyone can register a client (DCR) or
+// publish one (CIMD), so redirecting errors would make this an open
+// redirector (RFC 9700 section 4.11.2).
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	p := map[string]string{}
@@ -329,7 +330,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		oauthFail(w, 400, "invalid_request", "redirect_uri is missing or too long.")
 		return
 	}
-	client, err := s.resolveClient(r.Context(), r.RemoteAddr, clientID)
+	client, err := s.resolveClient(r.Context(), s.clientAddr(r), clientID)
 	switch {
 	case err == nil:
 	case errors.Is(err, errClientRejected):
@@ -349,28 +350,28 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	state := p["state"]
 	if len(state) > oauth.MaxStateLength {
-		s.redirectError(w, r, redirectURI, "", "invalid_request", "state is too long.")
+		oauthFail(w, 400, "invalid_request", "state is too long.")
 		return
 	}
 	if p["response_type"] != "code" {
-		s.redirectError(w, r, redirectURI, state, "unsupported_response_type", "response_type must be code.")
+		oauthFail(w, 400, "unsupported_response_type", "response_type must be code.")
 		return
 	}
 	if p["code_challenge_method"] != "S256" {
-		s.redirectError(w, r, redirectURI, state, "invalid_request", "code_challenge_method must be S256.")
+		oauthFail(w, 400, "invalid_request", "code_challenge_method must be S256.")
 		return
 	}
 	if !oauth.ValidCodeChallenge(p["code_challenge"]) {
-		s.redirectError(w, r, redirectURI, state, "invalid_request", "code_challenge must be an S256 challenge.")
+		oauthFail(w, 400, "invalid_request", "code_challenge must be an S256 challenge.")
 		return
 	}
 	scope, err := oauth.NormalizeScope(p["scope"])
 	if len(p["scope"]) > oauth.MaxScopeLength || err != nil {
-		s.redirectError(w, r, redirectURI, state, "invalid_scope", "scope must be mcp, optionally with offline_access.")
+		oauthFail(w, 400, "invalid_scope", "scope must be mcp, optionally with offline_access.")
 		return
 	}
 	if v := p["resource"]; v != "" && (len(v) > oauth.MaxResourceLength || !oauth.MatchResource(s.cfg.PublicURL, v)) {
-		s.redirectError(w, r, redirectURI, state, "invalid_target", "resource is not this server's MCP endpoint.")
+		oauthFail(w, 400, "invalid_target", "resource is not this server's MCP endpoint.")
 		return
 	}
 	signed, err := oauth.SignRequest(s.cfg.Secret, oauth.Request{ClientID: client.ClientID, ClientName: client.Name, RedirectURI: redirectURI, Scope: scope, State: state, CodeChallenge: p["code_challenge"], Exp: s.auth.Now().Add(oauth.RequestLifetime).Unix()})
@@ -386,15 +387,6 @@ func (s *Server) redirectURL(redirectURI, state string, params map[string]string
 	params["state"] = state
 	params["iss"] = s.cfg.PublicURL
 	return oauth.BuildRedirectURL(redirectURI, params)
-}
-
-func (s *Server) redirectError(w http.ResponseWriter, r *http.Request, redirectURI, state, code, description string) {
-	location, err := s.redirectURL(redirectURI, state, map[string]string{"error": code, "error_description": description})
-	if err != nil {
-		oauthFail(w, 400, "invalid_request", "redirect_uri is invalid.")
-		return
-	}
-	http.Redirect(w, r, location, http.StatusFound)
 }
 
 // consentRequest reads the signed request. A failure has been answered.
@@ -650,22 +642,35 @@ func newIssuedTokens(now time.Time) (issuedTokens, error) {
 	return t, err
 }
 
+// accessExpiresAt returns the expiry of the access token for scope: longer
+// without offline_access, and never after limit (store.OAuthGrantCap).
+func (t issuedTokens) accessExpiresAt(scope string, limit int64) int64 {
+	lifetime := oauth.LongAccessLifetime
+	if oauth.HasScope(scope, oauth.ScopeOfflineAccess) {
+		lifetime = oauth.AccessLifetime
+	}
+	return min(t.now+int64(lifetime/time.Second), limit)
+}
+
 // rows returns the token rows for scope: a refresh token only with
-// offline_access, and a longer-lived access token without it.
-func (t issuedTokens) rows(scope string) []store.OAuthToken {
+// offline_access, and a longer-lived access token without it. No token
+// expires after limit, the end of the grant (store.OAuthGrantCap).
+func (t issuedTokens) rows(scope string, limit int64) []store.OAuthToken {
+	access := store.OAuthToken{Hash: t.accessHash, Kind: store.OAuthAccess, CreatedAt: t.now, ExpiresAt: t.accessExpiresAt(scope, limit)}
 	if !oauth.HasScope(scope, oauth.ScopeOfflineAccess) {
-		return []store.OAuthToken{{Hash: t.accessHash, Kind: store.OAuthAccess, CreatedAt: t.now, ExpiresAt: t.now + int64(oauth.LongAccessLifetime/time.Second)}}
+		return []store.OAuthToken{access}
 	}
 	return []store.OAuthToken{
-		{Hash: t.accessHash, Kind: store.OAuthAccess, CreatedAt: t.now, ExpiresAt: t.now + int64(oauth.AccessLifetime/time.Second)},
-		{Hash: t.refreshHash, Kind: store.OAuthRefresh, CreatedAt: t.now, ExpiresAt: t.now + int64(oauth.RefreshLifetime/time.Second)},
+		access,
+		{Hash: t.refreshHash, Kind: store.OAuthRefresh, CreatedAt: t.now, ExpiresAt: min(t.now+int64(oauth.RefreshLifetime/time.Second), limit)},
 	}
 }
 
-func (t issuedTokens) response(scope string) tokenResponse {
-	out := tokenResponse{AccessToken: t.access, TokenType: "Bearer", ExpiresIn: int64(oauth.LongAccessLifetime / time.Second), Scope: scope}
+// response returns the token response; expires_in is what is left of the
+// access token after capping it at limit.
+func (t issuedTokens) response(scope string, limit int64) tokenResponse {
+	out := tokenResponse{AccessToken: t.access, TokenType: "Bearer", ExpiresIn: t.accessExpiresAt(scope, limit) - t.now, Scope: scope}
 	if oauth.HasScope(scope, oauth.ScopeOfflineAccess) {
-		out.ExpiresIn = int64(oauth.AccessLifetime / time.Second)
 		out.RefreshToken = t.refresh
 	}
 	return out
@@ -676,7 +681,7 @@ func grantError(w http.ResponseWriter, r *http.Request, err error, description s
 	switch {
 	case errors.Is(err, oauth.ErrInvalidScope):
 		oauthFail(w, 400, "invalid_scope", "scope exceeds the granted scope.")
-	case errors.Is(err, oauth.ErrInvalidGrant), errors.Is(err, store.ErrUnauthorized), errors.Is(err, store.ErrCodeReused):
+	case errors.Is(err, oauth.ErrInvalidGrant), errors.Is(err, store.ErrUnauthorized), errors.Is(err, store.ErrCodeReused), errors.Is(err, store.ErrRefreshReused):
 		oauthFail(w, 400, "invalid_grant", description)
 	default:
 		oauthUnavailable(w, r, err)
@@ -710,13 +715,13 @@ func (s *Server) authorizationCodeGrant(w http.ResponseWriter, r *http.Request, 
 		if g.ClientID != client.ClientID || g.RedirectURI != redirectURI || g.Resource != resource || !oauth.VerifyPKCE(verifier, g.CodeChallenge) {
 			return nil, oauth.ErrInvalidGrant
 		}
-		return tokens.rows(g.Scope), nil
+		return tokens.rows(g.Scope, store.OAuthGrantCap(g)), nil
 	})
 	if err != nil {
 		grantError(w, r, err, invalid)
 		return
 	}
-	writeJSON(w, 200, tokens.response(g.Scope))
+	writeJSON(w, 200, tokens.response(g.Scope, store.OAuthGrantCap(g)))
 }
 
 func (s *Server) refreshTokenGrant(w http.ResponseWriter, r *http.Request, form url.Values, client store.OAuthClient) {
@@ -759,13 +764,22 @@ func (s *Server) refreshTokenGrant(w http.ResponseWriter, r *http.Request, form 
 		if requested != "" && !oauth.ScopeSubset(requested, g.Scope) {
 			return nil, oauth.ErrInvalidScope
 		}
-		return tokens.rows(g.Scope), nil
+		// A grant ends store.OAuthGrantMaxLifetime after the consent;
+		// refreshing does not extend it.
+		limit := store.OAuthGrantCap(g)
+		if now.Unix() >= limit {
+			return nil, oauth.ErrInvalidGrant
+		}
+		return tokens.rows(g.Scope, limit), nil
 	})
+	if errors.Is(err, store.ErrRefreshReused) {
+		log.Printf("oauth: refresh token reused; connection revoked user=%s grant=%s", g.UserID, g.ID)
+	}
 	if err != nil {
 		grantError(w, r, err, invalid)
 		return
 	}
-	writeJSON(w, 200, tokens.response(g.Scope))
+	writeJSON(w, 200, tokens.response(g.Scope, store.OAuthGrantCap(g)))
 }
 
 func toConnectionResponse(g store.OAuthGrant) connectionResponse {

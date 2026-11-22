@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 var ErrClientNotFound = errors.New("OAuth client not found")
@@ -14,11 +15,29 @@ var ErrGrantNotFound = errors.New("OAuth grant not found")
 // exchanged. The grant and its tokens have been deleted by then.
 var ErrCodeReused = errors.New("authorization code was already used")
 
-// OAuth token kinds stored in oauth_tokens.kind.
+// ErrRefreshReused is returned by RotateOAuthRefresh when the refresh token
+// was already exchanged. The grant and its tokens have been deleted by then.
+var ErrRefreshReused = errors.New("refresh token was already used")
+
+// OAuth token kinds stored in oauth_tokens.kind. OAuthRefreshUsed is a
+// refresh token that was exchanged; it is kept until it expires so that a
+// second use can be detected, and authenticates nothing.
 const (
-	OAuthAccess  = "access"
-	OAuthRefresh = "refresh"
+	OAuthAccess      = "access"
+	OAuthRefresh     = "refresh"
+	OAuthRefreshUsed = "refresh_used"
 )
+
+// OAuthGrantMaxLifetime is the longest a grant and its tokens can live,
+// counted from the consent (OAuthGrant.CreatedAt). Refreshing does not
+// extend it.
+const OAuthGrantMaxLifetime = 180 * 24 * time.Hour
+
+// OAuthGrantCap returns the time (Unix seconds) after which no token of g
+// may be valid.
+func OAuthGrantCap(g OAuthGrant) int64 {
+	return g.CreatedAt + int64(OAuthGrantMaxLifetime/time.Second)
+}
 
 // OAuthClient is a client registered by DCR or cached from its Client ID
 // Metadata Document. RedirectURIs is stored as a JSON array.
@@ -34,7 +53,8 @@ type OAuthClient struct {
 // OAuthGrant is one consent: it holds the authorization code and, once the
 // code is exchanged, groups the tokens issued from it. ExpiresAt is the code
 // expiry until the exchange and afterwards the latest expiry of its tokens,
-// so an expired grant never has a usable token.
+// so an expired grant never has a usable token. No token outlives
+// OAuthGrantCap.
 type OAuthGrant struct {
 	ID, UserID, ClientID, ClientName string
 	Scope, Resource, RedirectURI     string
@@ -45,7 +65,9 @@ type OAuthGrant struct {
 	LastUsedAt                       sql.NullInt64
 }
 
-// OAuthToken is an access or refresh token. Only the hash is stored.
+// OAuthToken is an access token, a refresh token or an exchanged refresh
+// token (Kind OAuthRefreshUsed). Only the hash is stored. Its ExpiresAt is
+// never later than the ExpiresAt of its grant.
 type OAuthToken struct {
 	Hash, Kind, GrantID, UserID string
 	CreatedAt, ExpiresAt        int64
@@ -204,8 +226,10 @@ func (s *Store) RedeemOAuthCode(ctx context.Context, codeHash string, now int64,
 
 // RotateOAuthRefresh replaces the refresh token whose hash is tokenHash with
 // the tokens returned by issue. issue has the same contract as in
-// RedeemOAuthCode. A refresh token that was already rotated no longer exists
-// and is rejected with ErrUnauthorized; the grant is kept.
+// RedeemOAuthCode. The exchanged token is kept as OAuthRefreshUsed until it
+// expires. When such a token is presented again before it expires and issue
+// accepts the request, the grant and all of its tokens are deleted and
+// ErrRefreshReused is returned with the grant that was deleted.
 func (s *Store) RotateOAuthRefresh(ctx context.Context, tokenHash string, now int64, issue func(OAuthGrant) ([]OAuthToken, error)) (OAuthGrant, error) {
 	t, err := s.q.oauthTokenByHash(ctx, tokenHash)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -214,10 +238,11 @@ func (s *Store) RotateOAuthRefresh(ctx context.Context, tokenHash string, now in
 	if err != nil {
 		return OAuthGrant{}, err
 	}
-	if t.Kind != OAuthRefresh {
+	if t.Kind != OAuthRefresh && t.Kind != OAuthRefreshUsed {
 		return OAuthGrant{}, ErrUnauthorized
 	}
 	var g OAuthGrant
+	var reused bool
 	err = s.transaction(ctx, func(q queries) error {
 		u, e := q.lockUser(ctx, t.UserID)
 		if errors.Is(e, sql.ErrNoRows) {
@@ -233,7 +258,7 @@ func (s *Store) RotateOAuthRefresh(ctx context.Context, tokenHash string, now in
 		if e != nil {
 			return e
 		}
-		if t.Kind != OAuthRefresh || t.ExpiresAt <= now {
+		if (t.Kind != OAuthRefresh && t.Kind != OAuthRefreshUsed) || t.ExpiresAt <= now {
 			return ErrUnauthorized
 		}
 		g, e = q.oauthGrant(ctx, u.ID, t.GrantID)
@@ -243,6 +268,21 @@ func (s *Store) RotateOAuthRefresh(ctx context.Context, tokenHash string, now in
 		if e != nil {
 			return e
 		}
+		if t.Kind == OAuthRefreshUsed {
+			// As in RedeemOAuthCode, issue must accept the request first, so
+			// that another client presenting the token cannot revoke the
+			// grant. The deletion must be committed, so the transaction
+			// succeeds and the caller turns reused into ErrRefreshReused.
+			if _, e = issue(g); e != nil {
+				return e
+			}
+			reused = true
+			if e = q.deleteGrantOAuthTokens(ctx, g.UserID, g.ID); e != nil {
+				return e
+			}
+			_, e = q.deleteOAuthGrant(ctx, g.UserID, g.ID)
+			return e
+		}
 		if !g.CodeUsedAt.Valid || u.Disabled != 0 {
 			return ErrUnauthorized
 		}
@@ -250,7 +290,9 @@ func (s *Store) RotateOAuthRefresh(ctx context.Context, tokenHash string, now in
 		if e != nil {
 			return e
 		}
-		n, e := q.deleteOAuthToken(ctx, u.ID, tokenHash)
+		// Mark the token used before storeOAuthTokens, which caps its expiry
+		// with the other tokens of the grant.
+		n, e := q.markOAuthRefreshUsed(ctx, u.ID, tokenHash)
 		if e != nil {
 			return e
 		}
@@ -266,21 +308,32 @@ func (s *Store) RotateOAuthRefresh(ctx context.Context, tokenHash string, now in
 	if err != nil {
 		return OAuthGrant{}, err
 	}
+	if reused {
+		return g, ErrRefreshReused
+	}
 	return g, nil
 }
 
 // storeOAuthTokens inserts tokens for g and extends the grant to the latest
-// token expiry, keeping the invariant that a grant outlives its tokens. It
-// returns the new grant expiry.
+// token expiry, keeping the invariant that a grant outlives its tokens. No
+// token and not the grant outlives OAuthGrantCap: the new tokens are capped,
+// the existing tokens of the grant (including exchanged refresh tokens) are
+// cut down to it, and so is the grant. It returns the new grant expiry.
 func storeOAuthTokens(ctx context.Context, q queries, g OAuthGrant, tokens []OAuthToken) (int64, error) {
+	limit := OAuthGrantCap(g)
 	expires := g.ExpiresAt
 	for _, t := range tokens {
 		t.GrantID, t.UserID = g.ID, g.UserID
+		t.ExpiresAt = min(t.ExpiresAt, limit)
 		if err := q.createOAuthToken(ctx, t); err != nil {
 			return 0, err
 		}
 		expires = max(expires, t.ExpiresAt)
 	}
+	if err := q.capGrantOAuthTokens(ctx, g.UserID, g.ID, limit); err != nil {
+		return 0, err
+	}
+	expires = min(expires, limit)
 	return expires, q.extendOAuthGrant(ctx, g.UserID, g.ID, expires)
 }
 

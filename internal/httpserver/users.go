@@ -322,7 +322,7 @@ func (s *Server) handleDeleteInvitation(w http.ResponseWriter, r *http.Request) 
 // allowAccountAttempt counts an attempt at the public link endpoints and
 // writes 429 when the peer is over the limit.
 func (s *Server) allowAccountAttempt(w http.ResponseWriter, r *http.Request) bool {
-	if s.accountLimiter.allow(r.RemoteAddr) {
+	if s.accountLimiter.allow(s.clientAddr(r)) {
 		return true
 	}
 	w.Header().Set("Retry-After", "60")

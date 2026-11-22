@@ -218,8 +218,11 @@ func (q sqliteQueries) lockOAuthTokenByHash(ctx context.Context, hash, userID st
 	row, err := q.q.LockOAuthTokenByHash(ctx, db.LockOAuthTokenByHashParams{TokenHash: hash, UserID: userID})
 	return q.token(row), err
 }
-func (q sqliteQueries) deleteOAuthToken(ctx context.Context, userID, hash string) (int64, error) {
-	return q.q.DeleteOAuthToken(ctx, db.DeleteOAuthTokenParams{TokenHash: hash, UserID: userID})
+func (q sqliteQueries) markOAuthRefreshUsed(ctx context.Context, userID, hash string) (int64, error) {
+	return q.q.MarkOAuthRefreshUsed(ctx, db.MarkOAuthRefreshUsedParams{TokenHash: hash, UserID: userID})
+}
+func (q sqliteQueries) capGrantOAuthTokens(ctx context.Context, userID, grantID string, maxExpiresAt int64) error {
+	return q.q.CapGrantOAuthTokens(ctx, db.CapGrantOAuthTokensParams{MaxExpiresAt: maxExpiresAt, GrantID: grantID, UserID: userID})
 }
 func (q sqliteQueries) deleteGrantOAuthTokens(ctx context.Context, userID, grantID string) error {
 	return q.q.DeleteGrantOAuthTokens(ctx, db.DeleteGrantOAuthTokensParams{GrantID: grantID, UserID: userID})

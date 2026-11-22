@@ -220,7 +220,7 @@ func (s *Server) completeMFASignIn(w http.ResponseWriter, r *http.Request, u sto
 // OIDC sign-in.
 func (s *Server) mfaPeerLimit(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.mfaPeerLimiter.allow(r.RemoteAddr) {
+		if !s.mfaPeerLimiter.allow(s.clientAddr(r)) {
 			w.Header().Set("Retry-After", "60")
 			fail(w, 429, "rate_limited", "Too many attempts. Try again later.")
 			return

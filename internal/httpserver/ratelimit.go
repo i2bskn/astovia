@@ -2,13 +2,17 @@ package httpserver
 
 import (
 	"net"
+	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
 
 // loginLimiter limits login attempts per peer in a bounded in-process table.
-// Forwarded headers are never trusted; the key is derived from RemoteAddr.
+// The peer is the one clientAddr returns: RemoteAddr, or the client address
+// in X-Forwarded-For when RemoteAddr is a trusted proxy
+// (ASTOVIA_TRUSTED_PROXIES).
 type loginLimiter struct {
 	mu       sync.Mutex
 	entries  map[string]bucket
@@ -31,6 +35,81 @@ func newLoginLimiter() *loginLimiter {
 // window. Keys are given to allowKey; allow derives them from the peer.
 func newKeyLimiter(limit int, window time.Duration) *loginLimiter {
 	return &loginLimiter{entries: make(map[string]bucket), now: time.Now, limit: limit, window: window, capacity: 4096}
+}
+
+// maxForwardedEntries is how many X-Forwarded-For entries clientAddr reads,
+// from the right.
+const maxForwardedEntries = 32
+
+// clientAddr returns the client address of r for the per-peer limiters.
+// When RemoteAddr is not one of the trusted proxies, it is returned as-is
+// and X-Forwarded-For is not read. Otherwise the X-Forwarded-For entries of
+// every header line are read from the right, skipping trusted proxies, and
+// the first untrusted address is returned without a port. RemoteAddr is
+// returned when there is no header, when an entry cannot be parsed (it may
+// be forged), and when every entry read is a trusted proxy: the leftmost
+// entry is written by the client and is never used as the key. Only the
+// rightmost maxForwardedEntries entries are read. Forwarded and X-Real-IP
+// are not read.
+func (s *Server) clientAddr(r *http.Request) string {
+	trusted := s.cfg.TrustedProxies
+	if len(trusted) == 0 {
+		return r.RemoteAddr
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil || !trustedAddr(trusted, peer.Unmap()) {
+		return r.RemoteAddr
+	}
+	var entries []string
+	for _, v := range r.Header.Values("X-Forwarded-For") {
+		entries = append(entries, strings.Split(v, ",")...)
+	}
+	if len(entries) > maxForwardedEntries {
+		entries = entries[len(entries)-maxForwardedEntries:]
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		addr, ok := forwardedAddr(entries[i])
+		if !ok {
+			return r.RemoteAddr
+		}
+		if !trustedAddr(trusted, addr) {
+			return addr.String()
+		}
+	}
+	return r.RemoteAddr
+}
+
+// forwardedAddr parses an X-Forwarded-For entry: an IP address, or an
+// address with a port (1.2.3.4:5678 or [2001:db8::1]:443). Zones are
+// rejected, and IPv4-mapped IPv6 addresses are read as IPv4.
+func forwardedAddr(entry string) (netip.Addr, bool) {
+	entry = strings.TrimSpace(entry)
+	addr, err := netip.ParseAddr(entry)
+	if err != nil {
+		ap, err := netip.ParseAddrPort(entry)
+		if err != nil {
+			return netip.Addr{}, false
+		}
+		addr = ap.Addr()
+	}
+	if addr.Zone() != "" {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
+}
+
+// trustedAddr reports whether addr is in one of the trusted prefixes.
+func trustedAddr(trusted []netip.Prefix, addr netip.Addr) bool {
+	for _, p := range trusted {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // limiterKey returns the IPv4 address itself, or the /64 prefix for IPv6.

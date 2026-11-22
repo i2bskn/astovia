@@ -11,7 +11,7 @@ RUN corepack pnpm build
 FROM frontend AS frontend-development
 RUN chmod -R a+rwX /src/web/node_modules
 
-FROM --platform=$BUILDPLATFORM golang:1.26.10 AS backend
+FROM --platform=$BUILDPLATFORM golang:1.26.11 AS backend
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./

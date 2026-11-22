@@ -30,7 +30,8 @@ const (
 	// for offline_access, and an hour would make it reconnect every hour.
 	LongAccessLifetime = 7 * 24 * time.Hour
 	// RefreshLifetime counts from each rotation, so a connection in use is
-	// extended.
+	// extended, but never past store.OAuthGrantMaxLifetime after the
+	// consent.
 	RefreshLifetime = 90 * 24 * time.Hour
 )
 

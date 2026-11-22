@@ -25,6 +25,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path"
 	"regexp"
@@ -209,8 +210,7 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/auth/config", allow(http.MethodGet, http.HandlerFunc(s.handleAuthConfig)))
 	mux.Handle("/auth/login", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleLogin)))))
 	if s.cfg.OIDC != nil {
-		// No rate limit: behind a proxy every user shares its address, and
-		// the sign-in itself happens at the provider.
+		// No rate limit: the sign-in itself happens at the provider.
 		mux.Handle("/auth/oidc/login", allow(http.MethodGet, http.HandlerFunc(s.handleOIDCLogin)))
 		mux.Handle(config.OIDCCallbackPath, allow(http.MethodGet, http.HandlerFunc(s.handleOIDCCallback)))
 	}
@@ -351,11 +351,39 @@ func (s *Server) handler() http.Handler {
 	// The screens, the static files and the legacy /admin URLs are routed
 	// inside the catch-all so that unknown paths stay JSON 404s.
 	mux.HandleFunc("/", s.web)
-	return secureHeaders(mux)
+	return secureHeaders(useHSTS(s.cfg), mux)
 }
 
-func secureHeaders(next http.Handler) http.Handler {
+// useHSTS reports whether responses carry Strict-Transport-Security: the
+// public URL uses https and its host is not a loopback host. HSTS applies to
+// the whole host whatever the port is, so an https://localhost development
+// setup would move other development servers on localhost to https as well.
+func useHSTS(cfg config.Config) bool {
+	if !cfg.Secure {
+		return false
+	}
+	u, err := url.Parse(cfg.PublicURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return false
+	}
+	if ip, err := netip.ParseAddr(host); err == nil && ip.Unmap().IsLoopback() {
+		return false
+	}
+	return true
+}
+
+// secureHeaders sets the common security headers. hsts adds
+// Strict-Transport-Security without includeSubDomains or preload, since
+// other services may run on subdomains of the operator's domain.
+func secureHeaders(hsts bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hsts {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
@@ -542,7 +570,7 @@ func decode(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
 	return true
 }
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.limiter.allow(r.RemoteAddr) {
+	if !s.limiter.allow(s.clientAddr(r)) {
 		w.Header().Set("Retry-After", "60")
 		fail(w, 429, "rate_limited", "Too many attempts. Try again later.")
 		return

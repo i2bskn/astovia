@@ -7,6 +7,7 @@ import (
 	"github.com/i2bskn/astovia/internal/store"
 	"github.com/i2bskn/astovia/internal/testutil"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -273,37 +274,152 @@ func TestOAuthRefreshRotation(t *testing.T) {
 			if err != nil || g.ID != "g1" || g.ExpiresAt != oauthNow+10+90*86400 {
 				t.Fatalf("rotate: %+v %v", g, err)
 			}
-			// The old refresh token is gone; the new one and both access
-			// tokens work.
-			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-1", oauthNow+20, tokens("3", oauthNow+20, true)); !errors.Is(err, store.ErrUnauthorized) {
-				t.Fatalf("old refresh token: %v", err)
-			}
+			// The new refresh token and both access tokens work.
 			for _, hash := range []string{"access-1", "access-2"} {
 				if err = f.authenticate(hash, oauthNow+20); err != nil {
 					t.Fatalf("%s: %v", hash, err)
 				}
 			}
 			// Rotation removes the user's expired tokens: access-1 and
-			// access-2 expire one hour after issue.
+			// access-2 expire one hour after issue. The exchanged refresh
+			// tokens are kept until they expire.
 			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-2", oauthNow+7200, tokens("4", oauthNow+7200, true)); err != nil {
 				t.Fatal(err)
 			}
-			if n := f.count("oauth_tokens", "alice-id"); n != 2 {
+			if n := f.count("oauth_tokens", "alice-id"); n != 4 {
 				t.Fatalf("tokens after cleanup: %d", n)
 			}
+			if err = f.authenticate("access-4", oauthNow+7300); err != nil {
+				t.Fatalf("access-4: %v", err)
+			}
+			// An exchanged refresh token is not an access token either.
+			if err = f.authenticate("refresh-1", oauthNow+7300); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("exchanged refresh token as access token: %v", err)
+			}
+			// Presenting an exchanged refresh token again with a request the
+			// callback rejects (another client) keeps the grant.
+			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-1", oauthNow+7300, reject); !errors.Is(err, errRejected) {
+				t.Fatalf("reuse with rejecting issue: %v", err)
+			}
+			if f.count("oauth_grants", "alice-id") != 1 || f.count("oauth_tokens", "alice-id") != 4 {
+				t.Fatal("rejected reuse changed the grant")
+			}
+			if err = f.authenticate("access-4", oauthNow+7300); err != nil {
+				t.Fatalf("access-4 after rejected reuse: %v", err)
+			}
+			// Presenting it with an accepted request revokes the grant and
+			// every token of it.
+			g, err = f.s.RotateOAuthRefresh(ctx, "refresh-1", oauthNow+7300, tokens("3", oauthNow+7300, true))
+			if !errors.Is(err, store.ErrRefreshReused) || g.ID != "g1" || g.UserID != "alice-id" {
+				t.Fatalf("reuse: %+v %v", g, err)
+			}
+			if f.count("oauth_tokens", "alice-id") != 0 || f.count("oauth_grants", "alice-id") != 0 {
+				t.Fatal("reuse kept the grant or tokens")
+			}
+			if err = f.authenticate("access-4", oauthNow+7300); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("access token after reuse: %v", err)
+			}
+			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-4", oauthNow+7300, tokens("5", oauthNow+7300, true)); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("new refresh token after reuse: %v", err)
+			}
+
+			// A new connection for the remaining checks.
+			f.grant("alice", "g2", "mcp offline_access", oauthNow+7400)
+			f.redeem("g2", "7", oauthNow+7400)
+			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-7", oauthNow+7400, tokens("8", oauthNow+7400, true)); err != nil {
+				t.Fatal(err)
+			}
+			// An exchanged refresh token that has expired is rejected without
+			// revoking anything.
+			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-7", oauthNow+7400+90*86400, tokens("9", oauthNow+7400+90*86400, true)); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("expired exchanged refresh token: %v", err)
+			}
+			if f.count("oauth_grants", "alice-id") != 1 || f.count("oauth_tokens", "alice-id") != 4 {
+				t.Fatalf("expired reuse changed the grant: grants=%d tokens=%d", f.count("oauth_grants", "alice-id"), f.count("oauth_tokens", "alice-id"))
+			}
 			// An expired refresh token is rejected.
-			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-4", oauthNow+7200+90*86400, tokens("5", oauthNow, true)); !errors.Is(err, store.ErrUnauthorized) {
+			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-8", oauthNow+7400+90*86400, tokens("10", oauthNow, true)); !errors.Is(err, store.ErrUnauthorized) {
 				t.Fatalf("expired refresh token: %v", err)
 			}
 			// A disabled user cannot refresh.
 			if _, err = f.raw.ExecContext(ctx, "UPDATE users SET disabled = 1 WHERE id = 'alice-id'"); err != nil {
 				t.Fatal(err)
 			}
-			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-4", oauthNow+7300, tokens("6", oauthNow+7300, true)); !errors.Is(err, store.ErrUnauthorized) {
+			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-8", oauthNow+7500, tokens("11", oauthNow+7500, true)); !errors.Is(err, store.ErrUnauthorized) {
 				t.Fatalf("disabled user: %v", err)
 			}
-			if err = f.authenticate("access-4", oauthNow+7300); !errors.Is(err, store.ErrUnauthorized) {
+			if err = f.authenticate("access-8", oauthNow+7500); !errors.Is(err, store.ErrUnauthorized) {
 				t.Fatalf("disabled user's access token: %v", err)
+			}
+		})
+	}
+}
+
+// No token and no grant outlives store.OAuthGrantMaxLifetime after the
+// consent, including tokens stored before the limit existed.
+func TestOAuthGrantMaxLifetime(t *testing.T) {
+	const day = 86400
+	limit := int64(oauthNow) + int64(store.OAuthGrantMaxLifetime.Seconds())
+	if limit != oauthNow+180*day {
+		t.Fatalf("limit: %d", limit)
+	}
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			f := newOAuthFixture(t, driver)
+			maxExpiry := func(table string) int64 {
+				t.Helper()
+				var n int64
+				if err := f.raw.QueryRowContext(ctx, "SELECT MAX(expires_at) FROM "+table+" WHERE user_id = 'alice-id'").Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+			g := f.grant("alice", "g1", "mcp offline_access", oauthNow)
+			if got := store.OAuthGrantCap(g); got != limit {
+				t.Fatalf("cap: %d", got)
+			}
+			f.redeem("g1", "1", oauthNow)
+			// Tokens stored before the limit existed can expire after it.
+			if _, err := f.raw.ExecContext(ctx, "UPDATE oauth_tokens SET expires_at = "+strconv.FormatInt(limit+30*day, 10)+" WHERE token_hash = 'refresh-1'"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.raw.ExecContext(ctx, "UPDATE oauth_grants SET expires_at = "+strconv.FormatInt(limit+30*day, 10)+" WHERE id = 'g1'"); err != nil {
+				t.Fatal(err)
+			}
+			// The next exchange caps the new tokens, the exchanged one and
+			// the grant.
+			now := int64(oauthNow + 170*day)
+			g, err := f.s.RotateOAuthRefresh(ctx, "refresh-1", now, tokens("2", now, true))
+			if err != nil || g.ExpiresAt != limit {
+				t.Fatalf("rotate: %+v %v", g, err)
+			}
+			if got := maxExpiry("oauth_tokens"); got != limit {
+				t.Fatalf("latest token expiry: %d, want %d", got, limit)
+			}
+			if got := maxExpiry("oauth_grants"); got != limit {
+				t.Fatalf("grant expiry: %d, want %d", got, limit)
+			}
+			list, err := f.s.ListOAuthGrants(ctx, "alice-id", now)
+			if err != nil || len(list) != 1 || list[0].ExpiresAt != limit {
+				t.Fatalf("list: %+v %v", list, err)
+			}
+			// At the limit every token has expired.
+			if _, err = f.s.RotateOAuthRefresh(ctx, "refresh-2", limit, tokens("3", limit, true)); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("refresh at the limit: %v", err)
+			}
+			// A new consent cleans up the expired grant without violating the
+			// foreign key of its tokens.
+			alice := f.users["alice"]
+			if err = f.s.Login(ctx, alice, store.Session{ID: "alice-later", UserID: alice.ID, ExpiresAt: limit + 7*day, CreatedAt: limit}, store.Refresh{Hash: "refresh-alice-later", SessionID: "alice-later", CreatedAt: limit}); err != nil {
+				t.Fatal(err)
+			}
+			g2 := store.OAuthGrant{ID: "g2", UserID: alice.ID, ClientID: "https://claude.ai/client", ClientName: "Claude", Scope: "mcp", Resource: "https://astovia.test/mcp", RedirectURI: "https://claude.ai/cb", CodeHash: "code-g2", CodeChallenge: "challenge", CodeExpiresAt: limit + 60, CreatedAt: limit, ExpiresAt: limit + 60}
+			if err = f.s.CreateOAuthGrant(ctx, g2, "alice-later", limit); err != nil {
+				t.Fatalf("new consent: %v", err)
+			}
+			if f.count("oauth_grants", "alice-id") != 1 || f.count("oauth_tokens", "alice-id") != 0 {
+				t.Fatalf("cleanup: grants=%d tokens=%d", f.count("oauth_grants", "alice-id"), f.count("oauth_tokens", "alice-id"))
 			}
 		})
 	}

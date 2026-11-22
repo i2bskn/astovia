@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -556,5 +557,83 @@ func TestMFARequired(t *testing.T) {
 	}
 	if MFAOff != "off" || MFAOwners != "owners" || MFAAll != "all" {
 		t.Fatalf("values: %q %q %q", MFAOff, MFAOwners, MFAAll)
+	}
+}
+
+func TestTrustedProxies(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://example.com")
+	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("ASTOVIA_MFA_REQUIRED", "")
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
+	const invalid = "ASTOVIA_TRUSTED_PROXIES must be a comma-separated list of IP addresses or CIDR prefixes"
+	const tooWide = "ASTOVIA_TRUSTED_PROXIES must not contain prefixes shorter than /8 (IPv4) or /16 (IPv6)"
+	many := make([]string, 65)
+	for i := range many {
+		many[i] = "10.0.0." + strconv.Itoa(i)
+	}
+	for _, serve := range []bool{true, false} {
+		for _, mode := range []string{"password", "oidc"} {
+			if mode == "oidc" {
+				setOIDC(t, "oidc", "https://idp.example.com", "client", "secret")
+			} else {
+				setOIDC(t, "", "", "", "")
+			}
+			for input, want := range map[string][]string{
+				"":                              nil,
+				" \t":                           nil,
+				"10.0.0.1":                      {"10.0.0.1/32"},
+				" 10.0.0.0/8 , 192.168.0.0/16 ": {"10.0.0.0/8", "192.168.0.0/16"},
+				"10.1.2.3/8":                    {"10.0.0.0/8"},
+				"::ffff:10.0.0.1":               {"10.0.0.1/32"},
+				"2001:db8::1":                   {"2001:db8::1/128"},
+				"2001:db8::/32,fd00::/16":       {"2001:db8::/32", "fd00::/16"},
+				"172.16.0.0/12,192.168.0.0/16,10.0.0.0/8": {"172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"},
+				strings.Join(many[:64], ","): func() []string {
+					out := make([]string, 64)
+					for i := range out {
+						out[i] = many[i] + "/32"
+					}
+					return out
+				}(),
+			} {
+				t.Setenv("ASTOVIA_TRUSTED_PROXIES", input)
+				c, err := Load(serve)
+				if err != nil {
+					t.Fatalf("serve=%v mode=%s %q: %v", serve, mode, input, err)
+				}
+				var got []string
+				for _, p := range c.TrustedProxies {
+					got = append(got, p.String())
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("serve=%v mode=%s %q: %v, want %v", serve, mode, input, got, want)
+				}
+			}
+			for input, want := range map[string]string{
+				"proxy":                 invalid,
+				"10.0.0.1,,10.0.0.2":    invalid,
+				"10.0.0.1,":             invalid,
+				",10.0.0.1":             invalid,
+				"10.0.0.256":            invalid,
+				"10.0.0.0/33":           invalid,
+				"10.0.0.1:80":           invalid,
+				"fe80::1%eth0":          invalid,
+				"fe80::%eth0/64":        invalid,
+				"::ffff:10.0.0.0/104":   invalid,
+				"0.0.0.0/0":             tooWide,
+				"8.0.0.0/7":             tooWide,
+				"10.0.0.0/8,0.0.0.0/0":  tooWide,
+				"::/0":                  tooWide,
+				"2001::/15":             tooWide,
+				strings.Join(many, ","): invalid + " (at most 64)",
+			} {
+				t.Setenv("ASTOVIA_TRUSTED_PROXIES", input)
+				if _, err := Load(serve); err == nil || err.Error() != want {
+					t.Fatalf("serve=%v mode=%s %q: %v", serve, mode, input, err)
+				}
+			}
+		}
 	}
 }

@@ -35,6 +35,22 @@ func (q *Queries) AcceptInvitation(ctx context.Context, arg AcceptInvitationPara
 	return result.RowsAffected()
 }
 
+const capGrantOAuthTokens = `-- name: CapGrantOAuthTokens :exec
+UPDATE oauth_tokens SET expires_at = $1
+WHERE grant_id = $2 AND user_id = $3 AND expires_at > $1
+`
+
+type CapGrantOAuthTokensParams struct {
+	MaxExpiresAt int64
+	GrantID      string
+	UserID       string
+}
+
+func (q *Queries) CapGrantOAuthTokens(ctx context.Context, arg CapGrantOAuthTokensParams) error {
+	_, err := q.db.ExecContext(ctx, capGrantOAuthTokens, arg.MaxExpiresAt, arg.GrantID, arg.UserID)
+	return err
+}
+
 const clearAllUserOIDC = `-- name: ClearAllUserOIDC :exec
 UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE oidc_issuer IS NOT NULL OR oidc_subject IS NOT NULL
 `
@@ -1226,23 +1242,6 @@ type DeleteOAuthGrantParams struct {
 
 func (q *Queries) DeleteOAuthGrant(ctx context.Context, arg DeleteOAuthGrantParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteOAuthGrant, arg.ID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const deleteOAuthToken = `-- name: DeleteOAuthToken :execrows
-DELETE FROM oauth_tokens WHERE token_hash = $1 AND user_id = $2
-`
-
-type DeleteOAuthTokenParams struct {
-	TokenHash string
-	UserID    string
-}
-
-func (q *Queries) DeleteOAuthToken(ctx context.Context, arg DeleteOAuthTokenParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteOAuthToken, arg.TokenHash, arg.UserID)
 	if err != nil {
 		return 0, err
 	}
@@ -4825,6 +4824,24 @@ type MarkOAuthCodeUsedParams struct {
 
 func (q *Queries) MarkOAuthCodeUsed(ctx context.Context, arg MarkOAuthCodeUsedParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, markOAuthCodeUsed, arg.CodeUsedAt, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const markOAuthRefreshUsed = `-- name: MarkOAuthRefreshUsed :execrows
+UPDATE oauth_tokens SET kind = 'refresh_used'
+WHERE token_hash = $1 AND user_id = $2 AND kind = 'refresh'
+`
+
+type MarkOAuthRefreshUsedParams struct {
+	TokenHash string
+	UserID    string
+}
+
+func (q *Queries) MarkOAuthRefreshUsed(ctx context.Context, arg MarkOAuthRefreshUsedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, markOAuthRefreshUsed, arg.TokenHash, arg.UserID)
 	if err != nil {
 		return 0, err
 	}

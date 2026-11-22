@@ -36,6 +36,10 @@ type Config struct {
 	// (ASTOVIA_MFA_REQUIRED): MFAOff, MFAOwners or MFAAll. The zero value is
 	// treated as MFAOff. It is validated but not used with OIDC sign-in.
 	MFARequired string
+	// TrustedProxies are the front proxies (ASTOVIA_TRUSTED_PROXIES) whose
+	// X-Forwarded-For is read to find the client address of a request.
+	// Empty trusts no proxy and uses the peer address only.
+	TrustedProxies []netip.Prefix
 }
 
 // Values of ASTOVIA_MFA_REQUIRED.
@@ -137,6 +141,9 @@ func Load(requireSecret bool) (Config, error) {
 		return c, err
 	}
 	if c.MFARequired, err = mfaRequired(); err != nil {
+		return c, err
+	}
+	if c.TrustedProxies, err = trustedProxies(os.Getenv("ASTOVIA_TRUSTED_PROXIES")); err != nil {
 		return c, err
 	}
 	if requireSecret {
@@ -400,6 +407,55 @@ func mfaRequired() (string, error) {
 		return v, nil
 	}
 	return "", errors.New("ASTOVIA_MFA_REQUIRED must be off, owners or all")
+}
+
+// maxTrustedProxies is the most entries ASTOVIA_TRUSTED_PROXIES may have.
+const maxTrustedProxies = 64
+
+const trustedProxiesError = "ASTOVIA_TRUSTED_PROXIES must be a comma-separated list of IP addresses or CIDR prefixes"
+
+// trustedProxies reads ASTOVIA_TRUSTED_PROXIES: a comma-separated list of IP
+// addresses and CIDR prefixes, each trimmed. Unset or blank trusts no proxy.
+// A single address is a /32 (IPv4) or /128 (IPv6) prefix, and an
+// IPv4-mapped IPv6 address is read as IPv4. Empty entries, zones,
+// IPv4-mapped prefixes and more than maxTrustedProxies entries are errors.
+// Prefixes shorter than /8 (IPv4) or /16 (IPv6) are errors as well: trusting
+// everyone would let any client choose its rate limit key.
+func trustedProxies(v string) ([]netip.Prefix, error) {
+	if strings.TrimSpace(v) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(v, ",")
+	if len(parts) > maxTrustedProxies {
+		return nil, errors.New(trustedProxiesError + " (at most 64)")
+	}
+	prefixes := make([]netip.Prefix, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, errors.New(trustedProxiesError)
+		}
+		var p netip.Prefix
+		if strings.Contains(part, "/") {
+			parsed, err := netip.ParsePrefix(part)
+			if err != nil || parsed.Addr().Zone() != "" || parsed.Addr().Is4In6() {
+				return nil, errors.New(trustedProxiesError)
+			}
+			p = parsed.Masked()
+		} else {
+			addr, err := netip.ParseAddr(part)
+			if err != nil || addr.Zone() != "" {
+				return nil, errors.New(trustedProxiesError)
+			}
+			addr = addr.Unmap()
+			p = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		if (p.Addr().Is4() && p.Bits() < 8) || (p.Addr().Is6() && p.Bits() < 16) {
+			return nil, errors.New("ASTOVIA_TRUSTED_PROXIES must not contain prefixes shorter than /8 (IPv4) or /16 (IPv6)")
+		}
+		prefixes = append(prefixes, p)
+	}
+	return prefixes, nil
 }
 
 // boolEnv reads a boolean variable: true or 1 is true, and unset, empty,
