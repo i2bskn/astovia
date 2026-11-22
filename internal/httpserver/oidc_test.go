@@ -1284,6 +1284,85 @@ func TestOIDCFirstSignInGoogle(t *testing.T) {
 	})
 }
 
+// With RequireGoogleHD, the first sign-in of an address outside gmail.com
+// needs the hd claim whatever the issuer is: Google accounts that sign in
+// through another provider.
+func TestOIDCFirstSignInRequireGoogleHD(t *testing.T) {
+	oidcDrivers(t, func(t *testing.T, o *oidcSignIn) {
+		logs := captureLog(t)
+		yes, no := true, false
+		o.api.srv.cfg.OIDC.RequireGoogleHD = true
+		for _, email := range []string{"dave@example.com", "erin@gmail.com", "gina@example.org"} {
+			o.invite(email, store.RoleMember)
+		}
+		invited := len(o.activeInvitations())
+		// unchanged checks that a refused sign-in created no user from the
+		// invitation, linked no existing user and used no invitation.
+		unchanged := func() {
+			t.Helper()
+			o.noUser("dave@example.com")
+			if issuer, sub := o.identity("carol@example.com"); issuer != "" || sub != "" {
+				t.Fatalf("carol was linked: %q %q", issuer, sub)
+			}
+			if n := len(o.activeInvitations()); n != invited {
+				t.Fatalf("invitations: %d, want %d", n, invited)
+			}
+		}
+		// Without hd: an invited address and an unlinked user are refused.
+		for _, email := range []string{"dave@example.com", "carol@example.com"} {
+			expectSigninError(t, o.callback(email, ""), reasonUnsupported)
+		}
+		unchanged()
+		// So are they when email_verified is not required and absent.
+		o.api.srv.cfg.OIDC.RequireEmailVerified = false
+		o.rp.setVerified(nil)
+		for _, email := range []string{"dave@example.com", "carol@example.com"} {
+			expectSigninError(t, o.callback(email, ""), reasonUnsupported)
+		}
+		unchanged()
+		// email_verified is checked first.
+		o.api.srv.cfg.OIDC.RequireEmailVerified = true
+		for _, verified := range []*bool{&no, nil} {
+			o.rp.setVerified(verified)
+			for _, email := range []string{"dave@example.com", "carol@example.com"} {
+				expectSigninError(t, o.callback(email, ""), reasonNotVerified)
+			}
+		}
+		unchanged()
+		o.rp.setVerified(&yes)
+		// gmail.com passes without hd.
+		if got := o.signedIn(o.callback("Erin@Gmail.com", "")); got.Email != "erin@gmail.com" {
+			t.Fatalf("%+v", got)
+		}
+		// With hd they pass; its value is not compared with the address.
+		o.rp.setHD("example.net")
+		for _, email := range []string{"dave@example.com", "carol@example.com"} {
+			if got := o.signedIn(o.callback(email, "")); got.Email != email {
+				t.Fatalf("%s: %+v", email, got)
+			}
+		}
+		if issuer, sub := o.identity("dave@example.com"); issuer != testIssuer || sub != defaultSubject("dave@example.com") {
+			t.Fatalf("identity %q %q", issuer, sub)
+		}
+		// A linked user signs in without hd.
+		o.rp.setHD("")
+		o.signedIn(o.callback("dave@example.com", ""))
+		o.signedIn(o.callback("carol@example.com", ""))
+
+		// Without the setting, an issuer other than Google needs no hd.
+		expectSigninError(t, o.callback("gina@example.org", ""), reasonUnsupported)
+		o.noUser("gina@example.org")
+		o.api.srv.cfg.OIDC.RequireGoogleHD = false
+		if got := o.signedIn(o.callback("gina@example.org", "")); got.Email != "gina@example.org" {
+			t.Fatalf("%+v", got)
+		}
+
+		if !strings.Contains(logs.String(), "auth: oidc sign-in failed: google account without hd") || strings.Contains(strings.ToLower(logs.String()), "gmail") || strings.Contains(strings.ToLower(logs.String()), "@example") || strings.Contains(logs.String(), "example.net") {
+			t.Fatalf("log: %s", logs.String())
+		}
+	})
+}
+
 // Concurrent first sign-ins of several identities with one address: one
 // gets the address and the others are not allowed.
 func TestOIDCFirstSignInConcurrency(t *testing.T) {

@@ -74,7 +74,7 @@ v0.1.0では、許可リストから外した既存ユーザーもログイン�
 
 CLIを実行しにくい構成では、更新する前（v0.1.0のうち）にユーザー管理画面で無効化しておいてください。v0.1.0で`ASTOVIA_ALLOWED_EMAILS`を空にして全員を止めていた構成では、起動エラーが出ないまま既存ユーザーがログインできるようになります。止めたい人を無効化してください。
 
-issuerがGoogle（`https://accounts.google.com`）の場合、`@gmail.com`以外のアドレスの初回ログインにはGoogle Workspaceの`hd`クレームが必要です。v0.1.0でログインしていた「独自ドメインのアドレスで作った個人のGoogleアカウント」は、更新後は紐付けられません。回避する設定はありません。
+issuerがGoogle（`https://accounts.google.com`）の場合、`@gmail.com`以外のアドレスの初回ログインにはGoogle Workspaceの`hd`クレームが必要です。v0.1.0でログインしていた「独自ドメインのアドレスで作った個人のGoogleアカウント」は、更新後は紐付けられません。回避する設定はありません。Google以外のissuerでは`ASTOVIA_OIDC_REQUIRE_GOOGLE_HD=true`で同じ確認をします。issuerがGoogleのときに`false`を設定すると起動エラーになります。
 
 ユーザー操作は`docker compose run --rm app go run ./cmd/astovia users ...`で、イメージ内の古いバイナリではなく現在のソースから実行します。そのため、CLIのコードを変更してもイメージの再ビルドは不要です。ユーザー操作CLIには署名鍵は不要ですが、Airから起動する`serve`では必須です。
 

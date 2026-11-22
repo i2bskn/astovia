@@ -134,14 +134,17 @@ func TestOIDCClient(t *testing.T) {
 	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	t.Setenv("ASTOVIA_ALLOWED_EMAILS", "")
 	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", "")
 	const secret = "s3cr3t:with+special/chars%~"
 	const issuer, id = "https://accounts.example.com", "client/id+1"
 
 	// Unset, empty or password: password sign-in.
-	// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED is ignored, even when invalid.
+	// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED and ASTOVIA_OIDC_REQUIRE_GOOGLE_HD
+	// are ignored, even when invalid.
 	for _, mode := range []string{"", "password", " Password "} {
 		setOIDC(t, mode, "", "", "")
 		t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "1")
+		t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", "1")
 		t.Setenv("ASTOVIA_PUBLIC_URL", "http://localhost:8080")
 		if c, e := Load(true); e != nil || c.OIDC != nil {
 			t.Fatalf("%q: %+v %v", mode, c.OIDC, e)
@@ -150,6 +153,7 @@ func TestOIDCClient(t *testing.T) {
 	t.Setenv("ASTOVIA_PUBLIC_URL", "https://Astovia.Example.com:443")
 	t.Setenv("ASTOVIA_ALLOWED_EMAILS", "")
 	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", "")
 
 	// ASTOVIA_OIDC_* without ASTOVIA_AUTH_MODE=oidc.
 	for _, tc := range []struct{ mode, issuer, id, secret string }{
@@ -181,6 +185,7 @@ func TestOIDCClient(t *testing.T) {
 			Secret:               secret,
 			RedirectURI:          "https://astovia.example.com/auth/oidc/callback",
 			RequireEmailVerified: true,
+			RequireGoogleHD:      false,
 		}
 		if e != nil || c.OIDC == nil || !reflect.DeepEqual(*c.OIDC, want) {
 			t.Fatalf("%v: %+v %v", requireSecret, c.OIDC, e)
@@ -216,6 +221,62 @@ func TestOIDCClient(t *testing.T) {
 		}
 	}
 	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
+
+	// ASTOVIA_OIDC_REQUIRE_GOOGLE_HD: empty leaves the check to the issuer.
+	// The server and the CLI read it alike.
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"", false}, {"true", true}, {" true ", true}, {"false", false}, {" false", false}} {
+		setOIDC(t, "oidc", issuer, id, secret)
+		t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", tc.value)
+		for _, requireSecret := range []bool{true, false} {
+			if c, e := Load(requireSecret); e != nil || c.OIDC == nil || c.OIDC.RequireGoogleHD != tc.want {
+				t.Fatalf("%q %v: %+v %v", tc.value, requireSecret, c.OIDC, e)
+			}
+		}
+	}
+	// Any other value is an error that does not echo it, with Google as the
+	// issuer too.
+	const invalidGoogleHD = "ASTOVIA_OIDC_REQUIRE_GOOGLE_HD must be true or false"
+	for _, iss := range []string{issuer, GoogleIssuer} {
+		setOIDC(t, "oidc", iss, id, secret)
+		for _, v := range []string{"1", "0", "TRUE", "False", "yes"} {
+			t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", v)
+			for _, requireSecret := range []bool{true, false} {
+				if _, e := Load(requireSecret); e == nil || e.Error() != invalidGoogleHD {
+					t.Fatalf("%s %q %v: %v", iss, v, requireSecret, e)
+				}
+			}
+		}
+	}
+	// With Google as the issuer the check cannot be turned off: false is an
+	// error, and empty and true are accepted.
+	setOIDC(t, "oidc", GoogleIssuer, id, secret)
+	for _, v := range []string{"false", " false "} {
+		t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", v)
+		for _, requireSecret := range []bool{true, false} {
+			if _, e := Load(requireSecret); e == nil || e.Error() != "ASTOVIA_OIDC_REQUIRE_GOOGLE_HD cannot be false with the issuer https://accounts.google.com: the hd check of Google accounts cannot be turned off" {
+				t.Fatalf("%q %v: %v", v, requireSecret, e)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"", false}, {"true", true}} {
+		t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", tc.value)
+		if c, e := Load(false); e != nil || c.OIDC == nil || c.OIDC.Issuer != GoogleIssuer || c.OIDC.RequireGoogleHD != tc.want {
+			t.Fatalf("%q: %+v %v", tc.value, c.OIDC, e)
+		}
+	}
+	// The issuer is compared exactly: with a trailing slash it is not Google.
+	setOIDC(t, "oidc", GoogleIssuer+"/", id, secret)
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", "false")
+	if c, e := Load(false); e != nil || c.OIDC == nil || c.OIDC.RequireGoogleHD {
+		t.Fatalf("%+v %v", c.OIDC, e)
+	}
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", "")
 
 	// Missing values and format violations, never echoed in the error.
 	for _, tc := range []struct{ issuer, id, secret, variable string }{
@@ -290,6 +351,13 @@ func TestLegacyAccessVariables(t *testing.T) {
 					t.Fatalf("error contains the value: %v", e)
 				}
 			}
+		}
+	}
+	// Access can send email_verified: turning the check off is the last
+	// resort, not a step of the migration.
+	for _, part := range []string{"send the email_verified claim", "only if that is not possible, set ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED=false"} {
+		if !strings.Contains(legacyAccessError, part) {
+			t.Fatalf("%q is missing: %s", part, legacyAccessError)
 		}
 	}
 }

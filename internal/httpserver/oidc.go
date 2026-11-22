@@ -66,13 +66,8 @@ const (
 	reasonUnsupported   = "unsupported_account"
 )
 
-const (
-	// googleIssuer is the issuer of Google. Its hd claim tells a Google
-	// Workspace account from a personal account made with another address.
-	googleIssuer = "https://accounts.google.com"
-	// gmailDomain is the only domain whose Google accounts need no hd claim.
-	gmailDomain = "gmail.com"
-)
+// gmailDomain is the only domain whose Google accounts need no hd claim.
+const gmailDomain = "gmail.com"
 
 // oidcState is the content of the sign-in cookie: the state, nonce and
 // PKCE verifier of the sign-in and the path to return to.
@@ -298,8 +293,10 @@ func (s *Server) firstOIDCUser(ctx context.Context, issuer string, identity oidc
 	}
 	// Google lets anyone make a personal account with an address of a domain
 	// they do not hold; only gmail.com addresses and Google Workspace
-	// accounts (hd) are taken as verified by Google.
-	if issuer == googleIssuer && email[strings.LastIndexByte(email, '@')+1:] != gmailDomain && identity.HostedDomain == "" {
+	// accounts (hd) are taken as verified by Google. This is checked when
+	// Google is the issuer, or when the configuration asks for it because
+	// Google accounts sign in through another provider.
+	if (issuer == config.GoogleIssuer || s.cfg.OIDC.RequireGoogleHD) && email[strings.LastIndexByte(email, '@')+1:] != gmailDomain && identity.HostedDomain == "" {
 		return store.User{}, reasonUnsupported, "google account without hd"
 	}
 	id, err := auth.Random()

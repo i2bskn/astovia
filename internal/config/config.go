@@ -78,7 +78,15 @@ type OIDCClient struct {
 	// RequireEmailVerified requires the email_verified claim to be true;
 	// when false, only a missing claim is accepted as well.
 	RequireEmailVerified bool
+	// RequireGoogleHD requires the hd claim at the first sign-in of an
+	// address outside gmail.com whatever the issuer is. With Google as the
+	// issuer the claim is required even when this is false.
+	RequireGoogleHD bool
 }
+
+// GoogleIssuer is the issuer of Google. Its hd claim tells a Google
+// Workspace account from a personal account made with another address.
+const GoogleIssuer = "https://accounts.google.com"
 
 // OIDCCallbackPath is the path of the redirect URI of the OIDC client.
 const OIDCCallbackPath = "/auth/oidc/callback"
@@ -178,7 +186,7 @@ func validGoogleValue(v string) bool {
 // legacyAccessError replaces the Cloudflare Access variables of earlier
 // releases. They are not read as the new ones, so that there is only one
 // way to configure the sign-in.
-const legacyAccessError = "ASTOVIA_ACCESS_TEAM_DOMAIN, ASTOVIA_ACCESS_CLIENT_ID and ASTOVIA_ACCESS_CLIENT_SECRET were replaced: set ASTOVIA_AUTH_MODE=oidc, ASTOVIA_OIDC_ISSUER=https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client ID>, ASTOVIA_OIDC_CLIENT_ID, ASTOVIA_OIDC_CLIENT_SECRET and ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED=false, change the redirect URL of the Access application to <ASTOVIA_PUBLIC_URL>/auth/oidc/callback, and remove the ASTOVIA_ACCESS_* variables; new users need an invitation from the user management screen before their first sign-in"
+const legacyAccessError = "ASTOVIA_ACCESS_TEAM_DOMAIN, ASTOVIA_ACCESS_CLIENT_ID and ASTOVIA_ACCESS_CLIENT_SECRET were replaced: set ASTOVIA_AUTH_MODE=oidc, ASTOVIA_OIDC_ISSUER=https://<team>.cloudflareaccess.com/cdn-cgi/access/sso/oidc/<client ID>, ASTOVIA_OIDC_CLIENT_ID and ASTOVIA_OIDC_CLIENT_SECRET, make the Access application send the email_verified claim (add it to the OIDC claims of the identity provider and of the application; only if that is not possible, set ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED=false), change the redirect URL of the Access application to <ASTOVIA_PUBLIC_URL>/auth/oidc/callback, and remove the ASTOVIA_ACCESS_* variables; new users need an invitation from the user management screen before their first sign-in"
 
 // allowedEmailsError replaces ASTOVIA_ALLOWED_EMAILS of earlier releases.
 // The steps are in the order the operator takes them: a user that the list
@@ -194,6 +202,9 @@ const allowedEmailsError = "ASTOVIA_ALLOWED_EMAILS was removed: who can sign in 
 // users commands (serve false) ignore it, so that the operator can disable
 // users before removing it. As with the Google client, the issuer, the
 // client ID and the secret are not trimmed: surrounding spaces are rejected.
+// ASTOVIA_OIDC_REQUIRE_GOOGLE_HD=true asks for the hd claim whatever the
+// issuer is; false is an error with Google as the issuer, where the check
+// cannot be turned off.
 func oidcClient(publicURL string, serve bool) (*OIDCClient, error) {
 	if os.Getenv("ASTOVIA_ACCESS_TEAM_DOMAIN") != "" || os.Getenv("ASTOVIA_ACCESS_CLIENT_ID") != "" || os.Getenv("ASTOVIA_ACCESS_CLIENT_SECRET") != "" {
 		return nil, errors.New(legacyAccessError)
@@ -204,7 +215,8 @@ func oidcClient(publicURL string, serve bool) (*OIDCClient, error) {
 	issuer, id, secret := os.Getenv("ASTOVIA_OIDC_ISSUER"), os.Getenv("ASTOVIA_OIDC_CLIENT_ID"), os.Getenv("ASTOVIA_OIDC_CLIENT_SECRET")
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("ASTOVIA_AUTH_MODE"))) {
 	case "", AuthModePassword:
-		// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED is ignored with passwords.
+		// ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED and
+		// ASTOVIA_OIDC_REQUIRE_GOOGLE_HD are ignored with passwords.
 		if issuer != "" || id != "" || secret != "" {
 			return nil, errors.New("ASTOVIA_OIDC_* is set but ASTOVIA_AUTH_MODE is not oidc; set ASTOVIA_AUTH_MODE=oidc or remove ASTOVIA_OIDC_*")
 		}
@@ -235,11 +247,15 @@ func oidcClient(publicURL string, serve bool) (*OIDCClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	googleHD, err := requireGoogleHD(os.Getenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD"), issuer)
+	if err != nil {
+		return nil, err
+	}
 	// The sign-in cookie uses the Secure attribute and the __Host- prefix.
 	if !strings.HasPrefix(publicURL, "https://") {
 		return nil, errors.New("ASTOVIA_PUBLIC_URL must use https with ASTOVIA_AUTH_MODE=oidc")
 	}
-	return &OIDCClient{Issuer: issuer, ClientID: id, Secret: secret, RedirectURI: publicURL + OIDCCallbackPath, RequireEmailVerified: requireVerified}, nil
+	return &OIDCClient{Issuer: issuer, ClientID: id, Secret: secret, RedirectURI: publicURL + OIDCCallbackPath, RequireEmailVerified: requireVerified, RequireGoogleHD: googleHD}, nil
 }
 
 // validOIDCIssuer accepts an absolute https URL of 1-2048 bytes with a host
@@ -277,6 +293,26 @@ func requireEmailVerified(v string) (bool, error) {
 		return false, nil
 	}
 	return false, errors.New("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED must be true or false")
+}
+
+// requireGoogleHD reads ASTOVIA_OIDC_REQUIRE_GOOGLE_HD: true requires the hd
+// claim whatever the issuer is, and unset, empty or false leaves the check
+// to the issuer. An explicit false is an error when the issuer is exactly
+// GoogleIssuer, so that nobody believes the check is off there. The value is
+// trimmed; any other value, including 1, 0 and TRUE, is an error.
+func requireGoogleHD(v, issuer string) (bool, error) {
+	switch strings.TrimSpace(v) {
+	case "":
+		return false, nil
+	case "true":
+		return true, nil
+	case "false":
+		if issuer == GoogleIssuer {
+			return false, errors.New("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD cannot be false with the issuer " + GoogleIssuer + ": the hd check of Google accounts cannot be turned off")
+		}
+		return false, nil
+	}
+	return false, errors.New("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD must be true or false")
 }
 
 // validOIDCSecret accepts 1-1024 bytes of printable ASCII other than the
