@@ -768,13 +768,35 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID string, guard store.IssueGuard) error {
 	r = r.WithContext(store.WithIssueGuard(r.Context(), guard))
 	err := s.sessions.Issue(w, r, userID)
-	if !errors.Is(err, session.ErrInvalid) {
-		return err
+	if errors.Is(err, session.ErrInvalid) {
+		if err = s.sessions.ResetInvalidCookie(w, r); err == nil {
+			err = s.sessions.Issue(w, withoutCookie(r, SessionCookieName), userID)
+		}
 	}
-	if err := s.sessions.ResetInvalidCookie(w, r); err != nil {
-		return err
+	if err == nil {
+		keepLastCookie(w.Header(), SessionCookieName)
 	}
-	return s.sessions.Issue(w, withoutCookie(r, SessionCookieName), userID)
+	return err
+}
+
+// keepLastCookie leaves only the last Set-Cookie line of the cookie name in
+// h: a session cleared earlier in the response and then issued is sent as
+// the issued cookie alone (RFC 6265 section 3 asks for one line per name).
+func keepLastCookie(h http.Header, name string) {
+	lines := h.Values("Set-Cookie")
+	last := -1
+	for i, line := range lines {
+		if n, _, _ := strings.Cut(line, "="); n == name {
+			last = i
+		}
+	}
+	kept := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if n, _, _ := strings.Cut(line, "="); n != name || i == last {
+			kept = append(kept, line)
+		}
+	}
+	h["Set-Cookie"] = kept
 }
 
 // withoutCookie returns a copy of r whose Cookie headers leave out every

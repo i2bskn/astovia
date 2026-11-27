@@ -39,10 +39,7 @@ func newActionItemAPI(t *testing.T, driver string, now *time.Time) *actionItemAP
 			t.Fatal(err)
 		}
 	}
-	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	a.Now = func() time.Time { return *now }
 	api := &actionItemAPI{t: t, handler: New(config.Config{PublicURL: "https://astovia.test", Secure: true}, a, fstest.MapFS{}, nil)}
 	for _, u := range []struct {
@@ -57,7 +54,7 @@ func newActionItemAPI(t *testing.T, driver string, now *time.Time) *actionItemAP
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
 			t.Fatalf("login %s: %d %s", u.name, w.Code, w.Body.String())
 		}
-		*u.token = result.AccessToken
+		*u.token = sessionCookie(t, w)
 	}
 	return api
 }
@@ -68,9 +65,7 @@ func (a *actionItemAPI) do(method, path, token, ct, body string) *httptest.Respo
 	if ct != "" {
 		r.Header.Set("Content-Type", ct)
 	}
-	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+token)
-	}
+	authorize(r, token)
 	return serve(a.t, a.handler, r)
 }
 

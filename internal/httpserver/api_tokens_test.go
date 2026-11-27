@@ -39,10 +39,7 @@ func newTokenAPI(t *testing.T, driver string) *tokenAPI {
 			t.Fatal(err)
 		}
 	}
-	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	now := time.Date(2026, 10, 23, 1, 2, 3, 0, time.UTC)
 	a.Now = func() time.Time { return now }
 	api := &tokenAPI{t: t, store: s, now: &now, handler: New(config.Config{PublicURL: "https://astovia.test", Secure: true}, a, fstest.MapFS{}, nil)}
@@ -57,11 +54,10 @@ func (a *tokenAPI) login(name string) string {
 	r.Header.Set("Origin", "https://astovia.test")
 	r.Header.Set("Content-Type", "application/json")
 	w := serve(a.t, a.handler, r)
-	var result authResponse
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
+	if w.Code != 200 {
 		a.t.Fatalf("login %s: %d %s", name, w.Code, w.Body.String())
 	}
-	return result.AccessToken
+	return sessionCookie(a.t, w)
 }
 
 // do sends a request with a JSON content type when body is not empty.
@@ -71,9 +67,7 @@ func (a *tokenAPI) do(method, path, bearer, body string) *httptest.ResponseRecor
 	if body != "" {
 		r.Header.Set("Content-Type", "application/json")
 	}
-	if bearer != "" {
-		r.Header.Set("Authorization", "Bearer "+bearer)
-	}
+	authorize(r, bearer)
 	return serve(a.t, a.handler, r)
 }
 
@@ -184,7 +178,7 @@ func testAPITokensAPI(t *testing.T, driver string) {
 	expectStatus(t, api.do("POST", "/api/v1/api-tokens", api.alice, `{"name":"x","scope":"all"}`), 400, "invalid_request")
 	expectStatus(t, api.do("POST", "/api/v1/api-tokens", api.alice, `{"name":"`+strings.Repeat("x", 4096)+`"}`), 413, "body_too_large")
 	r := httptest.NewRequest("POST", "/api/v1/api-tokens", strings.NewReader(`{"name":"x"}`))
-	r.Header.Set("Authorization", "Bearer "+api.alice)
+	authorize(r, api.alice)
 	expectStatus(t, serve(t, api.handler, r), 415, "unsupported_media_type")
 
 	// API tokens cannot manage tokens or read the account.

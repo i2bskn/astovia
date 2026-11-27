@@ -153,10 +153,7 @@ func newMCPChatworkAPI(t *testing.T, driver string) *mcpChatworkAPI {
 			t.Fatal(err)
 		}
 	}
-	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	now := time.Date(2026, 10, 24, 1, 2, 3, 0, time.UTC)
 	a.Now = func() time.Time { return now }
 	cw := &fakeChatworkAPI{rooms: fakeRooms(), messages: map[string]string{}, status: map[string]int{}}

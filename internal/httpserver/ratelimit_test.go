@@ -143,10 +143,7 @@ func TestLoginRateLimitIgnoresForwardedFor(t *testing.T) {
 	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, Role: store.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
-	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	srv := newServer(config.Config{PublicURL: "https://astovia.test"}, a, fstest.MapFS{}, nil)
 	now := time.Date(2026, time.October, 23, 0, 0, 0, 0, time.UTC)
 	srv.limiter.now = func() time.Time { return now }
@@ -180,17 +177,16 @@ func TestLoginRateLimitTrustedProxy(t *testing.T) {
 	if err = s.CreateUser(context.Background(), store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: hash, Role: store.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
-	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	cfg := config.Config{PublicURL: "https://astovia.test", TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}
 	srv := newServer(cfg, a, fstest.MapFS{}, nil)
 	now := time.Date(2026, time.October, 23, 0, 0, 0, 0, time.UTC)
 	srv.limiter.now = func() time.Time { return now }
 	h := srv.handler()
-	login := func(forwardedFor string) int {
-		r := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"email":"alice@example.com","password":"wrong-password-1"}`))
+	// Each client signs in to its own address, so that only the limit per
+	// client is under test, not the one per email address.
+	login := func(forwardedFor, email string) int {
+		r := httptest.NewRequest("POST", "/auth/login", strings.NewReader(`{"email":"`+email+`","password":"wrong-password-1"}`))
 		r.RemoteAddr = "10.0.0.2:1234"
 		r.Header.Set("X-Forwarded-For", forwardedFor)
 		r.Header.Set("Origin", "https://astovia.test")
@@ -204,15 +200,15 @@ func TestLoginRateLimitTrustedProxy(t *testing.T) {
 		if i == 11 {
 			want = http.StatusTooManyRequests
 		}
-		if got := login("198.51.100.1"); got != want {
+		if got := login("198.51.100.1", "alice@example.com"); got != want {
 			t.Fatalf("first client attempt %d: got %d, want %d", i, got, want)
 		}
 	}
-	if got := login("198.51.100.2"); got != http.StatusUnauthorized {
+	if got := login("198.51.100.2", "bob@example.com"); got != http.StatusUnauthorized {
 		t.Fatalf("second client: got %d, want 401", got)
 	}
 	// The leftmost entry is written by the client and is not the key.
-	if got := login("203.0.113.9, 198.51.100.1"); got != http.StatusTooManyRequests {
+	if got := login("203.0.113.9, 198.51.100.1", "carol@example.com"); got != http.StatusTooManyRequests {
 		t.Fatalf("forged leftmost entry: got %d, want 429", got)
 	}
 }
