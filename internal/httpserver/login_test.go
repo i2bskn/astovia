@@ -456,3 +456,48 @@ func TestLegacyMFALogin(t *testing.T) {
 		}
 	})
 }
+
+// TestSessionLifetime checks the lifetime of the browser session (spec §4):
+// each authenticated request moves the idle limit of 7 days, and the
+// session ends 30 days after the sign-in whatever its activity.
+func TestSessionLifetime(t *testing.T) {
+	mfaDrivers(t, func(t *testing.T, driver string) {
+		api := newUsersAPI(t, driver)
+		me := func(cookie string) int {
+			t.Helper()
+			return api.do("GET", "/api/v1/me", cookie, "").Code
+		}
+		day := 24 * time.Hour
+
+		// Idle: used every 6 days, the session lives on; 7 days unused end it.
+		idle, _ := api.login("alice@example.com", "correct-password-123")
+		for range 3 {
+			*api.now = api.now.Add(6 * day)
+			if got := me(idle); got != 200 {
+				t.Fatalf("used within the idle limit: %d", got)
+			}
+		}
+		*api.now = api.now.Add(7*day - time.Second)
+		if got := me(idle); got != 200 {
+			t.Fatalf("just before the idle limit: %d", got)
+		}
+		*api.now = api.now.Add(7 * day)
+		if got := me(idle); got != 401 {
+			t.Fatalf("after the idle limit: %d", got)
+		}
+
+		// Absolute: the session ends 30 days after the sign-in even when it
+		// is used every day.
+		absolute, _ := api.login("carol@example.com", "correct-password-123")
+		for i := 1; i < 30; i++ {
+			*api.now = api.now.Add(day)
+			if got := me(absolute); got != 200 {
+				t.Fatalf("day %d: %d", i, got)
+			}
+		}
+		*api.now = api.now.Add(day)
+		if got := me(absolute); got != 401 {
+			t.Fatalf("after 30 days: %d", got)
+		}
+	})
+}
