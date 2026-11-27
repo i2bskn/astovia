@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/i2bskn/astovia/internal/oauth"
+	"github.com/i2bskn/astovia/internal/netguard"
 )
 
 // OpenAIAPIBaseURL is the OpenAI API used with an OpenAI API key.
@@ -73,7 +73,7 @@ var (
 // Link-local, unspecified and multicast addresses and the known metadata
 // services are always refused; the other addresses are allowed when
 // allowPrivate is set, and otherwise only public ones
-// (oauth.AllowedPublicAddr). IPv4-mapped IPv6 addresses are checked as IPv4.
+// (netguard.AllowedPublicAddr). IPv4-mapped IPv6 addresses are checked as IPv4.
 func endpointAddrAllowed(a netip.Addr, allowPrivate bool) bool {
 	a = a.Unmap().WithZone("")
 	if !a.IsValid() || a.IsLinkLocalUnicast() || a.IsUnspecified() || a.IsMulticast() {
@@ -91,7 +91,7 @@ func endpointAddrAllowed(a netip.Addr, allowPrivate bool) bool {
 	if allowPrivate {
 		return true
 	}
-	return oauth.AllowedPublicAddr(a)
+	return netguard.AllowedPublicAddr(a)
 }
 
 // NewEndpointClient returns the HTTP client of the OpenAI API and the

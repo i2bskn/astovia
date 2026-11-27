@@ -1,8 +1,8 @@
-// Package oauth keeps the address check that the outbound clients share:
+// Package netguard keeps the address check that the outbound clients share:
 // the AI endpoints and the push services are reached at URLs that users
 // choose, so only public addresses may be dialed. The OAuth server itself
 // is authlume's mcpoauth.
-package oauth
+package netguard
 
 import "net/netip"
 

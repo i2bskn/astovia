@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/SherClockHolmes/webpush-go"
-	"github.com/i2bskn/astovia/internal/oauth"
+	"github.com/i2bskn/astovia/internal/netguard"
 	"github.com/i2bskn/astovia/internal/store"
 )
 
@@ -31,7 +31,7 @@ var errBlockedAddress = errors.New("push endpoint address is not allowed")
 // subscription), so the client applies the same address check as the AI
 // endpoints: only public addresses, no redirects, no proxy.
 func NewPushClient() *http.Client {
-	return newPushClient(oauth.AllowedPublicAddr, nil)
+	return newPushClient(netguard.AllowedPublicAddr, nil)
 }
 
 // newPushClient checks the address of every connection after name

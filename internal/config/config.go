@@ -619,7 +619,7 @@ func canonicalOrigin(raw string) (string, bool, error) {
 
 // ValidDNSHost reports whether host is a lower-case ASCII DNS name (punycode for
 // international names) that cannot be read as a numeric IPv4 shorthand.
-// internal/oauth uses it for client and redirect URI hosts as well.
+// The push endpoints are checked with it as well.
 func ValidDNSHost(host string) bool {
 	name := strings.TrimSuffix(host, ".")
 	if name == "" || len(name) > 253 {

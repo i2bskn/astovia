@@ -1,4 +1,4 @@
-package oauth
+package netguard
 
 import (
 	"net/netip"

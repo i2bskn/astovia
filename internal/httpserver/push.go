@@ -41,8 +41,8 @@ func toPushSubscriptionResponse(p store.PushSubscription) pushSubscriptionRespon
 // validPushEndpoint accepts an https URL of at most 2048 bytes of printable
 // ASCII whose host is a DNS name (no IP literal), on the default port, with
 // no user information or fragment. The server sends requests to it, so the
-// rules follow internal/oauth's URL rules; the address it resolves to is
-// checked again when sending.
+// host must be a DNS name (config.ValidDNSHost); the address it resolves to
+// is checked by internal/netguard when sending.
 func validPushEndpoint(raw string) bool {
 	if len(raw) < 1 || len(raw) > 2048 || strings.Contains(raw, "#") {
 		return false
