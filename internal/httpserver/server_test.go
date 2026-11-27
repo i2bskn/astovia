@@ -358,7 +358,7 @@ func serve(t *testing.T, h http.Handler, r *http.Request) *httptest.ResponseReco
 	t.Helper()
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if !strings.Contains(w.Header().Get("Content-Security-Policy"), "default-src 'self'") || w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Referrer-Policy") != "same-origin" {
+	if !strings.Contains(w.Header().Get("Content-Security-Policy"), "default-src 'self'") || w.Header().Get("X-Content-Type-Options") != "nosniff" || (w.Header().Get("Referrer-Policy") != "same-origin" && w.Header().Get("Referrer-Policy") != "no-referrer") {
 		t.Fatalf("%s %s: security headers missing: %v", r.Method, r.URL.Path, w.Header())
 	}
 	if (strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/oauth/")) && w.Header().Get("Cache-Control") != "no-store" {

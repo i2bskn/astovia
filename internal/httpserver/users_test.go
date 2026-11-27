@@ -77,9 +77,14 @@ func (a *usersAPI) session(w *httptest.ResponseRecorder) (string, string) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
 		a.t.Fatalf("login response: %d %s", w.Code, w.Body.String())
 	}
-	cookies := w.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != SessionCookieName || cookies[0].Value == "" || !cookies[0].HttpOnly || cookies[0].Path != "/" {
-		a.t.Fatalf("cookie: %+v", cookies)
+	var cookies []*http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookieName {
+			cookies = append(cookies, c)
+		}
+	}
+	if len(cookies) != 1 || cookies[0].Value == "" || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode || cookies[0].Path != "/" {
+		a.t.Fatalf("cookie: %v", w.Header().Values("Set-Cookie"))
 	}
 	cookie := cookies[0].Name + "=" + cookies[0].Value
 	return cookie, cookie

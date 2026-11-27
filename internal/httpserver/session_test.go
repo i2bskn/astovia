@@ -1,13 +1,23 @@
 package httpserver
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/i2bskn/authlume/webauthn"
+
+	"github.com/i2bskn/astovia/internal/auth"
+	"github.com/i2bskn/astovia/internal/store"
 )
 
 // testOrigin is the public URL of most handlers in the tests.
@@ -69,4 +79,29 @@ func signIn(t testing.TB, h http.Handler, email, password string) string {
 		t.Fatalf("sign in %s: %d %s", email, w.Code, w.Body.String())
 	}
 	return sessionCookie(t, w)
+}
+
+// storeKey stores a WebAuthn credential id for userID through the
+// credential store, as an enrollment before the first session does.
+func storeKey(t testing.TB, s *store.Store, userID, id string) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := s.UserByID(ctx, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := store.WebAuthnEnrollment{UserID: userID, Name: "Key " + id, PasswordDigest: auth.Hash(u.PasswordHash), Now: time.Now().Unix()}
+	cred := webauthn.Credential{ID: []byte("credential-" + id), PublicKey: []byte("public-" + id)}
+	if err := s.WebAuthnCredentials().Insert(store.WithWebAuthnEnrollment(ctx, e), userID, cred, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// captureLog sends the log to a buffer for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	return &buf
 }

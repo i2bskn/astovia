@@ -391,7 +391,7 @@ func (s *Server) handler() http.Handler {
 // provider, so form-action allows the provider's origins as well.
 func contentSecurityPolicy(c config.Config) string {
 	formAction := "'self'"
-	if c.OIDC != nil {
+	if c.OIDC != nil && len(c.OIDC.FormActionOrigins) > 0 {
 		formAction += " " + strings.Join(c.OIDC.FormActionOrigins, " ")
 	}
 	return "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action " + formAction
