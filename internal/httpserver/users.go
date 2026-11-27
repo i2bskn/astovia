@@ -361,6 +361,7 @@ func (s *Server) linkPassword(w http.ResponseWriter, r *http.Request, password s
 	if !ok {
 		return "", false
 	}
+	defer release()
 	hash, err := auth.Password(password)
 	release()
 	if err != nil {

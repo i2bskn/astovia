@@ -156,10 +156,11 @@ test('the browser is asked with converted options and its result is converted ba
   // The server sends the argument of the browser API as authlume encodes it.
   assert.deepEqual(await createCredential({ publicKey: creation }), registrationJSON(created));
   assert.deepEqual(await getCredential({ publicKey: assertion, mediation: 'optional' }), assertionJSON(signed));
-  assert.deepEqual(asked.map(([kind, options]) => [kind, Object.keys(options)]), [['create', ['publicKey']], ['get', ['publicKey', 'mediation']]]);
+  // Only publicKey is passed to the browser; other members are dropped.
+  assert.deepEqual(asked.map(([kind, options]) => [kind, Object.keys(options)]), [['create', ['publicKey']], ['get', ['publicKey']]]);
   assert.deepEqual(list(asked[0][1].publicKey.challenge), [1, 2, 3]);
   assert.deepEqual(list(asked[1][1].publicKey.allowCredentials[1].id), [0xfb, 0xff]);
-  assert.equal(asked[1][1].mediation, 'optional');
+  assert.equal(asked[1][1].mediation, undefined);
   // Options without the wrapper are not passed to the browser.
   for (const bad of [creation, null, 'x', [], { publickey: creation }]) {
     await assert.rejects(createCredential(bad), /Unexpected WebAuthn options/, JSON.stringify(bad));

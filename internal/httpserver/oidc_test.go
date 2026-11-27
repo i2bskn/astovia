@@ -400,26 +400,35 @@ func TestOIDCLogin(t *testing.T) {
 	}
 }
 
-// TestOIDCLoginsFull checks that sign-ins do not start while the bound of
-// the sign-ins in progress is reached, and start again once they expire.
+// TestOIDCLoginsFull checks that a start over the bound of the sign-ins in
+// progress evicts the oldest one instead of being refused: the new sign-in
+// finishes, the evicted one fails at its callback, and a warning without
+// anything of the sign-ins is logged.
 func TestOIDCLoginsFull(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			o := newOIDCAPI(t, driver, nil)
-			now := *o.now
-			rawExec(t, driver, o.dsn, fmt.Sprintf(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < %d)
-INSERT INTO oidc_logins (key, nonce, verifier, started_at, expires_at) SELECT 'k' || i, 'n', 'v', %d, %d FROM n`, store.MaxLiveOIDCLogins, now.Unix(), now.Unix()+60))
-			logs := captureLog(t)
-			w := o.loginForm(url.Values{}, usersOrigin, "")
-			expectSigninError(t, w, reasonUnavailable)
-			if len(w.Result().Cookies()) != 0 {
-				t.Fatalf("cookie set: %v", w.Header().Values("Set-Cookie"))
+			ctx := context.Background()
+			if err := o.store.ApproveOIDCLink(ctx, "alice@example.com", o.now.Unix()+3600); err != nil {
+				t.Fatal(err)
 			}
-			if !strings.Contains(logs.String(), "too many sign-ins in progress") {
+			alice := claims("alice@example.com", "alice-sub")
+			oldLoc, oldCookie := o.start("")
+			// The others expire later, so the first one is the oldest.
+			// authlume dates a sign-in by its own clock, the real time.
+			later := time.Now().Add(time.Hour).Unix()
+			rawExec(t, driver, o.dsn, fmt.Sprintf(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < %d)
+INSERT INTO oidc_logins (key, nonce, verifier, started_at, expires_at) SELECT 'k' || i, 'n', 'v', %d, %d FROM n`, store.MaxLiveOIDCLogins-1, later-600, later))
+			logs := captureLog(t)
+			loc, cookie := o.start("/settings")
+			if !strings.Contains(logs.String(), "evicted the oldest 1") {
 				t.Fatalf("log: %s", logs.String())
 			}
-			*o.now = now.Add(time.Minute)
-			o.start("")
+			if strings.Contains(logs.String(), oldLoc.Query().Get("state")) || strings.Contains(logs.String(), loc.Query().Get("state")) {
+				t.Fatalf("log has a state: %s", logs.String())
+			}
+			expectSigninError(t, o.callback(o.idp.grant(oldLoc, alice), oldCookie), reasonFailed)
+			o.signedIn(o.callback(o.idp.grant(loc, alice), cookie), "/settings")
 		})
 	}
 }

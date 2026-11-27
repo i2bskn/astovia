@@ -555,6 +555,11 @@ DELETE FROM oidc_logins WHERE key = sqlc.arg(key) AND expires_at <= sqlc.arg(now
 DELETE FROM oidc_logins WHERE expires_at <= sqlc.arg(now)::bigint;
 -- name: CountLiveOIDCLogins :one
 SELECT COUNT(*) FROM oidc_logins WHERE expires_at > sqlc.arg(now);
+-- name: DeleteOldestLiveOIDCLogins :execrows
+DELETE FROM oidc_logins WHERE key IN (
+  SELECT live.key FROM oidc_logins AS live WHERE live.expires_at > sqlc.arg(now)::bigint
+  ORDER BY live.expires_at, live.started_at, live.key LIMIT sqlc.arg(count)
+);
 -- name: InsertOIDCLogin :execrows
 INSERT INTO oidc_logins (key,nonce,verifier,started_at,expires_at,max_age_seconds,app_data)
 VALUES (sqlc.arg(key),sqlc.arg(nonce),sqlc.arg(verifier),sqlc.arg(started_at),sqlc.arg(expires_at),sqlc.narg(max_age_seconds),sqlc.narg(app_data))

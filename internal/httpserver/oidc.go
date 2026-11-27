@@ -241,8 +241,6 @@ func oidcErrorKind(err error) string {
 		return "provider unavailable"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
-	case errors.Is(err, store.ErrOIDCLoginsFull):
-		return "too many sign-ins in progress"
 	}
 	return "server error"
 }

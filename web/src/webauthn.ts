@@ -125,10 +125,12 @@ export function webauthnSupported(): boolean {
 
 // credentialArgument converts the options of the server, the argument of
 // navigator.credentials in JSON form ({publicKey: options}), with convert
-// for its publicKey member; the other members are passed on.
-function credentialArgument<T>(value: unknown, convert: (options: unknown) => T): Record<string, unknown> & { publicKey: T } {
+// for its publicKey member. Only publicKey is passed on: another member
+// the server might add (mediation, signal and the like) would change how
+// the browser asks, so it is not taken over unchecked.
+function credentialArgument<T>(value: unknown, convert: (options: unknown) => T): { publicKey: T } {
   if (!isRecord(value) || !('publicKey' in value)) throw new Error('Unexpected WebAuthn options');
-  return { ...value, publicKey: convert(value.publicKey) };
+  return { publicKey: convert(value.publicKey) };
 }
 
 // createCredential asks the browser to create a credential for the options

@@ -10,6 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 	"net/url"
 	"strings"
+	"sync/atomic"
 )
 
 var ErrUnauthorized = errors.New("invalid credentials")
@@ -333,6 +334,10 @@ type Store struct {
 	db     *sql.DB
 	q      queries
 	driver string
+	// oidcEvicted counts the OIDC sign-ins evicted since the last warning,
+	// logged at oidcEvictionLogged (Unix seconds; 0 before the first).
+	oidcEvicted        atomic.Int64
+	oidcEvictionLogged atomic.Int64
 }
 
 func Open(ctx context.Context, driver, dsn string) (*Store, error) {

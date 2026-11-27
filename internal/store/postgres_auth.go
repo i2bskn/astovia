@@ -36,6 +36,9 @@ func (q postgresQueries) deleteExpiredOIDCLogins(ctx context.Context, now int64)
 func (q postgresQueries) countLiveOIDCLogins(ctx context.Context, now int64) (int64, error) {
 	return q.q.CountLiveOIDCLogins(ctx, now)
 }
+func (q postgresQueries) deleteOldestLiveOIDCLogins(ctx context.Context, now, count int64) (int64, error) {
+	return q.q.DeleteOldestLiveOIDCLogins(ctx, db.DeleteOldestLiveOIDCLoginsParams{Now: now, Count: int32(count)})
+}
 func (q postgresQueries) insertOIDCLogin(ctx context.Context, l oidcLogin) (int64, error) {
 	return q.q.InsertOIDCLogin(ctx, db.InsertOIDCLoginParams(l))
 }

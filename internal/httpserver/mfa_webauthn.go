@@ -103,10 +103,13 @@ func writeWebAuthnBegin(w http.ResponseWriter, options json.RawMessage, handle s
 
 type webauthnHandleKey struct{}
 
-// takeWebAuthnHandle wraps the routes that finish a ceremony: before
-// anything else is checked, it clears the cookie of the ceremony handle and
-// hands its value to next (see webauthnHandle). A ceremony is finished
-// once, whatever the outcome, even a request refused before the handler.
+// takeWebAuthnHandle wraps the routes that finish a ceremony: before the
+// checks of the route, it clears the cookie of the ceremony handle and
+// hands its value to next (see webauthnHandle). Once it runs, a ceremony is
+// finished once, whatever the outcome. A request refused before it, by the
+// Origin check (403) or the method check (405), leaves the cookie as it
+// is; the ceremony then stays until its 5 minutes run out, and can still be
+// taken only once.
 func takeWebAuthnHandle(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, newWebAuthnCookie("", -1))

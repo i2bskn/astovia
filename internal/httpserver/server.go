@@ -764,11 +764,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_request", "Credentials exceed the supported length.")
 		return
 	}
-	// A request refused for want of a derivation slot is not counted.
+	// A request refused for want of a derivation slot is not counted
+	// against the email limit; the per-peer limit above has counted it.
 	release, ok := s.passwordSlot(w, r)
 	if !ok {
 		return
 	}
+	defer release()
 	// Counted before the password is derived, so that concurrent attempts
 	// cannot all pass the check while the derivations run.
 	key := emailLimitKey(in.Email)

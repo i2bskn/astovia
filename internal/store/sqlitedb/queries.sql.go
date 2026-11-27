@@ -1230,6 +1230,26 @@ func (q *Queries) DeleteMFAWebAuthnCredential(ctx context.Context, arg DeleteMFA
 	return result.RowsAffected()
 }
 
+const deleteOldestLiveOIDCLogins = `-- name: DeleteOldestLiveOIDCLogins :execrows
+DELETE FROM oidc_logins WHERE key IN (
+  SELECT live.key FROM oidc_logins AS live WHERE live.expires_at > ?1
+  ORDER BY live.expires_at, live.started_at, live.key LIMIT ?2
+)
+`
+
+type DeleteOldestLiveOIDCLoginsParams struct {
+	Now   int64
+	Count int64
+}
+
+func (q *Queries) DeleteOldestLiveOIDCLogins(ctx context.Context, arg DeleteOldestLiveOIDCLoginsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteOldestLiveOIDCLogins, arg.Now, arg.Count)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deletePushSubscription = `-- name: DeletePushSubscription :execrows
 DELETE FROM web_push_subscriptions WHERE id = ?1 AND user_id = ?2
 `

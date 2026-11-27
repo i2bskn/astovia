@@ -531,8 +531,8 @@ func TestMCPConnections(t *testing.T) {
 	})
 }
 
-// TestOIDCLoginLimit checks that the sign-ins in progress are bounded and
-// that expired ones do not count.
+// TestOIDCLoginLimit checks that the sign-ins in progress are bounded by
+// evicting the oldest ones, and that expired ones do not count.
 func TestOIDCLoginLimit(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		ctx := context.Background()
@@ -547,21 +547,57 @@ INSERT INTO oidc_logins (key, nonce, verifier, started_at, expires_at) SELECT '%
 				t.Fatal(err)
 			}
 		}
-		start := func(key string) error {
-			return o.Create(ctx, digestOf(key), oidc.Transaction{Nonce: "n", Verifier: "v", StartedAt: now, ExpiresAt: now.Add(10 * time.Minute)})
+		start := func(key string, life time.Duration) error {
+			return o.Create(ctx, digestOf(key), oidc.Transaction{Nonce: "n", Verifier: "v", StartedAt: now, ExpiresAt: now.Add(life)})
 		}
-		fill("live-", tokenTestNow+600, store.MaxLiveOIDCLogins-1)
+		count := func(query string) int64 {
+			t.Helper()
+			n, err := s.CountForTest(ctx, query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		live := func() int64 {
+			t.Helper()
+			return count(fmt.Sprintf("SELECT COUNT(*) FROM oidc_logins WHERE expires_at > %d", now.Unix()))
+		}
+		taken := func(key string) bool {
+			t.Helper()
+			_, err := o.Take(ctx, digestOf(key), now)
+			if err != nil && !errors.Is(err, oidc.ErrInvalid) {
+				t.Fatal(err)
+			}
+			return err == nil
+		}
+		// The oldest sign-in expires first.
+		if err := start("oldest", time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		fill("live-", tokenTestNow+600, store.MaxLiveOIDCLogins-2)
 		fill("expired-", tokenTestNow, 10)
-		if err := start("last"); err != nil {
+		if err := start("last", 10*time.Minute); err != nil {
 			t.Fatalf("the last start under the limit: %v", err)
 		}
-		if err := start("over"); !errors.Is(err, store.ErrOIDCLoginsFull) {
+		if n := live(); n != store.MaxLiveOIDCLogins {
+			t.Fatalf("live: %d", n)
+		}
+		// Over the limit, the oldest one is evicted and the new one starts.
+		if err := start("over", 10*time.Minute); err != nil {
 			t.Fatalf("over the limit: %v", err)
 		}
-		// Once they expire, sign-ins start again.
-		now = now.Add(10 * time.Minute)
-		if err := start("later"); err != nil {
-			t.Fatalf("after the expiry: %v", err)
+		if n := live(); n != store.MaxLiveOIDCLogins {
+			t.Fatalf("live after the eviction: %d", n)
+		}
+		if taken("oldest") {
+			t.Fatal("the oldest sign-in was not evicted")
+		}
+		if !taken("over") || !taken("last") {
+			t.Fatal("a new sign-in was evicted")
+		}
+		// Expired ones are neither counted nor evicted.
+		if n := count("SELECT COUNT(*) FROM oidc_logins WHERE key LIKE 'expired-%'"); n != 10 {
+			t.Fatalf("expired: %d", n)
 		}
 	})
 }

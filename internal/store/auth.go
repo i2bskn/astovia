@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/i2bskn/authlume/oidc"
@@ -115,6 +116,7 @@ type authQueries interface {
 	deleteExpiredOIDCLogin(ctx context.Context, key string, now int64) error
 	deleteExpiredOIDCLogins(ctx context.Context, now int64) error
 	countLiveOIDCLogins(ctx context.Context, now int64) (int64, error)
+	deleteOldestLiveOIDCLogins(ctx context.Context, now, count int64) (int64, error)
 	insertOIDCLogin(ctx context.Context, l oidcLogin) (int64, error)
 	takeOIDCLogin(ctx context.Context, key string) (oidcLogin, error)
 	deleteExpiredWebAuthnCeremony(ctx context.Context, key string, now int64) error
@@ -336,12 +338,15 @@ func (w sessionStore) Delete(ctx context.Context, key session.Key) error {
 
 // MaxLiveOIDCLogins bounds the OIDC sign-ins in progress. Anyone can start
 // one, so without a bound a flood of starts from many peers could fill
-// oidc_logins until the hourly cleanup. Over it, Create refuses new starts
-// with ErrOIDCLoginsFull until enough of them expire (10 minutes).
+// oidc_logins until the hourly cleanup. Over it, Create evicts the oldest
+// sign-ins in progress to make room instead of refusing the new one: a
+// refusal would let such a flood lock every user, the owner included, out
+// of the OIDC sign-in. An evicted sign-in fails at its callback.
 const MaxLiveOIDCLogins = 10000
 
-// ErrOIDCLoginsFull means that MaxLiveOIDCLogins sign-ins are in progress.
-var ErrOIDCLoginsFull = errors.New("store: too many OIDC sign-ins in progress")
+// oidcEvictionLogInterval is the least time between two warnings about
+// evicted sign-ins, so that a flood does not flood the log too.
+const oidcEvictionLogInterval = 10 * time.Minute
 
 // OIDCLogins returns the oidc.Store of authlume/oidc on oidc_logins. now is
 // the clock of the sweep and the count of the sign-ins in progress.
@@ -362,7 +367,9 @@ func (o oidcLoginStore) Create(ctx context.Context, key oidc.Key, tx oidc.Transa
 		row.AppData = sql.NullString{String: base64.StdEncoding.EncodeToString(tx.AppData), Valid: true}
 	}
 	now := o.now().Unix()
-	return o.s.transaction(ctx, func(q queries) error {
+	var evicted int64
+	err := o.s.transaction(ctx, func(q queries) error {
+		evicted = 0
 		if err := q.deleteExpiredOIDCLogin(ctx, k, now); err != nil {
 			return err
 		}
@@ -371,7 +378,9 @@ func (o oidcLoginStore) Create(ctx context.Context, key oidc.Key, tx oidc.Transa
 			return err
 		}
 		if live >= MaxLiveOIDCLogins {
-			return ErrOIDCLoginsFull
+			if evicted, err = q.deleteOldestLiveOIDCLogins(ctx, now, live-MaxLiveOIDCLogins+1); err != nil {
+				return err
+			}
 		}
 		n, err := q.insertOIDCLogin(ctx, row)
 		if err != nil {
@@ -382,6 +391,25 @@ func (o oidcLoginStore) Create(ctx context.Context, key oidc.Key, tx oidc.Transa
 		}
 		return nil
 	})
+	if err == nil && evicted > 0 {
+		o.s.noteOIDCEvictions(evicted, now)
+	}
+	return err
+}
+
+// noteOIDCEvictions counts the evicted sign-ins and logs a warning at most
+// once every oidcEvictionLogInterval, with the count since the last one.
+// Nothing about the sign-ins themselves is logged.
+func (s *Store) noteOIDCEvictions(n, now int64) {
+	s.oidcEvicted.Add(n)
+	last := s.oidcEvictionLogged.Load()
+	if last != 0 && now-last < int64(oidcEvictionLogInterval/time.Second) {
+		return
+	}
+	if !s.oidcEvictionLogged.CompareAndSwap(last, now) {
+		return
+	}
+	log.Printf("store: warning: the OIDC sign-ins in progress reached the bound of %d; evicted the oldest %d since the last warning", MaxLiveOIDCLogins, s.oidcEvicted.Swap(0))
 }
 
 func (o oidcLoginStore) Take(ctx context.Context, key oidc.Key, now time.Time) (oidc.Transaction, error) {

@@ -288,7 +288,7 @@ func (l *emailLimiter) reset(key string) {
 // about 19 MiB, so without a bound many concurrent sign-ins with random
 // addresses (which the limits per peer and per address do not stop) could
 // exhaust the memory. A request waits up to wait for a free slot and is then
-// refused; a refused request is not counted as an attempt.
+// refused (see passwordSlot for the limits that count such a refusal).
 type passwordSlots struct {
 	slots chan struct{}
 	wait  time.Duration
@@ -330,13 +330,22 @@ func (p *passwordSlots) release() { <-p.slots }
 
 // passwordSlot takes a slot of s.passwordSlots for one password derivation
 // (a sign-in, a password check or a new password). When none is free it
-// writes 503 unavailable with Retry-After and reports false; nothing is
-// counted against the attempt limits then.
+// writes 503 unavailable with Retry-After and reports false. Such a 503 is
+// not counted against the limits checked after the slot is taken (the
+// limit per email address of /auth/login and the limit per user of the
+// password check of the MFA endpoints). The limits per peer of
+// /auth/login and of the invitation and reset links are checked before
+// the slot and have counted it, so that one peer cannot keep taking the
+// slots. release may be called more than
+// once; callers defer it right away, so that a panic does not keep the
+// slot, and may call it earlier to free the slot once the derivation is
+// done.
 func (s *Server) passwordSlot(w http.ResponseWriter, r *http.Request) (release func(), ok bool) {
 	if !s.passwordSlots.acquire(r.Context()) {
 		w.Header().Set("Retry-After", "1")
 		fail(w, 503, "unavailable", "The server is busy. Try again.")
 		return nil, false
 	}
-	return s.passwordSlots.release, true
+	var once sync.Once
+	return func() { once.Do(s.passwordSlots.release) }, true
 }

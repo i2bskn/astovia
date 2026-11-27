@@ -10,7 +10,7 @@
 - 以前の版のリフレッシュ用Cookie`astovia_refresh`は、要求に付いていれば`/auth/`配下の応答で消します。
 - Cookieで認証する`/api/`と`/auth/`の要求のうち、`GET`・`HEAD`・`OPTIONS`以外は、`Origin`が`ASTOVIA_PUBLIC_URL`と完全に一致しなければ403`origin_rejected`です（`Origin`のない要求も拒否します）。APIトークン（`Authorization: Bearer ast_…`）の要求と、自分で確かめる`POST /auth/oidc/login`は対象外です。CORSのヘッダーは出しません。
 - パスワードは12〜1024バイト（UTF-8）で、Argon2idで保存します。`/auth/login`は接続元IPごとに1分で10回まで、加えて正規化したメールアドレスごとに15分で10回失敗すると、そのアドレスのログインを15分止めます（429、`Retry-After: 900`）。存在しないアドレスも同じように数えます。メールアドレスを知っている人は、そのアドレスのログインを15分止められます（受け入れているリスクです。急ぐ場合はプロセスの再起動でも戻ります）。回数はプロセスのメモリに持ち、複数のインスタンスでは共有しません。
-- パスワードの照合とハッシュの計算（ログイン、招待の受諾・再設定の完了、ログイン後のパスワードの確認）は、プロセスごとにCPU数の2倍までしか同時に行いません。空きを2秒待っても空かなければ503`unavailable`（`Retry-After: 1`）で、ログインの失敗にも試行の回数にも数えません。
+- パスワードの照合とハッシュの計算（ログイン、招待の受諾・再設定の完了、ログイン後のパスワードの確認）は、プロセスごとにCPU数の2倍までしか同時に行いません。空きを2秒待っても空かなければ503`unavailable`（`Retry-After: 1`）です。この503は、空きを得た後に数えるメールアドレスごとのログインの試行と、ログイン後のパスワードの確認の利用者ごとの試行には数えず、招待・再設定のリンクも消費しません。空きを待つ前に数える接続元IPごとの制限（`/auth/login`と招待・再設定のリンク）には数えます。
 
 ## OAuth
 
@@ -51,7 +51,7 @@ Astoviaは`/mcp`のための認可サーバー（authlumeの`mcpoauth`）を内�
 | `GET /admin/*` | 以前の版のURL。対応する新しいURLへ308でリダイレクト（不明なものは`/`へ）。`/admin/oauth/authorize`は`/`へ。`/admin/sw.js`は古い登録の更新用に`/sw.js`と同じ内容を返す |
 | `GET /healthz` | プロセスの稼働確認のみ。非公開情報は返さない |
 | `POST /auth/login` | 本文は`{ "email": "alice@example.com", "password": "…" }`（8KiB以内。メールアドレスは256バイト、パスワードは1024バイトを超えると400）。成功すると`{user}`とセッションのCookieを返す。第2要素が要るユーザーにはセッションを発行せず、200`{mfa: …}`を返す（[二段階認証](#二段階認証)）。資格情報の誤り（未登録・無効化・パスワードのないユーザーを含む）は401`unauthorized`、試行回数の上限は429（[ログインセッション](#ログインセッション)） |
-| `POST /auth/oidc/login` | OIDCの構成だけ。ログイン画面のフォーム（`application/x-www-form-urlencoded`、16KiB以内）で、項目は任意の`return_to`（ログイン後に戻る画面のパスとクエリ）だけ。接続元IPごとに1分で10回まで（超えると`/signin-error?reason=rate_limited`へ303）、`Origin`が違えば403。`return_to`が8300バイトを超えるか、MCPの同意画面（`/oauth/authorize`）以外で1024バイトを超えれば`/signin-error?reason=return_too_long`へ、画面のパスでなければ`/`に置き換え、IdPの認可エンドポイントへ303。IdPに届かないとき、または途中のログインが全体で10000件あるときは`/signin-error?reason=unavailable`へ303（途中のログインは10分で期限が切れます）。`GET`は405 |
+| `POST /auth/oidc/login` | OIDCの構成だけ。ログイン画面のフォーム（`application/x-www-form-urlencoded`、16KiB以内）で、項目は任意の`return_to`（ログイン後に戻る画面のパスとクエリ）だけ。接続元IPごとに1分で10回まで（超えると`/signin-error?reason=rate_limited`へ303）、`Origin`が違えば403。`return_to`が8300バイトを超えるか、MCPの同意画面（`/oauth/authorize`）以外で1024バイトを超えれば`/signin-error?reason=return_too_long`へ、画面のパスでなければ`/`に置き換え、IdPの認可エンドポイントへ303。IdPに届かないときは`/signin-error?reason=unavailable`へ303。途中のログインは全体で10000件までで、それを超える開始では古いもの（期限の近いもの）から消して新しいログインを始め、警告をログに出します。消されたログインはコールバックで`/signin-error?reason=failed`になります（途中のログインは10分で期限が切れます）。`GET`は405 |
 | `GET /auth/oidc/callback` | OIDCの構成だけ。IdPからの戻り先。成功すると`return_to`の画面へ303。失敗は`/signin-error?reason=…`へ303（`failed`・`unavailable`・`disabled`・`not_allowed`・`email_not_verified`・`unsupported_account`）。IdPでの拒否も`failed`になる |
 | `POST /auth/logout` | セッションの失効とCookieの削除。本文は`{}`。204 |
 | `POST /auth/invitations/inspect` | 本文`{token}`で招待の`{email, role, expires_at}`を返す。無効・期限切れ・受諾済み・取り消し済み・存在しない招待は区別せず404`invitation_invalid` |
@@ -169,7 +169,7 @@ Login（と第2要素の確認・招待の受諾・パスワード再設定の�
 どれも`POST`で、本文は`application/json`の4KiB以内（WebAuthnのfinishは32KiB以内）です。`Origin`が`ASTOVIA_PUBLIC_URL`と違えば403、`Content-Type`が違えば415です。
 
 - `/auth/mfa/enroll/*`は、方法が1つもなく必須の対象であるユーザーだけが使えます。方法があれば409`mfa_already_enrolled`、必須でなければ403`mfa_not_required`です。
-- WebAuthnの`options`は`navigator.credentials.create`・`get`の引数の形`{publicKey: …}`で、`publicKey`の中は仕様のJSON形式です。バイナリ（`challenge`・`user.id`・クレデンシャルのID）はパディングなしのbase64urlです。`credential`には`PublicKeyCredential.toJSON()`と同じ形を送ります。途中の状態はサーバーに保存し、そのハンドルをCookie`__Host-astovia_webauthn`（`Secure`・`HttpOnly`・`SameSite=Strict`・`Path=/`）に入れます。期限は5分で、finishで成否にかかわらず1回で使い切ります。`name`は前後の空白を除いて1〜64文字です。
+- WebAuthnの`options`は`navigator.credentials.create`・`get`の引数の形`{publicKey: …}`で、`publicKey`の中は仕様のJSON形式です。バイナリ（`challenge`・`user.id`・クレデンシャルのID）はパディングなしのbase64urlです。`credential`には`PublicKeyCredential.toJSON()`と同じ形を送ります。途中の状態はサーバーに保存し、そのハンドルをCookie`__Host-astovia_webauthn`（`Secure`・`HttpOnly`・`SameSite=Strict`・`Path=/`）に入れます。期限は5分で、finishで成否にかかわらず1回で使い切ります。Cookieはfinishの処理に入ればどの結果でも消します（`Origin`の検査の403やメソッドの405で処理の前に拒んだときは残りますが、途中の状態は期限まで残るだけで、使えるのは1回です）。`name`は前後の空白を除いて1〜64文字です。
 - `setup_token`の期限は30分です。登録の確認に使ったコードは、直後のログインには使えません。
 - リカバリーコードは`xxxx-xxxx-xxxx-xxxx`の形で、1個につき1回だけ使えます。大文字・空白・ハイフンの有無は区別しません。DBにはハッシュだけを保存します。
 
