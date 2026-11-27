@@ -310,7 +310,7 @@ func formActionOrigins(issuer, v string) ([]string, error) {
 	origins := []string{"https://" + strings.ToLower(u.Host)}
 	for _, raw := range strings.Fields(v) {
 		origin, secure, err := canonicalOrigin(raw)
-		if err != nil || !secure || origin != strings.ToLower(raw) {
+		if err != nil || !secure {
 			return nil, errors.New(formActionError)
 		}
 		if !slices.Contains(origins, origin) {

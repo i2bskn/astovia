@@ -186,13 +186,37 @@ func TestLinkOIDCUser(t *testing.T) {
 			}
 		}
 
-		// A user that is not linked yet is linked without an invitation; its
-		// role and password hash stay, and the active invitations to its
-		// email are revoked.
+		// The email alone never links a user that exists: the operator's
+		// approval is needed, until its deadline (exclusive).
 		f.insertInvitation("for-alice", "alice@example.com", store.RoleMember, now, end)
+		if _, _, err = link(oidcIssuer, "sub-alice", "alice@example.com", "unused-id", now+8); !errors.Is(err, store.ErrOIDCNotApproved) {
+			t.Fatalf("not approved: %v", err)
+		}
+		if err = s.ApproveOIDCLink(ctx, "alice@example.com", now+8); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = link(oidcIssuer, "sub-alice", "alice@example.com", "unused-id", now+8); !errors.Is(err, store.ErrOIDCNotApproved) {
+			t.Fatalf("approval at its deadline: %v", err)
+		}
+		if err = s.ApproveOIDCLink(ctx, "missing@example.com", now+100); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("approval of a missing user: %v", err)
+		}
+		if err = s.ApproveOIDCLink(ctx, "alice@example.com", now+100); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.UserByEmail(ctx, "alice@example.com"); err != nil || got.OidcLinkApprovedUntil != (sql.NullInt64{Int64: now + 100, Valid: true}) {
+			t.Fatalf("approval: %+v %v", got, err)
+		}
+		// Approved, the user is linked without an invitation; its role and
+		// password hash stay, the approval is used up, and the active
+		// invitations to its email are revoked.
 		u, created, err = link(oidcIssuer, "sub-alice", "alice@example.com", "unused-id", now+8)
-		if err != nil || created || u.ID != "alice-id" || u.Role != store.RoleOwner || u.PasswordHash != "alice-hash" || u.CreatedAt != 1 || !linked(u, oidcIssuer, "sub-alice") {
+		if err != nil || created || u.ID != "alice-id" || u.Role != store.RoleOwner || u.PasswordHash != "alice-hash" || u.CreatedAt != 1 || !linked(u, oidcIssuer, "sub-alice") || u.OidcLinkApprovedUntil.Valid {
 			t.Fatalf("alice: %+v %v %v", u, created, err)
+		}
+		// A linked user cannot be approved.
+		if err = s.ApproveOIDCLink(ctx, "alice@example.com", now+100); !errors.Is(err, store.ErrOIDCLinked) {
+			t.Fatalf("approval of a linked user: %v", err)
 		}
 		if got, err := s.UserByEmail(ctx, "alice@example.com"); err != nil || got != u {
 			t.Fatalf("alice by email: %+v %v", got, err)
@@ -270,6 +294,9 @@ func TestOIDCIdentityColumns(t *testing.T) {
 		}
 		// Linking an unlinked user to an identity that is taken fails and
 		// leaves the user unlinked.
+		if err := s.ApproveOIDCLink(ctx, "carol@example.com", tokenTestNow+60); err != nil {
+			t.Fatal(err)
+		}
 		if _, _, err := s.LinkOIDCUser(ctx, oidcIssuer, "sub-1", "carol@example.com", store.User{ID: "unused-id", PasswordHash: store.NoPasswordHash}, tokenTestNow); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("taken identity: %v", err)
 		}
@@ -289,24 +316,37 @@ func TestUnlinkOIDC(t *testing.T) {
 			_, _, err := s.LinkOIDCUser(ctx, oidcIssuer, subject, email, store.User{ID: "unused-id", PasswordHash: store.NoPasswordHash}, now)
 			return err
 		}
-		unlinked := func(email string) bool {
+		approveAndLink := func(subject, email string) {
+			t.Helper()
+			if err := s.ApproveOIDCLink(ctx, email, now+60); err != nil {
+				t.Fatal(err)
+			}
+			if err := link(subject, email); err != nil {
+				t.Fatal(err)
+			}
+		}
+		user := func(email string) store.User {
 			t.Helper()
 			u, err := s.UserByEmail(ctx, email)
 			if err != nil {
 				t.Fatal(err)
 			}
+			return u
+		}
+		unlinked := func(email string) bool {
+			t.Helper()
+			u := user(email)
 			return !u.OidcIssuer.Valid && !u.OidcSubject.Valid
 		}
 		if err := s.UnlinkOIDC(ctx, "missing@example.com"); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("missing user: %v", err)
 		}
 		for _, name := range []string{"alice", "carol"} {
-			if err := link("sub-"+name, name+"@example.com"); err != nil {
-				t.Fatal(err)
-			}
+			approveAndLink("sub-"+name, name+"@example.com")
+			grantAccess(t, s, name)
 		}
-		// Unlinking one user leaves the others; a user that is not linked is
-		// left as it is.
+		// Unlinking one user leaves the others and revokes its access; a
+		// user that is not linked is left as it is.
 		for range 2 {
 			if err := s.UnlinkOIDC(ctx, "alice@example.com"); err != nil {
 				t.Fatal(err)
@@ -315,28 +355,74 @@ func TestUnlinkOIDC(t *testing.T) {
 		if !unlinked("alice@example.com") || unlinked("carol@example.com") {
 			t.Fatal("unlink of alice")
 		}
+		if got := accessOf(t, s, "alice-id"); got != (access{}) {
+			t.Fatalf("alice's access after the unlink: %+v", got)
+		}
+		if got, want := accessOf(t, s, "carol-id"), (access{Sessions: 1, Tokens: 1, Codes: 1, Connections: 1, Ceremonies: 1}); got != want {
+			t.Fatalf("carol's access after alice's unlink: %+v", got)
+		}
 		if _, err := s.UserByOIDC(ctx, oidcIssuer, "sub-alice"); !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("old identity: %v", err)
 		}
-		// The role, the password hash and the disabled flag stay.
-		if u, err := s.UserByEmail(ctx, "alice@example.com"); err != nil || u.Role != store.RoleOwner || u.PasswordHash != "alice-hash" || u.Disabled != 0 {
-			t.Fatalf("%+v %v", u, err)
+		// The role, the password hash and the disabled flag stay, and no
+		// approval is given.
+		if u := user("alice@example.com"); u.Role != store.RoleOwner || u.PasswordHash != "alice-hash" || u.Disabled != 0 || u.OidcLinkApprovedUntil.Valid {
+			t.Fatalf("%+v", u)
 		}
-		// Another identity links the user again.
-		if err := link("sub-alice-2", "alice@example.com"); err != nil {
-			t.Fatalf("link again: %v", err)
+		if err := link("sub-alice-2", "alice@example.com"); !errors.Is(err, store.ErrOIDCNotApproved) {
+			t.Fatalf("link again without an approval: %v", err)
 		}
+		// Approved, another identity links the user again.
+		approveAndLink("sub-alice-2", "alice@example.com")
 		if u, err := s.UserByOIDC(ctx, oidcIssuer, "sub-alice-2"); err != nil || u.ID != "alice-id" {
 			t.Fatalf("%+v %v", u, err)
 		}
 
-		for range 2 {
-			if err := s.UnlinkAllOIDC(ctx); err != nil {
-				t.Fatal(err)
+		// Disabling clears an approval that was not used.
+		if err := s.CreateUser(ctx, store.User{ID: "dave-id", Email: "dave@example.com", PasswordHash: "x", Role: store.RoleMember}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ApproveOIDCLink(ctx, "dave@example.com", now+60); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.UpdateUser(ctx, "alice-id", "dave-id", store.UserChange{Disabled: ptr(true)}, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.UpdateUser(ctx, "alice-id", "dave-id", store.UserChange{Disabled: ptr(false)}, now); err != nil {
+			t.Fatal(err)
+		}
+		if u := user("dave@example.com"); u.OidcLinkApprovedUntil.Valid {
+			t.Fatalf("dave's approval after disabling: %+v", u)
+		}
+		if err := link("sub-dave", "dave@example.com"); !errors.Is(err, store.ErrOIDCNotApproved) {
+			t.Fatalf("dave: %v", err)
+		}
+		if err := s.ApproveOIDCLink(ctx, "dave@example.com", now+60); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ChangeUser(ctx, "dave@example.com", "", true, now); err != nil {
+			t.Fatal(err)
+		}
+		if u := user("dave@example.com"); u.OidcLinkApprovedUntil.Valid {
+			t.Fatalf("dave's approval after the CLI disabled the user: %+v", u)
+		}
+
+		for i, want := range []int{2, 0} {
+			n, err := s.UnlinkAllOIDC(ctx)
+			if err != nil || n != want {
+				t.Fatalf("unlink all %d: %d %v", i, n, err)
 			}
 		}
-		if !unlinked("alice@example.com") || !unlinked("carol@example.com") || f.users() != 2 {
+		if !unlinked("alice@example.com") || !unlinked("carol@example.com") || f.users() != 3 {
 			t.Fatal("unlink of everyone")
+		}
+		for _, email := range []string{"alice@example.com", "carol@example.com"} {
+			if u := user(email); u.OidcLinkApprovedUntil.Valid {
+				t.Fatalf("%s got an approval: %+v", email, u)
+			}
+		}
+		if got := accessOf(t, s, "carol-id"); got != (access{}) {
+			t.Fatalf("carol's access after the unlink of everyone: %+v", got)
 		}
 	})
 }
@@ -428,9 +514,12 @@ func TestLinkOIDCUserConcurrency(t *testing.T) {
 				t.Fatalf("round %d: other identities: %d created, %d rejected", i, ok, rejected)
 			}
 
-			// Several identities, one unlinked user: one is linked.
+			// Several identities, one approved user: one is linked.
 			email = fmt.Sprintf("user%d@example.com", i)
 			if err := s.CreateUser(ctx, store.User{ID: fmt.Sprintf("user%d-id", i), Email: email, PasswordHash: "x", Role: store.RoleMember}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.ApproveOIDCLink(ctx, email, now+60); err != nil {
 				t.Fatal(err)
 			}
 			if ok, taken := count(i, links(email, func(n int) string { return fmt.Sprintf("sub-user-%d-%d", i, n) }), store.ErrOIDCLinked); ok != 1 || taken != concurrent-1 {

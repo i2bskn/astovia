@@ -134,14 +134,14 @@ func (f *fixture) exec(q string) {
 
 func (f *fixture) routes(user string, webpush, slack, email []string) {
 	f.t.Helper()
-	if err := f.s.SaveNotificationRoutes(context.Background(), user+"-id", user+"-session", webpush, slack, email, f.now.Unix()); err != nil {
+	if err := f.s.SaveNotificationRoutes(context.Background(), user+"-id", f.sessions[user], webpush, slack, email, f.now.Unix()); err != nil {
 		f.t.Fatal(err)
 	}
 }
 
 func (f *fixture) webhook(user, sealed string) {
 	f.t.Helper()
-	if err := f.s.SetSlackWebhook(context.Background(), user+"-id", user+"-session", sealed, f.now.Unix()); err != nil {
+	if err := f.s.SetSlackWebhook(context.Background(), user+"-id", f.sessions[user], sealed, f.now.Unix()); err != nil {
 		f.t.Fatal(err)
 	}
 }

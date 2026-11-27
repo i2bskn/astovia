@@ -53,6 +53,7 @@ func (f *fakeToken) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type fixture struct {
+	sid    string
 	store  *store.Store
 	tokens *aicred.Tokens
 	fake   *fakeToken
@@ -68,10 +69,8 @@ func newFixture(t *testing.T, expiresIn time.Duration) *fixture {
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Login(ctx, u, store.Session{ID: "alice-session", UserID: u.ID, ExpiresAt: testNow.Unix() + 3600, CreatedAt: testNow.Unix()}, store.Refresh{Hash: "refresh-alice", SessionID: "alice-session", CreatedAt: testNow.Unix()}); err != nil {
-		t.Fatal(err)
-	}
-	f := &fixture{store: s, fake: &fakeToken{}}
+	_, sid := testutil.Session(t, s, u.ID, testNow)
+	f := &fixture{store: s, fake: &fakeToken{}, sid: sid}
 	f.now.Store(testNow.Unix())
 	srv := httptest.NewServer(f.fake)
 	t.Cleanup(srv.Close)
@@ -83,7 +82,7 @@ func newFixture(t *testing.T, expiresIn time.Duration) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.a, err = s.SaveAISettings(ctx, store.AISettings{UserID: u.ID, Provider: ai.ProviderOpenAI, Model: "gpt-x", APIKeySealed: sealed}, 0, true, "alice-session", testNow.Unix()); err != nil {
+	if f.a, err = s.SaveAISettings(ctx, store.AISettings{UserID: u.ID, Provider: ai.ProviderOpenAI, Model: "gpt-x", APIKeySealed: sealed}, 0, true, f.sid, testNow.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	return f
@@ -168,14 +167,14 @@ func TestTokenStale(t *testing.T) {
 	f := newFixture(t, time.Minute)
 	cred := f.cred(t)
 	// Saved again (a model change): the old generation is stale.
-	if _, err := f.store.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderOpenAI, Model: "gpt-y", APIKeySealed: f.a.APIKeySealed}, f.a.Generation, false, "alice-session", testNow.Unix()); err != nil {
+	if _, err := f.store.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderOpenAI, Model: "gpt-y", APIKeySealed: f.a.APIKeySealed}, f.a.Generation, false, f.sid, testNow.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := cred.Token(ctx, ""); !errors.Is(err, aicred.ErrStale) || !errors.Is(err, ai.ErrTemporary) || f.fake.calls.Load() != 0 {
 		t.Fatalf("stale: %v", err)
 	}
 	// Deleted.
-	if err := f.store.DeleteAISettings(ctx, "alice-id", "alice-session", testNow.Unix()); err != nil {
+	if err := f.store.DeleteAISettings(ctx, "alice-id", f.sid, testNow.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := cred.Token(ctx, ""); !errors.Is(err, aicred.ErrStale) {

@@ -168,7 +168,7 @@ func TestNotifications(t *testing.T) {
 
 		// Not at once.
 		st = newSyncTest(t, driver)
-		if _, err := st.s.UpdateGmailSettings(ctx, "alice-id", "sid", st.accounts[me], false, st.now.Unix()); err != nil {
+		if _, err := st.s.UpdateGmailSettings(ctx, "alice-id", st.sid, st.accounts[me], false, st.now.Unix()); err != nil {
 			t.Fatal(err)
 		}
 		quiet := st.recv("", "静か", "静か", time.Minute)

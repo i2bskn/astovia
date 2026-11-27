@@ -30,10 +30,20 @@ func addUser(t *testing.T, s *store.Store, name, role string) store.User {
 		t.Fatal(err)
 	}
 	sid := name + "-session"
-	if err := s.Login(ctx, u, store.Session{ID: sid, UserID: u.ID, ExpiresAt: tokenTestNow + 3600, CreatedAt: tokenTestNow}, store.Refresh{Hash: "refresh-" + name, SessionID: sid, CreatedAt: tokenTestNow}); err != nil {
+	if err := s.InsertWebSession(ctx, store.WebSession{ID: sid, UserID: u.ID, AuthenticatedAt: tokenTestNow, LastActivity: tokenTestNow, AbsoluteExpiry: tokenTestNow + 3600, IdleSeconds: 3600}); err != nil {
 		t.Fatal(err)
 	}
 	return u
+}
+
+// sessionLive reports whether the browser session id is live at now.
+func sessionLive(t *testing.T, s *store.Store, id string, now int64) bool {
+	t.Helper()
+	live, err := s.SessionLive(context.Background(), id, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return live
 }
 
 func invite(t *testing.T, s *store.Store, operator, id, email, role string, now int64) {
@@ -220,8 +230,8 @@ func testOwnerRules(t *testing.T, driver string) {
 		t.Fatalf("enable bob: %+v %v", u, err)
 	}
 	// Disabling revoked bob's sessions; enabling does not bring them back.
-	if _, err := s.Authenticated(ctx, "bob-id", "bob-session", now); !errors.Is(err, store.ErrUnauthorized) {
-		t.Fatalf("bob's session after disable and enable: %v", err)
+	if sessionLive(t, s, "bob-session", now) {
+		t.Fatal("bob's session after disable and enable")
 	}
 	// Demoting keeps the sessions.
 	if _, err := update("alice", "carol", store.UserChange{Role: store.RoleOwner}); err != nil {
@@ -230,7 +240,7 @@ func testOwnerRules(t *testing.T, driver string) {
 	if _, err := update("alice", "carol", store.UserChange{Role: store.RoleMember}); err != nil {
 		t.Fatal(err)
 	}
-	if u, err := s.Authenticated(ctx, "carol-id", "carol-session", now); err != nil || u.Role != store.RoleMember {
+	if u, err := s.UserByEmail(ctx, "carol@example.com"); err != nil || u.Role != store.RoleMember || !sessionLive(t, s, "carol-session", now) {
 		t.Fatalf("carol's session after demotion: %+v %v", u, err)
 	}
 	if n := enabledOwners(t, s); n != 1 {
@@ -417,8 +427,8 @@ func testPasswordResets(t *testing.T, driver string) {
 	}
 	// The same things as a CLI password reset are gone; the GitHub
 	// connection stays.
-	if _, err = s.Authenticated(ctx, "carol-id", "carol-session", now+10); !errors.Is(err, store.ErrUnauthorized) {
-		t.Fatalf("session: %v", err)
+	if sessionLive(t, s, "carol-session", now+10) {
+		t.Fatal("session after the password reset")
 	}
 	if _, _, err = s.AuthenticateAPIToken(ctx, "carol-token-hash", now+10); !errors.Is(err, store.ErrUnauthorized) {
 		t.Fatalf("API token: %v", err)

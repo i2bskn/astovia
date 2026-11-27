@@ -398,6 +398,7 @@ func aiError(code int) func(http.ResponseWriter) {
 }
 
 type syncTest struct {
+	sid      string
 	t        *testing.T
 	s        *store.Store
 	g        *fakeGoogle
@@ -437,12 +438,10 @@ func newBareSyncTest(t *testing.T, driver string) *syncTest {
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Login(ctx, u, store.Session{ID: "sid", UserID: u.ID, ExpiresAt: st.now.Unix() + 86400*30, CreatedAt: st.now.Unix()}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: st.now.Unix()}); err != nil {
-		t.Fatal(err)
-	}
+	_, st.sid = testutil.Session(t, s, u.ID, st.now)
 	// Detection notifications are stored only for users who can receive
 	// them.
-	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", "sid", st.now.Unix()); err != nil {
+	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", st.sid, st.now.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	st.g = newFakeGoogle()
@@ -465,7 +464,7 @@ func newBareSyncTest(t *testing.T, driver string) *syncTest {
 // the fake.
 func (st *syncTest) connect(email string) store.GmailAccount {
 	st.t.Helper()
-	a, err := st.s.SaveGmailAccount(context.Background(), "alice-id", "sid", email, func(id string) (string, error) {
+	a, err := st.s.SaveGmailAccount(context.Background(), "alice-id", st.sid, email, func(id string) (string, error) {
 		return st.syncer.Box.Seal(TokenPurpose("alice-id", id), refreshTk)
 	}, st.now.Unix())
 	if err != nil {
@@ -486,7 +485,7 @@ func (st *syncTest) saveAI() store.AISettings {
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, gen, true, "sid", st.now.Unix())
+	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, gen, true, st.sid, st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}

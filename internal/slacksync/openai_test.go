@@ -119,7 +119,7 @@ func (st *syncTest) savePlan(sealed string) store.AISettings {
 	if cur, err := st.s.AISettings(ctx, "alice-id"); err == nil {
 		gen = cur.Generation
 	}
-	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderOpenAI, Model: "gpt-x", APIKeySealed: sealed}, gen, true, "sid", st.now.Unix())
+	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderOpenAI, Model: "gpt-x", APIKeySealed: sealed}, gen, true, st.sid, st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestDetectionStaleToken(t *testing.T) {
 		before := st.aiSettings()
 		now := st.now.Unix()
 		plan.hook(func() {
-			if _, err := st.s.SaveAISettings(context.Background(), store.AISettings{UserID: "alice-id", Provider: ai.ProviderOpenAI, Model: "gpt-y", APIKeySealed: before.APIKeySealed}, before.Generation, false, "sid", now); err != nil {
+			if _, err := st.s.SaveAISettings(context.Background(), store.AISettings{UserID: "alice-id", Provider: ai.ProviderOpenAI, Model: "gpt-y", APIKeySealed: before.APIKeySealed}, before.Generation, false, st.sid, now); err != nil {
 				t.Error(err)
 			}
 		})
