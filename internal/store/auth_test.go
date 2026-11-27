@@ -46,7 +46,7 @@ func grantAccess(t *testing.T, s *store.Store, name string) {
 	now := time.Now().Truncate(time.Second)
 	m := s.MCPOAuth(time.Now)
 	code := mcpoauth.Code{ClientID: "client-" + name, RedirectURI: "https://client.example/callback", Subject: uid, Scopes: []string{"mcp"}, Challenge: "challenge", ExpiresAt: now.Add(time.Minute)}
-	if err := m.CreateCode(ctx, digestOf("code-"+name), code); err != nil {
+	if err := m.CreateCode(store.WithApprovalSession(ctx, sid, time.Unix(tokenTestNow, 0)), digestOf("code-"+name), code); err != nil {
 		t.Fatal(err)
 	}
 	conn := mcpoauth.Connection{
@@ -57,7 +57,7 @@ func grantAccess(t *testing.T, s *store.Store, name string) {
 	if err := m.Create(ctx, conn); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.WebAuthnCeremonies().Create(ctx, digestOf("ceremony-"+name), uid, []byte("record"), now.Add(5*time.Minute)); err != nil {
+	if err := s.WebAuthnCeremonies(time.Now).Create(ctx, digestOf("ceremony-"+name), uid, []byte("record"), now.Add(5*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -105,9 +105,21 @@ func runMCPStore(t *testing.T, driver string) {
 			if err := s.CreateUser(context.Background(), store.User{ID: id, Email: id + "@example.com", PasswordHash: "x", Role: store.RoleMember}); err != nil {
 				t.Fatal(err)
 			}
+			at := storetestNow.Add(-time.Hour).Unix()
+			if err := s.InsertWebSession(context.Background(), store.WebSession{ID: id + "-session", UserID: id, AuthenticatedAt: at, LastActivity: at, AbsoluteExpiry: at + 1<<30, IdleSeconds: 1 << 30}); err != nil {
+				t.Fatal(err)
+			}
 		}
-		return s.MCPOAuth(func() time.Time { return storetestNow })
+		return approvingStore{s.MCPOAuth(func() time.Time { return storetestNow })}
 	})
+}
+
+// approvingStore issues each code as an approval by a browser session of
+// its subject, as the consent screen does.
+type approvingStore struct{ mcpoauth.Store }
+
+func (a approvingStore) CreateCode(ctx context.Context, key mcpoauth.Key, code mcpoauth.Code) error {
+	return a.Store.CreateCode(store.WithApprovalSession(ctx, code.Subject+"-session", storetestNow), key, code)
 }
 
 func TestSessionStore(t *testing.T) {
@@ -124,8 +136,19 @@ func TestSessionStore(t *testing.T) {
 			return hex.EncodeToString(k[:])
 		}
 
+		guarded := store.WithIssueGuard(ctx, store.IssueGuard{PasswordDigest: passwordDigest("x")})
 		first := state("one", "alice-id")
-		if err := ws.Replace(store.WithIssueGuard(ctx, store.IssueGuard{PasswordDigest: passwordDigest("x")}), nil, first); err != nil {
+		// A write without its guard, or with a guard that checks nothing,
+		// issues nothing.
+		for _, c := range []context.Context{ctx, store.WithIssueGuard(ctx, store.IssueGuard{})} {
+			if err := ws.Replace(c, nil, first); err == nil {
+				t.Fatal("a session was issued without a guard")
+			}
+			if _, err := ws.Use(ctx, first.Key, now, false); !errors.Is(err, session.ErrInvalid) {
+				t.Fatalf("issued without a guard: %v", err)
+			}
+		}
+		if err := ws.Replace(guarded, nil, first); err != nil {
 			t.Fatal(err)
 		}
 		got, err := ws.Use(ctx, first.Key, now.Add(time.Minute), false)
@@ -162,17 +185,17 @@ func TestSessionStore(t *testing.T) {
 		// A replacement deletes the previous session; a collision is
 		// reported and keeps both.
 		second := state("two", "alice-id")
-		if err = ws.Replace(ctx, &first.Key, second); err != nil {
+		if err = ws.Replace(guarded, &first.Key, second); err != nil {
 			t.Fatal(err)
 		}
 		if live, _ := s.SessionLive(ctx, idOf("one"), tokenTestNow); live {
 			t.Fatal("the previous session was kept")
 		}
 		third := state("three", "bob-id")
-		if err = ws.Replace(ctx, nil, third); err != nil {
+		if err = ws.Replace(guarded, nil, third); err != nil {
 			t.Fatal(err)
 		}
-		if err = ws.Replace(ctx, &third.Key, state("two", "bob-id")); !errors.Is(err, session.ErrCollision) {
+		if err = ws.Replace(guarded, &third.Key, state("two", "bob-id")); !errors.Is(err, session.ErrCollision) {
 			t.Fatalf("collision: %v", err)
 		}
 		if got, err = ws.Use(ctx, second.Key, now, false); err != nil || got.Subject != "alice-id" {
@@ -199,10 +222,10 @@ func TestSessionStore(t *testing.T) {
 		if err = s.ChangeUser(ctx, "carol@example.com", "", true, tokenTestNow); err != nil {
 			t.Fatal(err)
 		}
-		if err = ws.Replace(ctx, nil, state("g3", "carol-id")); !errors.Is(err, store.ErrUnauthorized) {
+		if err = ws.Replace(guarded, nil, state("g3", "carol-id")); !errors.Is(err, store.ErrUnauthorized) {
 			t.Fatalf("disabled user: %v", err)
 		}
-		if err = ws.Replace(ctx, nil, state("g4", "missing-id")); !errors.Is(err, store.ErrUnauthorized) {
+		if err = ws.Replace(guarded, nil, state("g4", "missing-id")); !errors.Is(err, store.ErrUnauthorized) {
 			t.Fatalf("missing user: %v", err)
 		}
 		for _, key := range []string{"g1", "g2", "g3", "g4"} {
@@ -230,7 +253,7 @@ func TestOIDCLoginStore(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		ctx := context.Background()
 		s, _ := testutil.Database(t, driver)
-		o := s.OIDCLogins()
+		o := s.OIDCLogins(time.Now)
 		now := time.Now().Truncate(time.Second)
 		zero := int64(0)
 		withData := oidc.Transaction{Nonce: "n1", Verifier: "v1", StartedAt: now, ExpiresAt: now.Add(10 * time.Minute), MaxAgeSeconds: &zero, AppData: []byte("/oauth/authorize?\x00x")}
@@ -280,7 +303,7 @@ func TestWebAuthnCeremonyStore(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		ctx := context.Background()
 		s, _ := testutil.Database(t, driver)
-		c := s.WebAuthnCeremonies()
+		c := s.WebAuthnCeremonies(time.Now)
 		now := time.Now().Truncate(time.Second)
 		if err := c.Create(ctx, digestOf("one"), "alice-id", []byte{0, 1, 2, 255}, now.Add(5*time.Minute)); err != nil {
 			t.Fatal(err)
@@ -341,17 +364,17 @@ func TestDeleteExpiredAuth(t *testing.T) {
 		if err := s.InsertWebSession(ctx, store.WebSession{ID: "live", UserID: "alice-id", AuthenticatedAt: now.Unix(), LastActivity: now.Unix(), AbsoluteExpiry: now.Unix() + 3600, IdleSeconds: 3600}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.OIDCLogins().Create(ctx, digestOf("login-old"), oidc.Transaction{Nonce: "n", Verifier: "v", StartedAt: now.Add(-time.Hour), ExpiresAt: now}); err != nil {
+		if err := s.OIDCLogins(time.Now).Create(ctx, digestOf("login-old"), oidc.Transaction{Nonce: "n", Verifier: "v", StartedAt: now.Add(-time.Hour), ExpiresAt: now}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.OIDCLogins().Create(ctx, digestOf("login-live"), oidc.Transaction{Nonce: "n", Verifier: "v", StartedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+		if err := s.OIDCLogins(time.Now).Create(ctx, digestOf("login-live"), oidc.Transaction{Nonce: "n", Verifier: "v", StartedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.WebAuthnCeremonies().Create(ctx, digestOf("ceremony-old"), "alice-id", []byte("r"), now); err != nil {
+		if err := s.WebAuthnCeremonies(time.Now).Create(ctx, digestOf("ceremony-old"), "alice-id", []byte("r"), now); err != nil {
 			t.Fatal(err)
 		}
 		m := s.MCPOAuth(func() time.Time { return now.Add(-time.Hour) })
-		if err := m.CreateCode(ctx, digestOf("code-old"), mcpoauth.Code{ClientID: "c", RedirectURI: "https://c.example/cb", Subject: "alice-id", Scopes: []string{"mcp"}, Challenge: "x", ExpiresAt: now}); err != nil {
+		if err := m.CreateCode(store.WithApprovalSession(ctx, "alice-grant", time.Unix(tokenTestNow, 0)), digestOf("code-old"), mcpoauth.Code{ClientID: "c", RedirectURI: "https://c.example/cb", Subject: "alice-id", Scopes: []string{"mcp"}, Challenge: "x", ExpiresAt: now}); err != nil {
 			t.Fatal(err)
 		}
 		old := now.Add(-48 * time.Hour)
@@ -483,6 +506,9 @@ func TestMCPConnections(t *testing.T) {
 		// The approval session must be live, and the user enabled.
 		m := s.MCPOAuth(time.Now)
 		code := mcpoauth.Code{ClientID: "c", RedirectURI: "https://c.example/cb", Subject: "alice-id", Scopes: []string{"mcp"}, Challenge: "x", ExpiresAt: now.Add(time.Minute)}
+		if err := m.CreateCode(ctx, digestOf("c1"), code); err == nil {
+			t.Fatal("a code was issued without an approval session")
+		}
 		if err := m.CreateCode(store.WithApprovalSession(ctx, "bob-session", time.Unix(tokenTestNow, 0)), digestOf("c1"), code); !errors.Is(err, store.ErrUnauthorized) {
 			t.Fatalf("another user's session: %v", err)
 		}
@@ -495,12 +521,47 @@ func TestMCPConnections(t *testing.T) {
 		if err := s.ChangeUser(ctx, "alice@example.com", "", true, tokenTestNow); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.CreateCode(ctx, digestOf("c2"), code); !errors.Is(err, store.ErrUnauthorized) {
+		if err := m.CreateCode(store.WithApprovalSession(ctx, "alice-session", time.Unix(tokenTestNow, 0)), digestOf("c2"), code); !errors.Is(err, store.ErrUnauthorized) {
 			t.Fatalf("disabled user: %v", err)
 		}
 		conn := mcpoauth.Connection{ID: "x", Selector: digestOf("sx"), Subject: "alice-id", ClientID: "c", Scopes: []string{"mcp"}, CreatedAt: now, RefreshedAt: now, Access: digestOf("ax"), AccessExpiry: now.Add(time.Hour), Refresh: digestOf("rx"), RefreshExpiry: now.Add(time.Hour)}
 		if err := m.Create(ctx, conn); !errors.Is(err, mcpoauth.ErrInvalid) {
 			t.Fatalf("connection of a disabled user: %v", err)
+		}
+	})
+}
+
+// TestOIDCLoginLimit checks that the sign-ins in progress are bounded and
+// that expired ones do not count.
+func TestOIDCLoginLimit(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		ctx := context.Background()
+		s, _ := testutil.Database(t, driver)
+		now := time.Unix(tokenTestNow, 0)
+		o := s.OIDCLogins(func() time.Time { return now })
+		fill := func(prefix string, expiresAt int64, n int) {
+			t.Helper()
+			err := s.ExecForTest(ctx, fmt.Sprintf(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < %d)
+INSERT INTO oidc_logins (key, nonce, verifier, started_at, expires_at) SELECT '%s' || i, 'n', 'v', %d, %d FROM n`, n, prefix, tokenTestNow, expiresAt))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		start := func(key string) error {
+			return o.Create(ctx, digestOf(key), oidc.Transaction{Nonce: "n", Verifier: "v", StartedAt: now, ExpiresAt: now.Add(10 * time.Minute)})
+		}
+		fill("live-", tokenTestNow+600, store.MaxLiveOIDCLogins-1)
+		fill("expired-", tokenTestNow, 10)
+		if err := start("last"); err != nil {
+			t.Fatalf("the last start under the limit: %v", err)
+		}
+		if err := start("over"); !errors.Is(err, store.ErrOIDCLoginsFull) {
+			t.Fatalf("over the limit: %v", err)
+		}
+		// Once they expire, sign-ins start again.
+		now = now.Add(10 * time.Minute)
+		if err := start("later"); err != nil {
+			t.Fatalf("after the expiry: %v", err)
 		}
 	})
 }

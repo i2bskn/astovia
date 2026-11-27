@@ -241,7 +241,7 @@ func handleCleared(t *testing.T, w *httptest.ResponseRecorder) {
 }
 
 // begun checks the response of a begin request: the options alone in the
-// body, and the handle in a cookie that scripts cannot read, sent only by
+// body (returned without their publicKey wrapper), and the handle in a cookie that scripts cannot read, sent only by
 // this site, for the five minutes of the ceremony.
 func (a *mfaAPI) begun(w *httptest.ResponseRecorder) webauthnBegin {
 	a.t.Helper()
@@ -250,6 +250,13 @@ func (a *mfaAPI) begun(w *httptest.ResponseRecorder) webauthnBegin {
 		a.t.Fatalf("begin keys: %v", keys)
 	}
 	out := decodeJSON[webauthnBegin](a.t, w)
+	// The options are authlume's argument of the browser API, passed on as
+	// they are: {"publicKey": options}. The tests use the options inside.
+	var wrapped map[string]json.RawMessage
+	if err := json.Unmarshal(out.Options, &wrapped); err != nil || len(wrapped) != 1 || len(wrapped["publicKey"]) == 0 {
+		a.t.Fatalf("begin options: %s", out.Options)
+	}
+	out.Options = wrapped["publicKey"]
 	var o softOptions
 	if err := json.Unmarshal(out.Options, &o); err != nil || len(o.Challenge) != 43 {
 		a.t.Fatalf("begin response: %s", w.Body.String())

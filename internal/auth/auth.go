@@ -3,9 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"github.com/i2bskn/astovia/internal/store"
 	"github.com/i2bskn/authlume/password"
@@ -69,7 +67,11 @@ func Random() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
-func Hash(v string) string { h := sha256.Sum256([]byte(v)); return hex.EncodeToString(h[:]) }
+
+// Hash is the lowercase hex SHA-256 of v: the stored form of the API, link
+// and recovery tokens and the digest of a password hash. It is store.Digest,
+// so that the store compares the digests it is given the same way.
+func Hash(v string) string { return store.Digest(v) }
 func validToken(v string) bool {
 	if len(v) > 128 {
 		return false

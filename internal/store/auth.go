@@ -114,6 +114,7 @@ type authQueries interface {
 	deleteExpiredWebSessions(ctx context.Context, now int64) error
 	deleteExpiredOIDCLogin(ctx context.Context, key string, now int64) error
 	deleteExpiredOIDCLogins(ctx context.Context, now int64) error
+	countLiveOIDCLogins(ctx context.Context, now int64) (int64, error)
 	insertOIDCLogin(ctx context.Context, l oidcLogin) (int64, error)
 	takeOIDCLogin(ctx context.Context, key string) (oidcLogin, error)
 	deleteExpiredWebAuthnCeremony(ctx context.Context, key string, now int64) error
@@ -152,11 +153,55 @@ type authQueries interface {
 	activateMCPRegistration(ctx context.Context, id string, now int64) (int64, error)
 }
 
-// digest is the lowercase hex SHA-256 of v, the same as auth.Hash.
-func digest(v string) string {
+// Digest is the lowercase hex SHA-256 of v. auth.Hash is this function; it
+// is defined here so that the store compares the password hash digests of
+// IssueGuard and the enrollments without importing auth.
+func Digest(v string) string {
 	h := sha256.Sum256([]byte(v))
 	return hex.EncodeToString(h[:])
 }
+
+// lockEnabledUser locks the row of userID, which every write bound to a user
+// does first, and refuses a missing or disabled user (ErrUnauthorized).
+func lockEnabledUser(ctx context.Context, q queries, userID string) (User, error) {
+	u, err := q.lockUser(ctx, userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrUnauthorized
+	}
+	if err != nil {
+		return User{}, err
+	}
+	if u.Disabled != 0 {
+		return User{}, ErrUnauthorized
+	}
+	return u, nil
+}
+
+// checkBinding checks, under the lock of the row of u, what a write must
+// still find there: when sessionID is set, an active browser session of u at
+// now; when passwordDigest is set, that it is Digest of u's current password
+// hash (compared in constant time). Either mismatch is ErrUnauthorized: the
+// session ended, or the password was changed, since the write was asked
+// for.
+func checkBinding(ctx context.Context, q queries, u User, sessionID, passwordDigest string, now int64) error {
+	if sessionID != "" {
+		if _, err := q.activeSession(ctx, sessionID, u.ID, now); errors.Is(err, sql.ErrNoRows) {
+			return ErrUnauthorized
+		} else if err != nil {
+			return err
+		}
+	}
+	if passwordDigest != "" && subtle.ConstantTimeCompare([]byte(Digest(u.PasswordHash)), []byte(passwordDigest)) != 1 {
+		return ErrUnauthorized
+	}
+	return nil
+}
+
+// errNoGuard is returned by the writes that must be bound to what
+// authorized them (IssueGuard, WebAuthnEnrollment, EnrollOptions and the
+// approval session of CreateCode) when the caller gave none. It is a
+// programming error, so the write is refused rather than done unchecked.
+var errNoGuard = errors.New("store: write without its guard")
 
 // newRandomID returns 32 random bytes in unpadded base64url, the form of
 // auth.Random.
@@ -189,7 +234,9 @@ func revokeAccess(ctx context.Context, q queries, userID string) error {
 }
 
 // IssueGuard is checked by the session store when it issues a session, in
-// the transaction that locks the user row. A zero field is not checked.
+// the transaction that locks the user row. A zero field is not checked, but
+// a guard must set at least one: Replace refuses a session issued without
+// one.
 type IssueGuard struct {
 	// PasswordDigest is auth.Hash of the password hash that was verified
 	// (or stored) before the session is issued. A different current hash
@@ -207,10 +254,13 @@ func WithIssueGuard(ctx context.Context, g IssueGuard) context.Context {
 	return context.WithValue(ctx, issueGuardKey{}, g)
 }
 
+// zero reports whether g checks nothing.
+func (g IssueGuard) zero() bool { return g == IssueGuard{} }
+
 // Sessions returns the session.Store of authlume/session on web_sessions.
 // Replace locks the user row of the new session and refuses a missing or
 // disabled user (ErrUnauthorized), and checks the IssueGuard of the context
-// in the same transaction.
+// in the same transaction; a context without one is refused.
 func (s *Store) Sessions() session.Store { return sessionStore{s} }
 
 type sessionStore struct{ s *Store }
@@ -218,20 +268,17 @@ type sessionStore struct{ s *Store }
 func sessionID(k session.Key) string { return hex.EncodeToString(k[:]) }
 
 func (w sessionStore) Replace(ctx context.Context, previous *session.Key, next session.State) error {
-	guard, _ := ctx.Value(issueGuardKey{}).(IssueGuard)
+	guard, ok := ctx.Value(issueGuardKey{}).(IssueGuard)
+	if !ok || guard.zero() {
+		return errNoGuard
+	}
 	return w.s.transaction(ctx, func(q queries) error {
-		u, err := q.lockUser(ctx, next.Subject)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrUnauthorized
-		}
+		u, err := lockEnabledUser(ctx, q, next.Subject)
 		if err != nil {
 			return err
 		}
-		if u.Disabled != 0 {
-			return ErrUnauthorized
-		}
-		if guard.PasswordDigest != "" && subtle.ConstantTimeCompare([]byte(digest(u.PasswordHash)), []byte(guard.PasswordDigest)) != 1 {
-			return ErrUnauthorized
+		if err := checkBinding(ctx, q, u, "", guard.PasswordDigest, 0); err != nil {
+			return err
 		}
 		if guard.OIDCIssuer != "" || guard.OIDCSubject != "" {
 			if u.OidcIssuer.String != guard.OIDCIssuer || u.OidcSubject.String != guard.OIDCSubject || !u.OidcIssuer.Valid || !u.OidcSubject.Valid {
@@ -287,10 +334,23 @@ func (w sessionStore) Delete(ctx context.Context, key session.Key) error {
 	return w.s.q.deleteWebSession(ctx, sessionID(key))
 }
 
-// OIDCLogins returns the oidc.Store of authlume/oidc on oidc_logins.
-func (s *Store) OIDCLogins() oidc.Store { return oidcLoginStore{s} }
+// MaxLiveOIDCLogins bounds the OIDC sign-ins in progress. Anyone can start
+// one, so without a bound a flood of starts from many peers could fill
+// oidc_logins until the hourly cleanup. Over it, Create refuses new starts
+// with ErrOIDCLoginsFull until enough of them expire (10 minutes).
+const MaxLiveOIDCLogins = 10000
 
-type oidcLoginStore struct{ s *Store }
+// ErrOIDCLoginsFull means that MaxLiveOIDCLogins sign-ins are in progress.
+var ErrOIDCLoginsFull = errors.New("store: too many OIDC sign-ins in progress")
+
+// OIDCLogins returns the oidc.Store of authlume/oidc on oidc_logins. now is
+// the clock of the sweep and the count of the sign-ins in progress.
+func (s *Store) OIDCLogins(now func() time.Time) oidc.Store { return oidcLoginStore{s, now} }
+
+type oidcLoginStore struct {
+	s   *Store
+	now func() time.Time
+}
 
 func (o oidcLoginStore) Create(ctx context.Context, key oidc.Key, tx oidc.Transaction) error {
 	k := hex.EncodeToString(key[:])
@@ -301,9 +361,17 @@ func (o oidcLoginStore) Create(ctx context.Context, key oidc.Key, tx oidc.Transa
 	if len(tx.AppData) > 0 {
 		row.AppData = sql.NullString{String: base64.StdEncoding.EncodeToString(tx.AppData), Valid: true}
 	}
+	now := o.now().Unix()
 	return o.s.transaction(ctx, func(q queries) error {
-		if err := q.deleteExpiredOIDCLogin(ctx, k, time.Now().Unix()); err != nil {
+		if err := q.deleteExpiredOIDCLogin(ctx, k, now); err != nil {
 			return err
+		}
+		live, err := q.countLiveOIDCLogins(ctx, now)
+		if err != nil {
+			return err
+		}
+		if live >= MaxLiveOIDCLogins {
+			return ErrOIDCLoginsFull
 		}
 		n, err := q.insertOIDCLogin(ctx, row)
 		if err != nil {
@@ -341,15 +409,20 @@ func (o oidcLoginStore) Take(ctx context.Context, key oidc.Key, now time.Time) (
 }
 
 // WebAuthnCeremonies returns the webauthn.CeremonyStore of authlume/webauthn
-// on webauthn_ceremonies.
-func (s *Store) WebAuthnCeremonies() webauthn.CeremonyStore { return ceremonyStore{s} }
+// on webauthn_ceremonies. now is the clock of the sweep in Create.
+func (s *Store) WebAuthnCeremonies(now func() time.Time) webauthn.CeremonyStore {
+	return ceremonyStore{s, now}
+}
 
-type ceremonyStore struct{ s *Store }
+type ceremonyStore struct {
+	s   *Store
+	now func() time.Time
+}
 
 func (c ceremonyStore) Create(ctx context.Context, key webauthn.Key, subject string, record []byte, expiresAt time.Time) error {
 	k := hex.EncodeToString(key[:])
 	return c.s.transaction(ctx, func(q queries) error {
-		if err := q.deleteExpiredWebAuthnCeremony(ctx, k, time.Now().Unix()); err != nil {
+		if err := q.deleteExpiredWebAuthnCeremony(ctx, k, c.now().Unix()); err != nil {
 			return err
 		}
 		n, err := q.insertWebAuthnCeremony(ctx, webauthnCeremony{Key: k, Subject: subject, Record: base64.StdEncoding.EncodeToString(record), ExpiresAt: expiresAt.Unix()})
@@ -440,10 +513,16 @@ func WithWebAuthnEnrollment(ctx context.Context, e WebAuthnEnrollment) context.C
 
 // WebAuthnCredentials returns the webauthn.Store of authlume/webauthn on
 // mfa_webauthn_credentials. Rows without a version, stored before authlume,
-// are left out: they cannot be used.
-func (s *Store) WebAuthnCredentials() webauthn.Store { return credentialStore{s} }
+// are left out: they cannot be used. now is the clock of the time of use
+// that Update records.
+func (s *Store) WebAuthnCredentials(now func() time.Time) webauthn.Store {
+	return credentialStore{s, now}
+}
 
-type credentialStore struct{ s *Store }
+type credentialStore struct {
+	s   *Store
+	now func() time.Time
+}
 
 // CredentialID is the stored form of a WebAuthn credential ID.
 func CredentialID(id []byte) string { return base64.RawURLEncoding.EncodeToString(id) }
@@ -476,6 +555,10 @@ func (c credentialStore) Insert(ctx context.Context, subject string, credential 
 	if !ok || e.UserID == "" || e.UserID != subject {
 		return webauthn.ErrInvalid
 	}
+	// An enrollment is bound to the session or the password that began it.
+	if e.SessionID == "" && e.PasswordDigest == "" {
+		return invalidEnrollment(errNoGuard)
+	}
 	encoded, err := json.Marshal(credential)
 	if err != nil {
 		return err
@@ -494,24 +577,14 @@ func (c credentialStore) Insert(ctx context.Context, subject string, credential 
 	}
 	return c.s.transaction(ctx, func(q queries) error {
 		u, status, err := lockMFAUser(ctx, q, subject)
+		if err == nil {
+			err = checkBinding(ctx, q, u, e.SessionID, e.PasswordDigest, e.Now)
+		}
 		if errors.Is(err, ErrUnauthorized) {
 			return invalidEnrollment(ErrUnauthorized)
 		}
 		if err != nil {
 			return err
-		}
-		if e.SessionID != "" {
-			if _, err := q.activeSession(ctx, e.SessionID, subject, e.Now); errors.Is(err, sql.ErrNoRows) {
-				return invalidEnrollment(ErrUnauthorized)
-			} else if err != nil {
-				return err
-			}
-		}
-		if e.PasswordDigest != "" && subtle.ConstantTimeCompare([]byte(digest(u.PasswordHash)), []byte(e.PasswordDigest)) != 1 {
-			return invalidEnrollment(ErrUnauthorized)
-		}
-		if e.SessionID == "" && e.PasswordDigest == "" {
-			return webauthn.ErrInvalid
 		}
 		first := !status.usable()
 		if e.OnlyIfNone && !first {
@@ -559,7 +632,7 @@ func (c credentialStore) Update(ctx context.Context, subject, version string, cr
 	if err != nil {
 		return err
 	}
-	n, err := c.s.q.updateWebAuthnCredential(ctx, subject, CredentialID(credential.ID), string(encoded), version, next, time.Now().Unix())
+	n, err := c.s.q.updateWebAuthnCredential(ctx, subject, CredentialID(credential.ID), string(encoded), version, next, c.now().Unix())
 	if err != nil {
 		return err
 	}

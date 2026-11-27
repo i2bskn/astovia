@@ -90,6 +90,17 @@ func (a *usersAPI) session(w *httptest.ResponseRecorder) (string, string) {
 	return cookie, cookie
 }
 
+// passwordDigest returns the enrollment guard of the stored password of
+// userID.
+func (a *usersAPI) passwordDigest(userID string) string {
+	a.t.Helper()
+	u, err := a.store.UserByID(context.Background(), userID)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return store.Digest(u.PasswordHash)
+}
+
 func (a *usersAPI) login(email, password string) (string, string) {
 	a.t.Helper()
 	return a.session(a.public("/auth/login", `{"email":"`+email+`","password":"`+password+`"}`, ""))
@@ -463,7 +474,7 @@ func TestAccountLinkEndpoints(t *testing.T) {
 			{usersOrigin, "text/plain", `{"token":"x"}`, 415},
 			{usersOrigin, "application/json", `{"token":"x","extra":1}`, 400},
 			{usersOrigin, "application/json", `null`, 400},
-			{usersOrigin, "application/json", `{"token":"` + strings.Repeat("x", 4096) + `"}`, 413},
+			{usersOrigin, "application/json", `{"token":"` + strings.Repeat("x", accountBodyLimit) + `"}`, 413},
 		} {
 			r := httptest.NewRequest("POST", path, strings.NewReader(tc.body))
 			if tc.origin != "" {

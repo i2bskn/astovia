@@ -553,6 +553,8 @@ DELETE FROM web_sessions WHERE absolute_expiry <= sqlc.arg(now) OR last_activity
 DELETE FROM oidc_logins WHERE key = sqlc.arg(key) AND expires_at <= sqlc.arg(now);
 -- name: DeleteExpiredOIDCLogins :exec
 DELETE FROM oidc_logins WHERE expires_at <= sqlc.arg(now);
+-- name: CountLiveOIDCLogins :one
+SELECT COUNT(*) FROM oidc_logins WHERE expires_at > sqlc.arg(now);
 -- name: InsertOIDCLogin :execrows
 INSERT INTO oidc_logins (key,nonce,verifier,started_at,expires_at,max_age_seconds,app_data)
 VALUES (sqlc.arg(key),sqlc.arg(nonce),sqlc.arg(verifier),sqlc.arg(started_at),sqlc.arg(expires_at),sqlc.narg(max_age_seconds),sqlc.narg(app_data))

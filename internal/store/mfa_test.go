@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/i2bskn/authlume/webauthn"
 
@@ -76,7 +77,7 @@ func enrollKey(s *store.Store, userID, id string, e store.WebAuthnEnrollment) er
 	if e.SessionID == "" && e.PasswordDigest == "" {
 		e.SessionID = strings.TrimSuffix(userID, "-id") + "-session"
 	}
-	return s.WebAuthnCredentials().Insert(store.WithWebAuthnEnrollment(context.Background(), e), userID, keyOf(id), false)
+	return s.WebAuthnCredentials(time.Now).Insert(store.WithWebAuthnEnrollment(context.Background(), e), userID, keyOf(id), false)
 }
 
 // legacyTOTP and legacyCredential store second factors as they were stored
@@ -203,7 +204,7 @@ func TestMFAEnroll(t *testing.T) {
 
 		// The credential store refuses an insert without the enrollment, for
 		// another subject, or with neither a session nor a password.
-		cs := s.WebAuthnCredentials()
+		cs := s.WebAuthnCredentials(time.Now)
 		if err = cs.Insert(ctx, "carol-id", keyOf("x0"), false); !errors.Is(err, webauthn.ErrInvalid) {
 			t.Fatalf("without the enrollment: %v", err)
 		}
@@ -214,6 +215,9 @@ func TestMFAEnroll(t *testing.T) {
 		e = store.WebAuthnEnrollment{UserID: "carol-id", Now: tokenTestNow}
 		if err = cs.Insert(store.WithWebAuthnEnrollment(ctx, e), "carol-id", keyOf("x0"), false); !errors.Is(err, webauthn.ErrInvalid) {
 			t.Fatalf("no session nor password: %v", err)
+		}
+		if _, err = s.EnrollTOTP(ctx, totpOf("carol-id", 1), nil, store.EnrollOptions{Now: tokenTestNow}); err == nil {
+			t.Fatal("TOTP enrolled with neither a session nor a password")
 		}
 		if err = enrollKey(s, "carol-id", "x0", store.WebAuthnEnrollment{SessionID: "alice-session"}); !errors.Is(err, store.ErrUnauthorized) {
 			t.Fatalf("another user's session: %v", err)
@@ -438,7 +442,7 @@ func TestWebAuthnCredentialStore(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		ctx := context.Background()
 		s := userFixture(t, driver)
-		cs := s.WebAuthnCredentials()
+		cs := s.WebAuthnCredentials(time.Now)
 		e := store.WebAuthnEnrollment{UserID: "alice-id", Name: "Passkey", SessionID: "alice-session", Now: tokenTestNow}
 		if err := cs.Insert(store.WithWebAuthnEnrollment(ctx, e), "alice-id", keyOf("a1"), true); err != nil {
 			t.Fatal(err)
@@ -550,7 +554,7 @@ func TestMFALegacyRows(t *testing.T) {
 		if ok, err := s.ConsumeTOTPStep(ctx, "alice-id", "", 100); err != nil || ok {
 			t.Fatalf("legacy authenticator app: %v %v", ok, err)
 		}
-		if records, err := s.WebAuthnCredentials().Load(ctx, "alice-id"); err != nil || len(records) != 0 {
+		if records, err := s.WebAuthnCredentials(time.Now).Load(ctx, "alice-id"); err != nil || len(records) != 0 {
 			t.Fatalf("legacy credentials: %+v %v", records, err)
 		}
 		if ok, err := s.UseRecoveryCode(ctx, "alice-id", "old-hash-0", tokenTestNow); err != nil || !ok {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { consentErrorMessage, createOAuthClient, isUserChanged } from '../.test-build/oauth.js';
+import { consentErrorMessage, createOAuthClient, isClientChanged, isUserChanged, needsReload } from '../.test-build/oauth.js';
 
 const consent = {
   status: 'ok',
@@ -61,18 +61,19 @@ test('getAuthorization returns a refused request with its redirect', async () =>
   }
 });
 
-test('decide posts the query, the decision and the user shown, and returns an http(s) redirect URL', async () => {
+test('decide posts the query, the decision and the user and client shown, and returns an http(s) redirect URL', async () => {
   const { client, calls } = fake({ redirect_url: 'http://localhost:5/callback?code=c&state=s' });
-  assert.equal(await client.decide('a=1&b=%2F', 'approve', 'user-1'), 'http://localhost:5/callback?code=c&state=s');
+  assert.equal(await client.decide('a=1&b=%2F', 'approve', consent), 'http://localhost:5/callback?code=c&state=s');
   assert.equal(calls[0].path, '/api/v1/oauth/authorize');
   assert.equal(calls[0].init.method, 'POST');
   assert.equal(new Headers(calls[0].init.headers).get('content-type'), 'application/json');
-  assert.deepEqual(JSON.parse(calls[0].init.body), { query: 'a=1&b=%2F', decision: 'approve', user_id: 'user-1' });
+  assert.deepEqual(JSON.parse(calls[0].init.body), { query: 'a=1&b=%2F', decision: 'approve', user_id: 'user-1', client_name: 'Claude Code', client_host: 'claude.ai' });
+  // A registered client has no verified host: null is sent, not omitted.
   const denied = fake({ redirect_url: 'https://claude.ai/cb?error=access_denied' });
-  assert.equal(await denied.client.decide('q', 'deny', 'user-1'), 'https://claude.ai/cb?error=access_denied');
-  assert.deepEqual(JSON.parse(denied.calls[0].init.body), { query: 'q', decision: 'deny', user_id: 'user-1' });
+  assert.equal(await denied.client.decide('q', 'deny', { ...consent, client_name: 'Tool', client_host: null }), 'https://claude.ai/cb?error=access_denied');
+  assert.deepEqual(JSON.parse(denied.calls[0].init.body), { query: 'q', decision: 'deny', user_id: 'user-1', client_name: 'Tool', client_host: null });
   for (const body of [null, {}, { redirect_url: 1 }, { redirect_url: 'javascript:alert(1)' }, { redirect_url: 'myapp://cb' }, { redirect_url: '/admin/' }, { redirect_url: 'HTTPS://x' }]) {
-    await assert.rejects(fake(body).client.decide('q', 'approve', 'user-1'), /Unexpected consent response/);
+    await assert.rejects(fake(body).client.decide('q', 'approve', consent), /Unexpected consent response/);
   }
 });
 
@@ -105,6 +106,17 @@ test('errors from request are passed through and described', async () => {
   assert.equal(isUserChanged(failure(409, 'conflict')), false);
   assert.equal(isUserChanged({ status: 409, code: 'user_changed' }), false);
   assert.match(consentErrorMessage(failure(409, 'user_changed')), /アカウントが変わりました.*読み込み直して/);
+  // The client changed after the screen was shown.
+  assert.equal(isClientChanged(failure(409, 'client_changed')), true);
+  assert.equal(isClientChanged(failure(409, 'user_changed')), false);
+  assert.equal(isClientChanged({ status: 409, code: 'client_changed' }), false);
+  assert.match(consentErrorMessage(failure(409, 'client_changed')), /クライアントの情報が変わりました.*読み込み直して/);
+  // Either makes the screen offer a reload instead of the buttons.
+  assert.equal(needsReload(failure(409, 'user_changed')), true);
+  assert.equal(needsReload(failure(409, 'client_changed')), true);
+  for (const other of [failure(409, 'conflict'), failure(400, 'client_changed'), failure(400, 'invalid_request'), new TypeError('Failed to fetch')]) {
+    assert.equal(needsReload(other), false);
+  }
   assert.match(consentErrorMessage(invalid), /無効か期限切れ/);
   assert.match(consentErrorMessage(failure(400, 'unknown_client')), /削除して、追加し直して/);
   assert.match(consentErrorMessage(failure(400, 'invalid_client')), /情報を確認できませんでした/);
@@ -112,6 +124,6 @@ test('errors from request are passed through and described', async () => {
   assert.match(consentErrorMessage(failure(429, 'rate_limited')), /試行回数が上限/);
   assert.match(consentErrorMessage(failure(503, 'unavailable')), /サーバーに接続できませんでした/);
   assert.match(consentErrorMessage(new TypeError('Failed to fetch')), /サーバーに接続できませんでした/);
-  const messages = new Set(['user_changed', 'unknown_client', 'invalid_client', 'client_metadata_unavailable'].map((code) => consentErrorMessage(failure(400, code))));
-  assert.equal(messages.size, 4);
+  const messages = new Set(['user_changed', 'client_changed', 'unknown_client', 'invalid_client', 'client_metadata_unavailable'].map((code) => consentErrorMessage(failure(400, code))));
+  assert.equal(messages.size, 5);
 });

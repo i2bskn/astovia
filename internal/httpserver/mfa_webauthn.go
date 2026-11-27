@@ -1,11 +1,13 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -31,10 +33,11 @@ const (
 	maxCredentialNameLength = 64
 )
 
-// webauthnBeginResponse starts a WebAuthn ceremony. Options is the
-// PublicKeyCredentialCreationOptions or PublicKeyCredentialRequestOptions
-// in the JSON form of the specification (binary members as base64url
-// without padding). The handle of the ceremony is in the webauthn cookie.
+// webauthnBeginResponse starts a WebAuthn ceremony. Options is the argument
+// of navigator.credentials.create or get, {"publicKey": options}, with the
+// PublicKeyCredentialCreationOptions or PublicKeyCredentialRequestOptions in
+// the JSON form of the specification (binary members as base64url without
+// padding). The handle of the ceremony is in the webauthn cookie.
 type webauthnBeginResponse struct {
 	Options json.RawMessage `json:"options"`
 }
@@ -50,12 +53,13 @@ type webauthnCreatedResponse struct {
 // newWebAuthn returns the WebAuthn verifier of publicURL, or nil when
 // passkeys and security keys cannot be used at it: authlume requires an
 // https origin, whose host name is the relying party ID. A host it rejects
-// is logged and leaves WebAuthn off; the server starts anyway.
-func newWebAuthn(publicURL string, st *store.Store) *webauthn.Verifier {
+// is logged and leaves WebAuthn off; the server starts anyway. now is the
+// clock of the stores, the server's.
+func newWebAuthn(publicURL string, st *store.Store, now func() time.Time) *webauthn.Verifier {
 	if !strings.HasPrefix(publicURL, "https://") {
 		return nil
 	}
-	v, err := webauthn.New(publicURL, "Astovia", st.WebAuthnCredentials(), st.WebAuthnCeremonies())
+	v, err := webauthn.New(publicURL, "Astovia", st.WebAuthnCredentials(now), st.WebAuthnCeremonies(now))
 	if err != nil {
 		log.Printf("auth: mfa: passkeys and security keys are off: %v", err)
 		return nil
@@ -85,31 +89,40 @@ func newWebAuthnCookie(value string, maxAge int) *http.Cookie {
 }
 
 // writeWebAuthnBegin answers the options of a ceremony that began and sets
-// the cookie of its handle. authlume encodes the options as the creation or
-// request argument of the browser API, {"publicKey": options}; the response
-// keeps the options alone, as before.
+// the cookie of its handle. The options are passed on as authlume encodes
+// them: the argument of navigator.credentials.create or get in JSON form,
+// {"publicKey": options}.
 func writeWebAuthnBegin(w http.ResponseWriter, options json.RawMessage, handle string) error {
-	var wrapped struct {
-		PublicKey json.RawMessage `json:"publicKey"`
-	}
-	if err := json.Unmarshal(options, &wrapped); err != nil || len(wrapped.PublicKey) == 0 {
-		return errors.New("webauthn options without publicKey")
+	if !json.Valid(options) {
+		return errors.New("webauthn options are not JSON")
 	}
 	http.SetCookie(w, newWebAuthnCookie(handle, webauthnCookieMaxAge))
-	writeJSON(w, 200, webauthnBeginResponse{Options: wrapped.PublicKey})
+	writeJSON(w, 200, webauthnBeginResponse{Options: options})
 	return nil
 }
 
-// takeWebAuthnHandle returns the ceremony handle of the cookie, "" when
-// there is none, and clears the cookie: a ceremony is finished once,
-// whatever the outcome.
-func takeWebAuthnHandle(w http.ResponseWriter, r *http.Request) string {
-	http.SetCookie(w, newWebAuthnCookie("", -1))
-	c, err := r.Cookie(webauthnCookie)
-	if err != nil || len(c.Value) > maxWebAuthnHandleLength {
-		return ""
-	}
-	return c.Value
+type webauthnHandleKey struct{}
+
+// takeWebAuthnHandle wraps the routes that finish a ceremony: before
+// anything else is checked, it clears the cookie of the ceremony handle and
+// hands its value to next (see webauthnHandle). A ceremony is finished
+// once, whatever the outcome, even a request refused before the handler.
+func takeWebAuthnHandle(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, newWebAuthnCookie("", -1))
+		handle := ""
+		if c, err := r.Cookie(webauthnCookie); err == nil && len(c.Value) <= maxWebAuthnHandleLength {
+			handle = c.Value
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), webauthnHandleKey{}, handle)))
+	})
+}
+
+// webauthnHandle returns the ceremony handle takeWebAuthnHandle took, ""
+// when there is none.
+func webauthnHandle(r *http.Request) string {
+	v, _ := r.Context().Value(webauthnHandleKey{}).(string)
+	return v
 }
 
 // credentialName returns the name a user gave a credential, trimmed: 1-64
@@ -152,7 +165,7 @@ func (s *Server) beginWebAuthnRegistration(w http.ResponseWriter, r *http.Reques
 // enrollment conditions, and unauthorized when the user, the session or the
 // password changed after the ceremony began.
 func (s *Server) finishWebAuthnRegistration(w http.ResponseWriter, r *http.Request, u store.User, response json.RawMessage, e store.WebAuthnEnrollment, codeStatus int, unauthorized func()) (store.WebAuthnCredential, bool, bool) {
-	handle := takeWebAuthnHandle(w, r)
+	handle := webauthnHandle(r)
 	if handle == "" {
 		mfaStateInvalid(w)
 		return store.WebAuthnCredential{}, false, false
@@ -242,7 +255,7 @@ func (s *Server) handleMFAWebAuthnFinish(w http.ResponseWriter, r *http.Request)
 	if !ok || !s.requireWebAuthn(w) || !s.allowMFAAttempt(w, u.ID) {
 		return
 	}
-	handle := takeWebAuthnHandle(w, r)
+	handle := webauthnHandle(r)
 	if handle == "" {
 		mfaStateInvalid(w)
 		return

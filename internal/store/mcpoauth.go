@@ -148,22 +148,6 @@ func toConnection(row mcpConnection) (mcpoauth.Connection, error) {
 	}, nil
 }
 
-// lockSubject locks the user row of subject and refuses a missing or
-// disabled user.
-func lockSubject(ctx context.Context, q queries, subject string) error {
-	u, err := q.lockUser(ctx, subject)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrUnauthorized
-	}
-	if err != nil {
-		return err
-	}
-	if u.Disabled != 0 {
-		return ErrUnauthorized
-	}
-	return nil
-}
-
 type approvalSessionKey struct{}
 
 type approvalSession struct {
@@ -172,19 +156,24 @@ type approvalSession struct {
 }
 
 // WithApprovalSession returns ctx carrying the browser session that
-// approves an MCP authorization. CreateCode then requires that session to
-// be an active session of the subject, in the transaction that locks the
-// user row (ErrUnauthorized otherwise).
+// approves an MCP authorization. CreateCode requires that session to be an
+// active session of the subject, in the transaction that locks the user row
+// (ErrUnauthorized otherwise), and refuses a context without one.
 func WithApprovalSession(ctx context.Context, sessionID string, now time.Time) context.Context {
 	return context.WithValue(ctx, approvalSessionKey{}, approvalSession{id: sessionID, now: now.Unix()})
 }
 
 // CreateCode inserts the code after deleting the expired ones. A missing or
 // disabled subject is ErrUnauthorized, and so is an approval session (see
-// WithApprovalSession) that is no longer active.
+// WithApprovalSession) that is no longer active. A code is only issued by an
+// approval, so a context without an approval session is refused.
 func (m mcpStore) CreateCode(ctx context.Context, key mcpoauth.Key, code mcpoauth.Code) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	approval, ok := ctx.Value(approvalSessionKey{}).(approvalSession)
+	if !ok || approval.id == "" {
+		return errNoGuard
 	}
 	scopes, err := encodeList(code.Scopes)
 	if err != nil {
@@ -194,15 +183,12 @@ func (m mcpStore) CreateCode(ctx context.Context, key mcpoauth.Key, code mcpoaut
 		return err
 	}
 	return m.s.transaction(ctx, func(q queries) error {
-		if err := lockSubject(ctx, q, code.Subject); err != nil {
+		u, err := lockEnabledUser(ctx, q, code.Subject)
+		if err != nil {
 			return err
 		}
-		if a, ok := ctx.Value(approvalSessionKey{}).(approvalSession); ok {
-			if _, err := q.activeSession(ctx, a.id, code.Subject, a.now); errors.Is(err, sql.ErrNoRows) {
-				return ErrUnauthorized
-			} else if err != nil {
-				return err
-			}
+		if err := checkBinding(ctx, q, u, approval.id, "", approval.now); err != nil {
+			return err
 		}
 		n, err := q.insertMCPCode(ctx, mcpCode{
 			Key: keyText(key), ClientID: code.ClientID, RedirectUri: code.RedirectURI, Subject: code.Subject,
@@ -297,7 +283,7 @@ func (m mcpStore) Create(ctx context.Context, conn mcpoauth.Connection) error {
 		code = sql.NullString{String: keyText(conn.Code), Valid: true}
 	}
 	return m.s.transaction(ctx, func(q queries) error {
-		if err := lockSubject(ctx, q, conn.Subject); errors.Is(err, ErrUnauthorized) {
+		if _, err := lockEnabledUser(ctx, q, conn.Subject); errors.Is(err, ErrUnauthorized) {
 			return mcpoauth.ErrInvalid
 		} else if err != nil {
 			return err

@@ -92,7 +92,7 @@ func storeKey(t testing.TB, s *store.Store, userID, id string) {
 	}
 	e := store.WebAuthnEnrollment{UserID: userID, Name: "Key " + id, PasswordDigest: auth.Hash(u.PasswordHash), Now: time.Now().Unix()}
 	cred := webauthn.Credential{ID: []byte("credential-" + id), PublicKey: []byte("public-" + id)}
-	if err := s.WebAuthnCredentials().Insert(store.WithWebAuthnEnrollment(ctx, e), userID, cred, false); err != nil {
+	if err := s.WebAuthnCredentials(time.Now).Insert(store.WithWebAuthnEnrollment(ctx, e), userID, cred, false); err != nil {
 		t.Fatal(err)
 	}
 }

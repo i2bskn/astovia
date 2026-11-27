@@ -43,8 +43,8 @@ var ErrOIDCLinked = errors.New("user is linked to another OIDC identity")
 var ErrInvalidOIDCIdentity = errors.New("OIDC issuer and subject are required")
 
 // NoPasswordHash is the password hash of the users that sign in only with
-// OpenID Connect. It is not a bcrypt hash, so no password matches it if
-// password sign-in is enabled again. The value is the one of the Cloudflare
+// OpenID Connect. It is not an Argon2id record in the PHC string format, so
+// no password matches it if password sign-in is enabled again. The value is the one of the Cloudflare
 // Access sign-in of earlier releases, kept so that the existing rows have the
 // same value.
 const NoPasswordHash = "!access"

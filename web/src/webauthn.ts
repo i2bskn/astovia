@@ -1,6 +1,7 @@
-// WebAuthn (passkeys and security keys) in the browser. The server speaks
-// the JSON form of the specification, with binary members as base64url
-// without padding; navigator.credentials takes and returns ArrayBuffers.
+// WebAuthn (passkeys and security keys) in the browser. The server sends
+// the argument of navigator.credentials, {publicKey: options}, in the JSON
+// form of the specification, with binary members as base64url without
+// padding; navigator.credentials takes and returns ArrayBuffers.
 // The conversions are written here, so that they can be tested without a
 // browser and do not depend on PublicKeyCredential.parseCreationOptionsFromJSON
 // and toJSON, which older browsers lack.
@@ -122,16 +123,24 @@ export function webauthnSupported(): boolean {
     typeof navigator.credentials?.create === 'function' && typeof navigator.credentials.get === 'function';
 }
 
+// credentialArgument converts the options of the server, the argument of
+// navigator.credentials in JSON form ({publicKey: options}), with convert
+// for its publicKey member; the other members are passed on.
+function credentialArgument<T>(value: unknown, convert: (options: unknown) => T): Record<string, unknown> & { publicKey: T } {
+  if (!isRecord(value) || !('publicKey' in value)) throw new Error('Unexpected WebAuthn options');
+  return { ...value, publicKey: convert(value.publicKey) };
+}
+
 // createCredential asks the browser to create a credential for the options
 // of the server and returns the response to send back.
 export async function createCredential(options: unknown): Promise<Record<string, unknown>> {
-  return registrationJSON(await navigator.credentials.create({ publicKey: creationOptions(options) }));
+  return registrationJSON(await navigator.credentials.create(credentialArgument(options, creationOptions)));
 }
 
 // getCredential asks the browser to sign in with a credential the options
 // of the server allow and returns the response to send back.
 export async function getCredential(options: unknown): Promise<Record<string, unknown>> {
-  return assertionJSON(await navigator.credentials.get({ publicKey: requestOptions(options) }));
+  return assertionJSON(await navigator.credentials.get(credentialArgument(options, requestOptions)));
 }
 
 // webauthnErrorMessage describes an error of navigator.credentials, or

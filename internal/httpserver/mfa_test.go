@@ -15,8 +15,8 @@ import (
 
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
-	"github.com/i2bskn/astovia/internal/mfa"
 	"github.com/i2bskn/astovia/internal/store"
+	"github.com/i2bskn/astovia/internal/testutil"
 )
 
 const mfaPassword = "correct-password-123"
@@ -100,7 +100,7 @@ func (a *mfaAPI) pending(email string) mfaChallengeResponse {
 // code returns the code of secret at the current time step plus offset.
 func (a *mfaAPI) code(secret string, offset int64) string {
 	a.t.Helper()
-	code, ok := mfa.TOTPCode(secret, mfa.TOTPStep(*a.now)+offset)
+	code, ok := testutil.TOTPCode(secret, testutil.TOTPStep(*a.now)+offset)
 	if !ok {
 		a.t.Fatal("no code")
 	}
@@ -193,6 +193,18 @@ func noSession(t *testing.T, w *httptest.ResponseRecorder, status int, code stri
 	if issuedCookie(w) || strings.Contains(w.Body.String(), `"user"`) {
 		t.Fatalf("a failure started a session: %v %s", w.Header().Values("Set-Cookie"), w.Body.String())
 	}
+}
+
+// setsCookieBesidesHandle reports whether w sets a cookie other than the
+// removal of the cookie of the WebAuthn ceremony handle, which the routes
+// that finish a ceremony send whatever the outcome.
+func setsCookieBesidesHandle(w *httptest.ResponseRecorder) bool {
+	for _, c := range w.Result().Cookies() {
+		if c.Name != webauthnCookie || c.Value != "" || c.MaxAge >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 var recoveryCodePattern = regexp.MustCompile(`^[a-km-np-z2-9]{4}(-[a-km-np-z2-9]{4}){3}$`)
@@ -833,8 +845,8 @@ func TestMFARequests(t *testing.T) {
 				r.Header.Set("Content-Type", tc.ct)
 			}
 			w := serve(t, api.handler, r)
-			if w.Code != tc.status || errorCode(t, w) != tc.code || len(w.Header().Values("Set-Cookie")) != 0 {
-				t.Fatalf("%s %s: %d %s", path, tc.name, w.Code, w.Body.String())
+			if w.Code != tc.status || errorCode(t, w) != tc.code || setsCookieBesidesHandle(w) {
+				t.Fatalf("%s %s: %d %s %v", path, tc.name, w.Code, w.Body.String(), w.Header().Values("Set-Cookie"))
 			}
 		}
 	}
@@ -887,7 +899,7 @@ func TestMFAManagement(t *testing.T) {
 			expect(t, api.call(path, alice, map[string]string{"password": ""}), 400, "invalid_request")
 			expect(t, api.call(path, alice, map[string]string{}), 400, "invalid_request")
 			expect(t, api.do("POST", path, alice, `{"password":"`+mfaPassword+`","extra":1}`), 400, "invalid_request")
-			expect(t, api.do("POST", path, alice, `{"password":"`+strings.Repeat("p", 4097)+`"}`), 413, "body_too_large")
+			expect(t, api.do("POST", path, alice, `{"password":"`+strings.Repeat("p", mfaBodyLimit+1)+`"}`), 413, "body_too_large")
 		}
 		unchanged("alice-id", empty)
 		// Without a factor there is nothing to remove or reissue.
@@ -1443,5 +1455,43 @@ func TestMFAStoreFailure(t *testing.T) {
 	expect(t, api.do("PATCH", "/api/v1/users/carol-id", alice, `{"role":"owner"}`), 503, "unavailable")
 	if role, _ := userState(t, api.store, "carol@example.com"); role != store.RoleMember {
 		t.Fatal("the role changed")
+	}
+}
+
+// TestWebAuthnHandleCleared checks that the routes that finish a ceremony
+// clear the cookie of its handle whatever the outcome, also when the
+// request is refused before the handler (spec §6.4).
+func TestWebAuthnHandleCleared(t *testing.T) {
+	api := newMFAAPI(t, "sqlite", config.MFAOff)
+	alice, _ := api.login("alice@example.com", mfaPassword)
+	for _, tc := range []struct{ path, credential, body string }{
+		{"/auth/mfa/webauthn/finish", "", `{"x":1}`},
+		{"/auth/mfa/webauthn/finish", "", `{"mfa_token":"x","credential":{}}`},
+		{"/auth/mfa/enroll/webauthn/finish", "", `{"mfa_token":"x","credential":{},"name":""}`},
+		{"/auth/mfa/enroll/webauthn/finish", "", `{"mfa_token":"x","credential":{},"name":"Key"}`},
+		{"/api/v1/mfa/webauthn/finish", "", `{"credential":{},"name":"Key"}`},
+		{"/api/v1/mfa/webauthn/finish", alice, `{"credential":{},"name":""}`},
+		{"/api/v1/mfa/webauthn/finish", alice, `[]`},
+		{"/api/v1/mfa/webauthn/finish", alice, `{"credential":{},"name":"Key"}`},
+	} {
+		r := httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body))
+		r.Header.Set("Origin", usersOrigin)
+		r.Header.Set("Content-Type", "application/json")
+		cookie := webauthnCookie + "=handle"
+		if tc.credential != "" {
+			cookie = tc.credential + "; " + cookie
+		}
+		r.Header.Set("Cookie", cookie)
+		w := serve(t, api.handler, r)
+		if w.Code < 400 {
+			t.Fatalf("%s %s: %d", tc.path, tc.body, w.Code)
+		}
+		cleared := false
+		for _, c := range w.Result().Cookies() {
+			cleared = cleared || (c.Name == webauthnCookie && c.Value == "" && c.MaxAge < 0)
+		}
+		if !cleared {
+			t.Fatalf("%s %s (%d): handle kept: %v", tc.path, tc.body, w.Code, w.Header().Values("Set-Cookie"))
+		}
 	}
 }

@@ -3,15 +3,21 @@ package httpserver
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"golang.org/x/net/dns/dnsmessage"
 
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
@@ -103,10 +109,34 @@ func (a *mcpOAuthAPI) consent(session, query string) *httptest.ResponseRecorder 
 	return a.do("GET", "/api/v1/oauth/authorize?"+query, session, "")
 }
 
-// decide posts the decision of the consent screen.
+// decide posts the decision of the consent screen with the client the
+// screen of query shows to session (an empty name and no host when it shows
+// none).
 func (a *mcpOAuthAPI) decide(session, query, decision, userID string) *httptest.ResponseRecorder {
 	a.t.Helper()
-	return a.do("POST", "/api/v1/oauth/authorize", session, string(mustJSON(a.t, map[string]string{"query": query, "decision": decision, "user_id": userID})))
+	var shown authorizeResponse
+	if w := a.consent(session, query); w.Code == 200 {
+		_ = json.Unmarshal(w.Body.Bytes(), &shown)
+	}
+	return a.decideFor(session, query, decision, userID, shown.ClientName, shown.ClientHost)
+}
+
+// decideFor posts the decision of the consent screen with the client name
+// and host given as the ones the screen showed.
+func (a *mcpOAuthAPI) decideFor(session, query, decision, userID, clientName string, clientHost *string) *httptest.ResponseRecorder {
+	a.t.Helper()
+	body := map[string]any{"query": query, "decision": decision, "user_id": userID, "client_name": clientName, "client_host": clientHost}
+	return a.do("POST", "/api/v1/oauth/authorize", session, string(mustJSON(a.t, body)))
+}
+
+// labels counts the stored client labels.
+func (a *mcpOAuthAPI) labels(driver string) int {
+	a.t.Helper()
+	n, err := countRows(driver, a.dsn, "SELECT COUNT(*) FROM mcp_oauth_client_labels")
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return n
 }
 
 // redirected returns the redirect URL of a decision.
@@ -291,9 +321,22 @@ func TestMCPOAuthFlow(t *testing.T) {
 			// The decision: the same user as the screen, from this origin.
 			expect(t, a.decide(alice, query, "approve", "carol-id"), 409, "user_changed")
 			expect(t, a.decide(carol, query, "approve", "alice-id"), 409, "user_changed")
+			// A user switch is reported as such, even for a request that is
+			// no longer valid.
+			expect(t, a.decideFor(carol, unknown, "approve", "alice-id", "Tool", nil), 409, "user_changed")
 			expect(t, a.decide(alice, query, "maybe", "alice-id"), 400, "invalid_request")
 			expect(t, a.decide("", query, "approve", "alice-id"), 401, "unauthorized")
-			r := httptest.NewRequest("POST", "/api/v1/oauth/authorize", strings.NewReader(string(mustJSON(t, map[string]string{"query": query, "decision": "approve", "user_id": "alice-id"}))))
+			// The client the screen showed must still be the one of the
+			// request: its cleaned name and its verified host (none for a
+			// registered client).
+			host := "tool.example"
+			expect(t, a.decideFor(alice, query, "approve", "alice-id", "Other tool", nil), 409, "client_changed")
+			expect(t, a.decideFor(alice, query, "approve", "alice-id", "  Tool\u200b ", nil), 409, "client_changed")
+			expect(t, a.decideFor(alice, query, "approve", "alice-id", "Tool", &host), 409, "client_changed")
+			expect(t, a.decideFor(alice, query, "deny", "alice-id", "Other tool", nil), 409, "client_changed")
+			expect(t, a.do("POST", "/api/v1/oauth/authorize", alice, string(mustJSON(t, map[string]string{"query": query, "decision": "approve", "user_id": "alice-id"}))), 400, "invalid_request")
+			expect(t, a.do("POST", "/api/v1/oauth/authorize", alice, string(mustJSON(t, map[string]any{"query": query, "decision": "approve", "user_id": "alice-id", "client_name": "Tool", "client_host": 1}))), 400, "invalid_request")
+			r := httptest.NewRequest("POST", "/api/v1/oauth/authorize", strings.NewReader(string(mustJSON(t, map[string]any{"query": query, "decision": "approve", "user_id": "alice-id", "client_name": "Tool", "client_host": nil}))))
 			r.Header.Set("Content-Type", "application/json")
 			r.Header.Set("Origin", "https://evil.test")
 			authorize(r, alice)
@@ -315,12 +358,20 @@ func TestMCPOAuthFlow(t *testing.T) {
 			if got := decodeJSON[authorizeErrorResponse](t, a.consent(alice, noMCP)); got.Error != "invalid_scope" {
 				t.Fatalf("no mcp: %+v", got)
 			}
-			if got := redirected(t, a.decide(alice, noMCP, "approve", "alice-id")); got.Query().Get("error") != "invalid_scope" || got.Query().Get("code") != "" {
+			if got := redirected(t, a.decideFor(alice, noMCP, "approve", "alice-id", "Tool", nil)); got.Query().Get("error") != "invalid_scope" || got.Query().Get("code") != "" {
 				t.Fatalf("no mcp: %s", got)
+			}
+			// No decision so far issued a code, so no label is stored: the
+			// labels are shared by every user of the client.
+			if n := a.labels(driver); n != 0 {
+				t.Fatalf("labels before the approval: %d", n)
 			}
 
 			// Approve, exchange.
 			code := redirected(t, a.decide(alice, query, "approve", "alice-id")).Query().Get("code")
+			if n := a.labels(driver); n != 1 {
+				t.Fatalf("labels after the approval: %d", n)
+			}
 			oauthError(t, a.exchange(clientID, code, "wrong-verifier-"+strings.Repeat("v", 40)), 400, "invalid_grant")
 			code = redirected(t, a.decide(alice, query, "approve", "alice-id")).Query().Get("code")
 			tokens := a.tokens(a.exchange(clientID, code, verifier))
@@ -444,5 +495,84 @@ func TestMCPOAuthMetadataDocumentClients(t *testing.T) {
 	oauthError(t, serve(t, a.handler, r), 401, "invalid_client")
 	if w := a.form("/oauth/revoke", url.Values{"token": {"x"}, "client_id": {clientID}}); w.Code != 200 {
 		t.Fatalf("revoke: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestMCPOAuthMetadataErrors makes authlume fail to fetch a client
+// metadata document in the two ways that Astovia classifies by what
+// mcpoauth exports least of: a blocked address (MetadataError.Reason) and
+// a temporary failure (the message of an unexported error). The handlers
+// of both, metadataClass and metadataUnavailable, depend on this test.
+func TestMCPOAuthMetadataErrors(t *testing.T) {
+	// Names are resolved by a fake DNS server: blocked.example is a
+	// loopback address and missing.example does not exist.
+	fakeDNS(t, map[string]netip.Addr{"blocked.example.": netip.MustParseAddr("127.0.0.1")})
+	a := newMCPOAuthAPI(t, "sqlite")
+	session, _ := a.login("alice@example.com", "correct-password-123")
+	for _, tc := range []struct{ clientID, log, host string }{
+		// A loopback address is never fetched.
+		{"https://blocked.example/oauth/client.json", "oauth: client metadata: blocked ", "host=blocked.example"},
+		// A name that does not resolve fails a fetch that may succeed
+		// later.
+		{"https://missing.example/oauth/client.json", "oauth: client metadata: unavailable ", "host=missing.example"},
+	} {
+		logs := captureLog(t)
+		query, _ := authorizeQuery(t, tc.clientID, "mcp")
+		w := a.consent(session, query)
+		expect(t, w, 503, "client_metadata_unavailable")
+		if !strings.Contains(logs.String(), tc.log) || !strings.Contains(logs.String(), tc.host) {
+			t.Fatalf("%s: log %q", tc.clientID, logs.String())
+		}
+	}
+}
+
+// fakeDNS makes the resolver of the net package answer from records, over
+// an in-memory connection, until the end of the test: A queries of a name
+// in records get its address, other names do not exist, and other types
+// have no answer.
+func fakeDNS(t *testing.T, records map[string]netip.Addr) {
+	t.Helper()
+	previous := net.DefaultResolver
+	net.DefaultResolver = &net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
+		client, server := net.Pipe()
+		go serveFakeDNS(server, records)
+		return client, nil
+	}}
+	t.Cleanup(func() { net.DefaultResolver = previous })
+}
+
+// serveFakeDNS answers the queries of one connection, framed as over TCP.
+func serveFakeDNS(conn net.Conn, records map[string]netip.Addr) {
+	defer conn.Close()
+	for {
+		var size [2]byte
+		if _, err := io.ReadFull(conn, size[:]); err != nil {
+			return
+		}
+		query := make([]byte, binary.BigEndian.Uint16(size[:]))
+		if _, err := io.ReadFull(conn, query); err != nil {
+			return
+		}
+		var msg dnsmessage.Message
+		if err := msg.Unpack(query); err != nil || len(msg.Questions) != 1 {
+			return
+		}
+		q := msg.Questions[0]
+		reply := dnsmessage.Message{Header: dnsmessage.Header{ID: msg.ID, Response: true, Authoritative: true, RecursionAvailable: true}, Questions: msg.Questions}
+		addr, ok := records[q.Name.String()]
+		switch {
+		case !ok:
+			reply.RCode = dnsmessage.RCodeNameError
+		case q.Type == dnsmessage.TypeA:
+			reply.Answers = []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60}, Body: &dnsmessage.AResource{A: addr.As4()}}}
+		}
+		out, err := reply.Pack()
+		if err != nil {
+			return
+		}
+		binary.BigEndian.PutUint16(size[:], uint16(len(out)))
+		if _, err := conn.Write(append(size[:], out...)); err != nil {
+			return
+		}
 	}
 }

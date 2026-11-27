@@ -396,7 +396,8 @@ func (s *Store) transaction(ctx context.Context, fn func(queries) error) error {
 // CreateUser stores a new enabled user. u.Role must be RoleOwner or
 // RoleMember; the column default is not relied on. u.OidcIssuer and
 // u.OidcSubject must be both null or both set to non-empty values
-// (ErrInvalidOIDCIdentity).
+// (ErrInvalidOIDCIdentity). u.OidcLinkApprovedUntil, when set, is stored in
+// the same transaction.
 func (s *Store) CreateUser(ctx context.Context, u User) error {
 	if !ValidRole(u.Role) {
 		return ErrInvalidRole
@@ -404,7 +405,15 @@ func (s *Store) CreateUser(ctx context.Context, u User) error {
 	if u.OidcIssuer.Valid != u.OidcSubject.Valid || (u.OidcIssuer.Valid && (u.OidcIssuer.String == "" || u.OidcSubject.String == "")) {
 		return ErrInvalidOIDCIdentity
 	}
-	err := s.transaction(ctx, func(q queries) error { return q.createUser(ctx, u) })
+	err := s.transaction(ctx, func(q queries) error {
+		if err := q.createUser(ctx, u); err != nil {
+			return err
+		}
+		if u.OidcLinkApprovedUntil.Valid {
+			return q.setOIDCLinkApproval(ctx, u.ID, u.OidcLinkApprovedUntil)
+		}
+		return nil
+	})
 	if err != nil {
 		existing, e := s.q.userByEmail(ctx, u.Email)
 		if e == nil && existing.ID != "" {

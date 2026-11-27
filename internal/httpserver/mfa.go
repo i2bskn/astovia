@@ -21,8 +21,9 @@ import (
 
 const (
 	// mfaBodyLimit is the body limit of the MFA endpoints that carry no
-	// WebAuthn response.
-	mfaBodyLimit = 4096
+	// WebAuthn response: a password of up to 1024 bytes, which JSON escapes
+	// to at most 6 bytes each, and the tokens.
+	mfaBodyLimit = 8192
 	// maxMFATokenLength bounds the sealed MFA and setup tokens in bytes.
 	maxMFATokenLength = 1024
 	// mfaTokenPurpose is the purpose the MFA token is sealed with.
@@ -684,6 +685,11 @@ func (s *Server) confirmPassword(w http.ResponseWriter, r *http.Request, u store
 		fail(w, 400, "invalid_request", "password must contain 1-1024 bytes.")
 		return false
 	}
+	release, ok := s.passwordSlot(w, r)
+	if !ok {
+		return false
+	}
+	defer release()
 	if !s.mfaPasswordLimiter.allowKey("mfa-password:" + u.ID) {
 		w.Header().Set("Retry-After", "300")
 		fail(w, 429, "rate_limited", "Too many attempts. Try again later.")

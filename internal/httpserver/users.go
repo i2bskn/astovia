@@ -12,8 +12,9 @@ import (
 )
 
 // accountBodyLimit is the body limit of the public invitation and password
-// reset endpoints, the same as login.
-const accountBodyLimit = 4096
+// reset endpoints, the same as login: a password of up to 1024 bytes, which
+// JSON escapes to at most 6 bytes each, and the token.
+const accountBodyLimit = 8192
 
 // adminUserResponse is a user in the user management API.
 type adminUserResponse struct {
@@ -348,16 +349,23 @@ func linkError(w http.ResponseWriter, op string, err error) {
 }
 
 // linkPassword checks the length of a new password and hashes it, before any
-// transaction is started. It writes 400 with the same message as the CLI.
-func linkPassword(w http.ResponseWriter, password string) (string, bool) {
+// transaction is started. It writes 400 with the same message as the CLI,
+// and 503 when no derivation slot is free.
+func (s *Server) linkPassword(w http.ResponseWriter, r *http.Request, password string) (string, bool) {
+	if len(password) < auth.MinPasswordBytes || len(password) > auth.MaxPasswordBytes {
+		_, err := auth.Password(password)
+		fail(w, 400, "invalid_request", err.Error())
+		return "", false
+	}
+	release, ok := s.passwordSlot(w, r)
+	if !ok {
+		return "", false
+	}
 	hash, err := auth.Password(password)
+	release()
 	if err != nil {
-		if len(password) < auth.MinPasswordBytes || len(password) > auth.MaxPasswordBytes {
-			fail(w, 400, "invalid_request", err.Error())
-		} else {
-			log.Printf("auth: hash password: %v", err)
-			fail(w, 503, "unavailable", "The service is temporarily unavailable. Try again.")
-		}
+		log.Printf("auth: hash password: %v", err)
+		fail(w, 503, "unavailable", "The service is temporarily unavailable. Try again.")
 		return "", false
 	}
 	return hash, true
@@ -435,7 +443,7 @@ func (s *Server) handleAcceptInvitation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// The link is checked before the password is hashed so that an invalid
-	// link costs no bcrypt work; the transaction checks it again.
+	// link costs no Argon2id work; the transaction checks it again.
 	if _, err := s.auth.Store.InvitationByToken(r.Context(), hash, s.auth.Now().Unix()); err != nil {
 		if errors.Is(err, store.ErrInvitationInvalid) {
 			invitationInvalid(w)
@@ -444,7 +452,7 @@ func (s *Server) handleAcceptInvitation(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
-	passwordHash, ok := linkPassword(w, in.Password)
+	passwordHash, ok := s.linkPassword(w, r, in.Password)
 	if !ok {
 		return
 	}
@@ -521,7 +529,7 @@ func (s *Server) handleCompletePasswordReset(w http.ResponseWriter, r *http.Requ
 		}
 		return
 	}
-	passwordHash, ok := linkPassword(w, in.Password)
+	passwordHash, ok := s.linkPassword(w, r, in.Password)
 	if !ok {
 		return
 	}

@@ -26,6 +26,10 @@ const (
 	// consent screen of an MCP client with a long request fits. It is kept
 	// by authlume on the server (oidc.MaxAppData), not in a cookie.
 	maxReturnTo = 8300
+	// maxScreenReturnTo bounds a return_to to any other screen, whose
+	// address is short: anyone can start a sign-in, so the rows of the
+	// sign-ins in progress are kept small.
+	maxScreenReturnTo = 1024
 	// signinErrorPath is the screen that explains a failed sign-in.
 	signinErrorPath = "/signin-error"
 )
@@ -76,8 +80,9 @@ type oidcLogin struct {
 }
 
 // newOIDCLogin returns the relying party of c, keeping sign-ins in progress
-// in st. It does not contact the provider.
-func newOIDCLogin(c *config.OIDCClient, st oidc.Store) *oidcLogin {
+// in st. now is the clock of the retry interval, the server's. It does not
+// contact the provider.
+func newOIDCLogin(c *config.OIDCClient, st oidc.Store, now func() time.Time) *oidcLogin {
 	return &oidcLogin{
 		cfg: oidc.Config{
 			Issuer:       c.Issuer,
@@ -89,7 +94,7 @@ func newOIDCLogin(c *config.OIDCClient, st oidc.Store) *oidcLogin {
 			Scopes: []string{"email"},
 		},
 		store:  st,
-		now:    time.Now,
+		now:    now,
 		create: oidc.New,
 	}
 }
@@ -200,7 +205,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	if values := r.PostForm["return_to"]; len(values) == 1 {
 		// A return_to that cannot be kept is not replaced silently: the
 		// consent screen of an MCP client would be lost.
-		if len(values[0]) > maxReturnTo {
+		if len(values[0]) > maxReturnTo || (len(values[0]) > maxScreenReturnTo && !consentReturnTo(values[0])) {
 			redirectSigninError(w, http.StatusSeeOther, reasonReturnTooLong)
 			return
 		}
@@ -219,6 +224,13 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// consentReturnTo reports whether v returns to the consent screen of the
+// MCP authorization server, whose query may be long.
+func consentReturnTo(v string) bool {
+	p, _, _ := strings.Cut(v, "?")
+	return strings.TrimSuffix(p, "/") == authorizePath
+}
+
 // oidcErrorKind names the category of an error of authlume's oidc for the
 // log, without its text.
 func oidcErrorKind(err error) string {
@@ -229,6 +241,8 @@ func oidcErrorKind(err error) string {
 		return "provider unavailable"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
+	case errors.Is(err, store.ErrOIDCLoginsFull):
+		return "too many sign-ins in progress"
 	}
 	return "server error"
 }

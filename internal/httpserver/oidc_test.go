@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -139,7 +140,6 @@ func (idp *fakeIdP) grant(location *url.URL, claims map[string]any) string {
 	idp.mu.Unlock()
 	return url.Values{"code": {code}, "state": {q.Get("state")}}.Encode()
 }
-
 func (idp *fakeIdP) setDown(down bool) {
 	idp.mu.Lock()
 	defer idp.mu.Unlock()
@@ -365,6 +365,39 @@ func TestOIDCLogin(t *testing.T) {
 	}
 	// A return_to that cannot be kept is not dropped silently.
 	expectSigninError(t, o.loginForm(url.Values{"return_to": {"/" + strings.Repeat("a", maxReturnTo)}}, usersOrigin, ""), reasonReturnTooLong)
+	// Only the consent screen of an MCP client may return to a long
+	// address; the screens of the SPA are short.
+	expectSigninError(t, o.loginForm(url.Values{"return_to": {"/" + strings.Repeat("a", maxScreenReturnTo)}}, usersOrigin, ""), reasonReturnTooLong)
+	expectSigninError(t, o.loginForm(url.Values{"return_to": {"/settings?x=/oauth/authorize" + strings.Repeat("a", maxScreenReturnTo)}}, usersOrigin, ""), reasonReturnTooLong)
+	for _, returnTo := range []string{"/" + strings.Repeat("a", maxScreenReturnTo-1), authorizePath + "?client_id=" + strings.Repeat("a", 4000)} {
+		if w := o.loginForm(url.Values{"return_to": {returnTo}}, usersOrigin, ""); w.Code != http.StatusSeeOther || strings.HasPrefix(w.Header().Get("Location"), signinErrorPath) {
+			t.Fatalf("return_to of %d bytes: %d %v", len(returnTo), w.Code, w.Header())
+		}
+	}
+}
+
+// TestOIDCLoginsFull checks that sign-ins do not start while the bound of
+// the sign-ins in progress is reached, and start again once they expire.
+func TestOIDCLoginsFull(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			o := newOIDCAPI(t, driver, nil)
+			now := *o.now
+			rawExec(t, driver, o.dsn, fmt.Sprintf(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < %d)
+INSERT INTO oidc_logins (key, nonce, verifier, started_at, expires_at) SELECT 'k' || i, 'n', 'v', %d, %d FROM n`, store.MaxLiveOIDCLogins, now.Unix(), now.Unix()+60))
+			logs := captureLog(t)
+			w := o.loginForm(url.Values{}, usersOrigin, "")
+			expectSigninError(t, w, reasonUnavailable)
+			if len(w.Result().Cookies()) != 0 {
+				t.Fatalf("cookie set: %v", w.Header().Values("Set-Cookie"))
+			}
+			if !strings.Contains(logs.String(), "too many sign-ins in progress") {
+				t.Fatalf("log: %s", logs.String())
+			}
+			*o.now = now.Add(time.Minute)
+			o.start("")
+		})
+	}
 }
 
 // TestOIDCLoginRateLimit checks the limit of the starts per peer: ten a
@@ -683,7 +716,7 @@ func TestPasswordEndpointsWithOIDC(t *testing.T) {
 			ctx := context.Background()
 			o := newOIDCAPI(t, driver, nil)
 			o.serve(config.MFAAll, nil)
-			if _, err := o.store.EnrollTOTP(ctx, store.MFATOTP{ID: "totp-alice", UserID: "alice-id", SecretSealed: "sealed", LastStep: 1, CreatedAt: 1}, []store.RecoveryCode{{ID: "code", Hash: "hash"}}, store.EnrollOptions{Now: o.now.Unix()}); err != nil {
+			if _, err := o.store.EnrollTOTP(ctx, store.MFATOTP{ID: "totp-alice", UserID: "alice-id", SecretSealed: "sealed", LastStep: 1, CreatedAt: 1}, []store.RecoveryCode{{ID: "code", Hash: "hash"}}, store.EnrollOptions{PasswordDigest: o.passwordDigest("alice-id"), Now: o.now.Unix()}); err != nil {
 				t.Fatal(err)
 			}
 			disabled := func(w *httptest.ResponseRecorder) {

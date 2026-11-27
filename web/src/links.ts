@@ -79,17 +79,22 @@ export function linkFailure(error: unknown): LinkFailure {
 export const minPasswordBytes = 12;
 export const maxPasswordBytes = 1024;
 
+// passwordLengthHint and passwordLengthMessage tell the bounds above.
+export const passwordLengthHint = `${minPasswordBytes}〜${maxPasswordBytes}バイト（英数字なら${minPasswordBytes}〜${maxPasswordBytes}文字）`;
+export const passwordLengthMessage = `パスワードは${minPasswordBytes}〜${maxPasswordBytes}バイトで入力してください（英数字なら${minPasswordBytes}〜${maxPasswordBytes}文字）。`;
+
 // passwordTooLong reports whether a password exceeds maxPasswordBytes.
 export function passwordTooLong(password: string): boolean {
   return new TextEncoder().encode(password).length > maxPasswordBytes;
 }
 
 // passwordProblem checks a new password and its confirmation the way the
-// server does (12–1024 bytes of UTF-8), and returns what is wrong or null.
+// server does (minPasswordBytes to maxPasswordBytes bytes of UTF-8), and
+// returns what is wrong or null.
 export function passwordProblem(password: string, confirmation: string): string | null {
   if (!password || !confirmation) return '新しいパスワードを2回入力してください。';
   const bytes = new TextEncoder().encode(password).length;
-  if (bytes < minPasswordBytes || bytes > maxPasswordBytes) return 'パスワードは12〜1024バイトで入力してください（英数字なら12〜1024文字）。';
+  if (bytes < minPasswordBytes || bytes > maxPasswordBytes) return passwordLengthMessage;
   if (password !== confirmation) return '確認用のパスワードが一致しません。';
   return null;
 }

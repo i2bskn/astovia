@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { request } from './auth';
-import { consentErrorMessage, createOAuthClient, isUserChanged } from './oauth';
+import { consentErrorMessage, createOAuthClient, needsReload } from './oauth';
 import type { Authorization, ConsentDecision } from './oauth';
 
 const client = createOAuthClient(request);
@@ -40,15 +40,15 @@ export default function ConsentPage({ email }: { email: string }) {
     setSubmitting(true);
     setError(null);
     try {
-      const url = await client.decide(query, decision, consent.user_id);
+      const url = await client.decide(query, decision, consent);
       // The buttons stay disabled while the browser leaves the page.
       window.location.assign(url);
     } catch (failure) {
       setSubmitting(false);
       setError(consentErrorMessage(failure));
-      // The decision was refused for the user shown; the screen is read
-      // again for the user signed in now.
-      if (isUserChanged(failure)) setReload(true);
+      // The decision was refused for the user or the client shown; the
+      // screen is read again for the ones of now.
+      if (needsReload(failure)) setReload(true);
     }
   }
 

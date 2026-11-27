@@ -153,15 +153,23 @@ test('the browser is asked with converted options and its result is converted ba
     create: async (options) => { asked.push(['create', options]); return created; },
     get: async (options) => { asked.push(['get', options]); return signed; },
   });
-  assert.deepEqual(await createCredential(creation), registrationJSON(created));
-  assert.deepEqual(await getCredential(assertion), assertionJSON(signed));
-  assert.deepEqual(asked.map(([kind, options]) => [kind, Object.keys(options)]), [['create', ['publicKey']], ['get', ['publicKey']]]);
+  // The server sends the argument of the browser API as authlume encodes it.
+  assert.deepEqual(await createCredential({ publicKey: creation }), registrationJSON(created));
+  assert.deepEqual(await getCredential({ publicKey: assertion, mediation: 'optional' }), assertionJSON(signed));
+  assert.deepEqual(asked.map(([kind, options]) => [kind, Object.keys(options)]), [['create', ['publicKey']], ['get', ['publicKey', 'mediation']]]);
   assert.deepEqual(list(asked[0][1].publicKey.challenge), [1, 2, 3]);
   assert.deepEqual(list(asked[1][1].publicKey.allowCredentials[1].id), [0xfb, 0xff]);
+  assert.equal(asked[1][1].mediation, 'optional');
+  // Options without the wrapper are not passed to the browser.
+  for (const bad of [creation, null, 'x', [], { publickey: creation }]) {
+    await assert.rejects(createCredential(bad), /Unexpected WebAuthn options/, JSON.stringify(bad));
+  }
+  await assert.rejects(getCredential(assertion), /Unexpected WebAuthn options/);
+  assert.equal(asked.length, 2);
   // A cancelled prompt and a missing result are failures.
   browser({ create: async () => null, get: async () => { throw new DOMException('cancelled', 'NotAllowedError'); } });
-  await assert.rejects(createCredential(creation), /Unexpected WebAuthn credential/);
-  await assert.rejects(getCredential(assertion), (error) => error.name === 'NotAllowedError');
+  await assert.rejects(createCredential({ publicKey: creation }), /Unexpected WebAuthn credential/);
+  await assert.rejects(getCredential({ publicKey: assertion }), (error) => error.name === 'NotAllowedError');
 });
 
 test('support needs PublicKeyCredential and navigator.credentials', () => {

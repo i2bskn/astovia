@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,7 +47,7 @@ func main() {
 func run(args []string) error {
 	users := len(args) > 0 && args[0] == "users"
 	if !users && len(args) > 0 && (len(args) != 1 || args[0] != "serve") {
-		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable/role/unlink/reset-mfa --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]")
+		return errors.New("usage: astovia [serve | users create/reset-password/disable/enable/role/unlink/approve-oidc/reset-mfa --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]")
 	}
 	c, e := config.Load(!users)
 	if e != nil {
@@ -327,7 +328,8 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 			return errors.New("--no-password and --password-stdin cannot be used together")
 		}
 		// The user signs in only with OpenID Connect: the first sign-in with
-		// the verified email address links the identity.
+		// the verified email address within the 7-day approval given below
+		// links the identity.
 		hash = store.NoPasswordHash
 	} else {
 		p, e := readPassword(in, *stdin)
@@ -346,19 +348,18 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 			return e
 		}
 		now := time.Now()
-		e = s.CreateUser(ctx, store.User{ID: id, Email: u, PasswordHash: hash, CreatedAt: now.Unix(), Role: *role})
+		user := store.User{ID: id, Email: u, PasswordHash: hash, CreatedAt: now.Unix(), Role: *role}
+		// The first OIDC sign-in with the address links the user only
+		// while the operator's approval lasts; it is stored with the user.
+		if *noPassword {
+			user.OidcLinkApprovedUntil = sql.NullInt64{Int64: now.Add(store.OIDCLinkApproval).Unix(), Valid: true}
+		}
+		e = s.CreateUser(ctx, user)
 		if e != nil {
 			if errors.Is(e, store.ErrConflict) {
 				return e
 			}
 			return errors.New("could not create user")
-		}
-		// The first OIDC sign-in with the address links the user only
-		// while the operator's approval lasts.
-		if *noPassword {
-			if e = s.ApproveOIDCLink(ctx, u, now.Add(store.OIDCLinkApproval).Unix()); e != nil {
-				return errors.New("user was created, but linking could not be approved; run users approve-oidc")
-			}
 		}
 	case "approve-oidc":
 		e = s.ApproveOIDCLink(ctx, u, time.Now().Add(store.OIDCLinkApproval).Unix())

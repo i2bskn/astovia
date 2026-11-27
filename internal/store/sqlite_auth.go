@@ -33,6 +33,9 @@ func (q sqliteQueries) deleteExpiredOIDCLogin(ctx context.Context, key string, n
 func (q sqliteQueries) deleteExpiredOIDCLogins(ctx context.Context, now int64) error {
 	return q.q.DeleteExpiredOIDCLogins(ctx, now)
 }
+func (q sqliteQueries) countLiveOIDCLogins(ctx context.Context, now int64) (int64, error) {
+	return q.q.CountLiveOIDCLogins(ctx, now)
+}
 func (q sqliteQueries) insertOIDCLogin(ctx context.Context, l oidcLogin) (int64, error) {
 	return q.q.InsertOIDCLogin(ctx, db.InsertOIDCLoginParams(l))
 }

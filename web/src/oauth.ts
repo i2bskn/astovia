@@ -34,6 +34,10 @@ export type Authorization = Consent | ConsentRejection;
 
 export type ConsentDecision = 'approve' | 'deny';
 
+// ConsentShown is what the consent screen showed, sent back with the
+// decision: the signed-in user and the client.
+export type ConsentShown = Pick<Consent, 'user_id' | 'client_name' | 'client_host'>;
+
 // Connection is an AI client the user has authorized.
 export interface Connection {
   id: string;
@@ -103,13 +107,14 @@ export function createOAuthClient(request: RequestFunction) {
     async getAuthorization(query: string): Promise<Authorization> {
       return readAuthorization(await request<unknown>(`/api/v1/oauth/authorize${query ? `?${query}` : ''}`));
     },
-    // decide approves or denies the request for userID, the user the screen
-    // showed, and returns the URL to send the browser to.
-    async decide(query: string, decision: ConsentDecision, userID: string): Promise<string> {
+    // decide approves or denies the request for the user and the client
+    // the screen showed, and returns the URL to send the browser to. The
+    // server refuses it when either changed since (needsReload).
+    async decide(query: string, decision: ConsentDecision, shown: ConsentShown): Promise<string> {
       return readRedirect(await request<unknown>('/api/v1/oauth/authorize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, decision, user_id: userID }),
+        body: JSON.stringify({ query, decision, user_id: shown.user_id, client_name: shown.client_name, client_host: shown.client_host }),
       }));
     },
     async listConnections(): Promise<Connection[]> {
@@ -142,11 +147,25 @@ export function isUserChanged(error: unknown): boolean {
   return errorStatus(error) === 409 && errorCode(error) === 'user_changed';
 }
 
+// isClientChanged reports whether a decision was refused because the client
+// of the request is no longer the one the screen showed: its name or its
+// verified host changed.
+export function isClientChanged(error: unknown): boolean {
+  return errorStatus(error) === 409 && errorCode(error) === 'client_changed';
+}
+
+// needsReload reports whether the consent screen must be read again before
+// a decision: the user or the client it showed has changed.
+export function needsReload(error: unknown): boolean {
+  return isUserChanged(error) || isClientChanged(error);
+}
+
 // consentErrorMessage describes a failed request of the consent screen.
 export function consentErrorMessage(error: unknown): string {
   const status = errorStatus(error);
   switch (errorCode(error)) {
     case 'user_changed': return 'ログイン中のアカウントが変わりました。ページを読み込み直して、表示されるアカウントで許可するか確認してください。';
+    case 'client_changed': return 'AI クライアントの情報が変わりました。ページを読み込み直して、表示される内容で許可するか確認してください。';
     case 'unknown_client': return 'この AI クライアントは登録されていないか、登録の期限が切れています。AI クライアントでこのサーバーを削除して、追加し直してください。';
     case 'invalid_client': return 'AI クライアントの情報を確認できませんでした。AI クライアントから接続をやり直してください。';
     case 'client_metadata_unavailable': return 'AI クライアントの情報を取得できませんでした。少し待ってから、もう一度お試しください。';

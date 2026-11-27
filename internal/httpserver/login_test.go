@@ -300,8 +300,8 @@ var originRoutes = []struct{ method, path string }{
 	{"POST", "/api/v1/mfa/webauthn/finish"},
 	{"POST", "/api/v1/mfa/webauthn/x/delete"},
 	{"POST", "/api/v1/mfa/recovery-codes"},
-	{"PATCH", "/api/v1/users/carol-id"},
-	{"POST", "/api/v1/users/carol-id/password-resets"},
+	{"PATCH", "/api/v1/users/x"},
+	{"POST", "/api/v1/users/x/password-resets"},
 	{"POST", "/api/v1/invitations"},
 	{"DELETE", "/api/v1/invitations/x"},
 	{"POST", "/api/v1/action-items"},
@@ -337,6 +337,54 @@ var originRoutes = []struct{ method, path string }{
 	{"POST", "/api/v1/notification-channels/test"},
 	{"PUT", "/api/v1/notification-settings"},
 	{"DELETE", "/api/v1/oauth/connections/x"},
+}
+
+// TestOriginRoutesComplete checks that originRoutes lists every
+// state-changing method of every route under /api/ and /auth/ that the
+// server registers, with and without OIDC; the OIDC sign-in form is posted
+// across origins by design and has its own test.
+func TestOriginRoutesComplete(t *testing.T) {
+	listed := map[string]bool{}
+	for _, r := range originRoutes {
+		listed[r.method+" "+r.path] = true
+	}
+	registered := map[string]bool{}
+	o := newOIDCAPI(t, "sqlite", nil)
+	for _, srv := range []*Server{newUsersAPI(t, "sqlite").srv, o.srv} {
+		h := srv.handler()
+		if len(srv.patterns) == 0 {
+			t.Fatal("no patterns recorded")
+		}
+		for _, p := range srv.patterns {
+			if (!strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/auth/")) || p == oidcLoginPath {
+				continue
+			}
+			path := strings.ReplaceAll(p, "{id}", "x")
+			if strings.Contains(path, "{") {
+				t.Fatalf("pattern %s: unknown wildcard", p)
+			}
+			for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+				r := httptest.NewRequest(method, path, strings.NewReader("{}"))
+				r.Header.Set("Content-Type", "application/json")
+				r.Header.Set("Origin", usersOrigin)
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, r)
+				if w.Code != 405 {
+					registered[method+" "+path] = true
+				}
+			}
+		}
+	}
+	for route := range registered {
+		if !listed[route] {
+			t.Errorf("%s is not in originRoutes", route)
+		}
+	}
+	for route := range listed {
+		if !registered[route] {
+			t.Errorf("%s is listed but not registered", route)
+		}
+	}
 }
 
 // TestOriginRequired checks the Origin check of every state-changing route
@@ -407,6 +455,44 @@ func TestOriginRequired(t *testing.T) {
 				t.Fatalf("%s %s with an API token: %d %s", route.method, route.path, w.Code, w.Body.String())
 			}
 		}
+		// Something that only looks like an API token is no reason to skip
+		// the check, on the API or under /auth, with or without the cookie.
+		for _, fake := range []string{"ast_x", "ast_", token + "x", token[:len(token)-1] + "!"} {
+			for _, cookie := range []string{"", session} {
+				r := httptest.NewRequest(route.method, route.path, strings.NewReader("{}"))
+				r.Header.Set("Content-Type", "application/json")
+				r.Header.Set("Origin", "https://evil.test")
+				r.Header.Set("Authorization", "Bearer "+fake)
+				if cookie != "" {
+					r.Header.Set("Cookie", cookie)
+				}
+				w := httptest.NewRecorder()
+				api.handler.ServeHTTP(w, r)
+				expect(t, w, 403, "origin_rejected")
+			}
+		}
+		// A well-formed token that is not one is taken as a token on the
+		// API, where it gets a 401 and the cookie is not used.
+		if strings.HasPrefix(route.path, "/api/") {
+			r := httptest.NewRequest(route.method, route.path, strings.NewReader("{}"))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Origin", "https://evil.test")
+			r.Header.Set("Authorization", "Bearer ast_"+strings.Repeat("A", 43))
+			r.Header.Set("Cookie", session)
+			w := httptest.NewRecorder()
+			api.handler.ServeHTTP(w, r)
+			expect(t, w, 401, "unauthorized")
+		}
+		// Neither is a second Authorization header beside a valid token.
+		r := httptest.NewRequest(route.method, route.path, strings.NewReader("{}"))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", "https://evil.test")
+		r.Header.Add("Authorization", "Bearer "+token)
+		r.Header.Add("Authorization", "Bearer "+token)
+		r.Header.Set("Cookie", session)
+		w = httptest.NewRecorder()
+		api.handler.ServeHTTP(w, r)
+		expect(t, w, 403, "origin_rejected")
 	}
 	// The session refused above still works, and an API token without an
 	// Origin changes state where it is accepted.

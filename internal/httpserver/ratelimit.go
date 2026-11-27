@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -279,4 +281,62 @@ func (l *emailLimiter) reset(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	*l.slot(key) = emailSlot{}
+}
+
+// passwordSlots bounds the password derivations running at once in the
+// process. Each Argon2id derivation of authlume's password package takes
+// about 19 MiB, so without a bound many concurrent sign-ins with random
+// addresses (which the limits per peer and per address do not stop) could
+// exhaust the memory. A request waits up to wait for a free slot and is then
+// refused; a refused request is not counted as an attempt.
+type passwordSlots struct {
+	slots chan struct{}
+	wait  time.Duration
+}
+
+// passwordSlotWait is how long a password derivation waits for a free slot.
+const passwordSlotWait = 2 * time.Second
+
+// newPasswordSlots returns a bound of 2 × GOMAXPROCS derivations, which keeps
+// the CPU busy while capping the memory at a few hundred MiB.
+func newPasswordSlots() *passwordSlots {
+	return &passwordSlots{slots: make(chan struct{}, 2*runtime.GOMAXPROCS(0)), wait: passwordSlotWait}
+}
+
+// acquire takes a slot, waiting up to p.wait or until ctx ends. It reports
+// whether a slot was taken; the caller then calls release once.
+func (p *passwordSlots) acquire(ctx context.Context) bool {
+	select {
+	case p.slots <- struct{}{}:
+		return true
+	default:
+	}
+	if p.wait <= 0 {
+		return false
+	}
+	timer := time.NewTimer(p.wait)
+	defer timer.Stop()
+	select {
+	case p.slots <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (p *passwordSlots) release() { <-p.slots }
+
+// passwordSlot takes a slot of s.passwordSlots for one password derivation
+// (a sign-in, a password check or a new password). When none is free it
+// writes 503 unavailable with Retry-After and reports false; nothing is
+// counted against the attempt limits then.
+func (s *Server) passwordSlot(w http.ResponseWriter, r *http.Request) (release func(), ok bool) {
+	if !s.passwordSlots.acquire(r.Context()) {
+		w.Header().Set("Retry-After", "1")
+		fail(w, 503, "unavailable", "The server is busy. Try again.")
+		return nil, false
+	}
+	return s.passwordSlots.release, true
 }

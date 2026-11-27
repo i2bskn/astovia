@@ -263,7 +263,7 @@ func TestUsersCommand(t *testing.T) {
 func TestRunUsage(t *testing.T) {
 	for _, args := range [][]string{{"serve", "x"}, {"foo"}} {
 		err := run(args)
-		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable/role/unlink/reset-mfa --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]" {
+		if err == nil || err.Error() != "usage: astovia [serve | users create/reset-password/disable/enable/role/unlink/approve-oidc/reset-mfa --email ADDRESS [--password-stdin] [--no-password] [--role owner|member] [--all]]" {
 			t.Fatalf("%q: got %v", args, err)
 		}
 	}
@@ -563,7 +563,7 @@ func TestUsersResetMFA(t *testing.T) {
 					t.Fatal(err)
 				}
 				enroll := store.WithWebAuthnEnrollment(ctx, store.WebAuthnEnrollment{UserID: id, Name: "Key", SessionID: sid, Now: now})
-				if err = s.WebAuthnCredentials().Insert(enroll, id, webauthn.Credential{ID: []byte(name + "-key"), PublicKey: []byte{1}}, false); err != nil {
+				if err = s.WebAuthnCredentials(time.Now).Insert(enroll, id, webauthn.Credential{ID: []byte(name + "-key"), PublicKey: []byte{1}}, false); err != nil {
 					t.Fatal(err)
 				}
 			}

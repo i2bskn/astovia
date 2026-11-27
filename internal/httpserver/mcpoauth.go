@@ -3,6 +3,7 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -83,7 +84,7 @@ func newMCPOAuth(c config.Config, st *store.Store, now func() time.Time) *mcpoau
 // routeOAuth registers the metadata and the machine-facing OAuth endpoints.
 // The authorization endpoint is the consent screen of the web UI. Without
 // the authorization server none of them exists and they are JSON 404s.
-func (s *Server) routeOAuth(mux *http.ServeMux) {
+func (s *Server) routeOAuth(mux *patternMux) {
 	if s.mcp == nil {
 		return
 	}
@@ -129,7 +130,9 @@ func oauthLog(endpoint, clientID string, ev mcpoauth.Event, err error) {
 }
 
 // metadataClass returns the fixed class of a metadata document failure that
-// is logged in place of its reason.
+// is logged in place of its reason. mcpoauth exports the reason of a blocked
+// address only as text; TestMCPOAuthMetadataErrors makes authlume return it
+// and fails when the text changes.
 func metadataClass(err *mcpoauth.MetadataError) string {
 	switch {
 	case err.Mismatch:
@@ -143,7 +146,8 @@ func metadataClass(err *mcpoauth.MetadataError) string {
 
 // metadataUnavailable reports whether err is a temporary failure to fetch a
 // client metadata document. mcpoauth does not export this error, so its
-// message is matched; the tests pin it.
+// message is matched; TestMCPOAuthMetadataErrors makes authlume return it
+// and fails when the message changes.
 func metadataUnavailable(err error) bool {
 	return strings.Contains(err.Error(), "client metadata document unavailable")
 }
@@ -377,8 +381,9 @@ func (s *Server) authorizeFailed(w http.ResponseWriter, r *http.Request, op stri
 	case s.revokeMismatchedClient(r.Context(), err):
 		fail(w, http.StatusBadRequest, "invalid_client", "The client metadata is invalid.")
 	case errors.As(err, &metaErr) && metaErr.Reason == "blocked address":
-		// Answered like a failed fetch, so that the response does not
-		// tell whether a name exists on an internal network.
+		// The reason is pinned by TestMCPOAuthMetadataErrors. Answered
+		// like a failed fetch, so that the response does not tell whether
+		// a name exists on an internal network.
 		log.Printf("oauth: client metadata: blocked host=%s", metadataHost(metaErr.ClientID))
 		fail(w, http.StatusServiceUnavailable, "client_metadata_unavailable", "The client metadata could not be fetched. Try again later.")
 	case errors.As(err, &metaErr):
@@ -479,9 +484,13 @@ func (s *Server) handleGetAuthorize(w http.ResponseWriter, r *http.Request) {
 
 // handlePostAuthorize answers the consent screen: it validates the
 // authorization request again and returns where to send the browser. The
-// request is not stored between the screen and the decision. An approval
-// issues the code only while the session that approved it is active, which
-// the store checks under the lock of the user row.
+// request is not stored between the screen and the decision, so the screen
+// sends back the user and the client it showed: a decision made for another
+// user after a sign-in switch (409 user_changed), or for a client whose name
+// or verified host changed since the screen was shown (409 client_changed),
+// is not applied. An approval issues the code only while the session that
+// approved it is active, which the store checks under the lock of the user
+// row.
 func (s *Server) handlePostAuthorize(w http.ResponseWriter, r *http.Request) {
 	if s.mcp == nil {
 		fail(w, 404, "not_found", "Not found.")
@@ -494,15 +503,25 @@ func (s *Server) handlePostAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Query    *string `json:"query"`
-		Decision *string `json:"decision"`
-		UserID   *string `json:"user_id"`
+		Query      *string         `json:"query"`
+		Decision   *string         `json:"decision"`
+		UserID     *string         `json:"user_id"`
+		ClientName *string         `json:"client_name"`
+		ClientHost json.RawMessage `json:"client_host"`
 	}
 	if !decode(w, r, &in, consentBodyLimit) {
 		return
 	}
-	if in.Query == nil || in.Decision == nil || in.UserID == nil || (*in.Decision != "approve" && *in.Decision != "deny") {
-		fail(w, http.StatusBadRequest, "invalid_request", "query, decision (approve or deny) and user_id are required.")
+	var shownHost *string
+	if in.Query == nil || in.Decision == nil || in.UserID == nil || in.ClientName == nil || in.ClientHost == nil ||
+		(*in.Decision != "approve" && *in.Decision != "deny") || json.Unmarshal(in.ClientHost, &shownHost) != nil {
+		fail(w, http.StatusBadRequest, "invalid_request", "query, decision (approve or deny), user_id, client_name and client_host are required.")
+		return
+	}
+	// Checked before the request is resolved, so that a user switch is
+	// always reported as such.
+	if *in.UserID != u.ID {
+		fail(w, http.StatusConflict, "user_changed", "The signed-in user has changed. Reload the page.")
 		return
 	}
 	query := *in.Query
@@ -521,27 +540,21 @@ func (s *Server) handlePostAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.authorizeFailed(w, r, op, err)
 		return
 	}
-	// The screen sends the user it showed, so that a decision made for
-	// another user after a sign-in switch is not applied to this one.
-	if *in.UserID != u.ID {
-		fail(w, http.StatusConflict, "user_changed", "The signed-in user has changed. Reload the page.")
+	name := clientName(req.ClientName, clientHost(req))
+	if *in.ClientName != name || (shownHost == nil) != (req.ClientHost == "") || (shownHost != nil && *shownHost != req.ClientHost) {
+		fail(w, http.StatusConflict, "client_changed", "The client has changed. Reload the page.")
 		return
 	}
 	var location string
+	approved := false
 	switch {
 	case *in.Decision == "deny":
 		location, err = s.mcp.Deny(ctx, query)
 	case !slices.Contains(req.Scopes, scopeMCP):
 		location, err = s.invalidScopeURL(ctx, query)
 	default:
-		// The label is what the connection list shows; failing to store it
-		// does not stop the connection. Only the verified host of a
-		// metadata document is stored; a registered client's redirect host
-		// is its own claim.
-		if lerr := s.auth.Store.SetMCPClientLabel(ctx, req.ClientID, clientName(req.ClientName, clientHost(req)), req.ClientHost, s.auth.Now()); lerr != nil {
-			log.Printf("oauth: client label: %v", lerr)
-		}
 		_, location, err = s.mcp.Approve(store.WithApprovalSession(ctx, sid, s.auth.Now()), query, u.ID)
+		approved = err == nil
 	}
 	switch {
 	case errors.As(err, &reject):
@@ -549,6 +562,16 @@ func (s *Server) handlePostAuthorize(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.authorizeFailed(w, r, op, err)
 	default:
+		if approved {
+			// The label is what the connection list shows; it is stored
+			// only once the approval issued a code, and failing to store it
+			// does not stop the connection. Only the verified host of a
+			// metadata document is stored; a registered client's redirect
+			// host is its own claim.
+			if lerr := s.auth.Store.SetMCPClientLabel(ctx, req.ClientID, name, req.ClientHost, s.auth.Now()); lerr != nil {
+				log.Printf("oauth: client label: %v", lerr)
+			}
+		}
 		writeJSON(w, http.StatusOK, redirectResponse{RedirectURL: location})
 	}
 }

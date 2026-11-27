@@ -103,24 +103,17 @@ type EnrollOptions struct {
 	OnlyIfNone bool
 	// SessionID, when set, must be an active session of the user
 	// (ErrUnauthorized). PasswordDigest, when set, must be auth.Hash of the
-	// current password hash (ErrUnauthorized).
+	// current password hash (ErrUnauthorized). One of them must be set.
 	SessionID      string
 	PasswordDigest string
 	Now            int64
 }
 
 func checkEnrollment(ctx context.Context, q queries, u User, o EnrollOptions) error {
-	if o.SessionID != "" {
-		if _, err := q.activeSession(ctx, o.SessionID, u.ID, o.Now); errors.Is(err, sql.ErrNoRows) {
-			return ErrUnauthorized
-		} else if err != nil {
-			return err
-		}
+	if o.SessionID == "" && o.PasswordDigest == "" {
+		return errNoGuard
 	}
-	if o.PasswordDigest != "" && digest(u.PasswordHash) != o.PasswordDigest {
-		return ErrUnauthorized
-	}
-	return nil
+	return checkBinding(ctx, q, u, o.SessionID, o.PasswordDigest, o.Now)
 }
 
 // UserByID returns the user with id, enabled or not, or sql.ErrNoRows.
@@ -155,15 +148,9 @@ func mfaStatus(ctx context.Context, q queries, userID string) (MFAStatus, error)
 // are under the lock. A missing or disabled user fails with
 // ErrUnauthorized.
 func lockMFAUser(ctx context.Context, q queries, userID string) (User, MFAStatus, error) {
-	u, err := q.lockUser(ctx, userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return User{}, MFAStatus{}, ErrUnauthorized
-	}
+	u, err := lockEnabledUser(ctx, q, userID)
 	if err != nil {
 		return User{}, MFAStatus{}, err
-	}
-	if u.Disabled != 0 {
-		return User{}, MFAStatus{}, ErrUnauthorized
 	}
 	status, err := mfaStatus(ctx, q, userID)
 	if err != nil {

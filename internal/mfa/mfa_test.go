@@ -5,7 +5,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 )
 
 // rfcSecret is the SHA-1 secret of RFC 6238 appendix B, "12345678901234567890".
@@ -26,37 +25,6 @@ func TestRequired(t *testing.T) {
 		if got := Required(tc.policy, tc.owner); got != tc.want {
 			t.Errorf("Required(%q, %v) = %v", tc.policy, tc.owner, got)
 		}
-	}
-}
-
-func TestTOTPVectors(t *testing.T) {
-	// RFC 6238 appendix B, SHA-1: the 8-digit values, of which the last six
-	// digits are the 6-digit codes.
-	for _, tc := range []struct {
-		unix  int64
-		eight string
-	}{
-		{59, "94287082"},
-		{1111111109, "07081804"},
-		{1111111111, "14050471"},
-		{1234567890, "89005924"},
-		{2000000000, "69279037"},
-		{20000000000, "65353130"},
-	} {
-		step := TOTPStep(time.Unix(tc.unix, 0))
-		if got := totpCode([]byte("12345678901234567890"), step, 8); got != tc.eight {
-			t.Errorf("8 digits at %d: %s, want %s", tc.unix, got, tc.eight)
-		}
-		got, ok := TOTPCode(rfcSecret, step)
-		if !ok || got != tc.eight[2:] {
-			t.Errorf("6 digits at %d: %s %v, want %s", tc.unix, got, ok, tc.eight[2:])
-		}
-	}
-	if _, ok := TOTPCode("not base32!", 1); ok {
-		t.Error("an invalid secret produced a code")
-	}
-	if _, ok := TOTPCode(rfcSecret, -1); ok {
-		t.Error("a negative step produced a code")
 	}
 }
 
@@ -85,8 +53,8 @@ func TestNewTOTPSecret(t *testing.T) {
 	if a == b || len(a) != 32 || strings.ContainsAny(a, "=") || strings.ToUpper(a) != a {
 		t.Fatalf("secrets: %d characters, equal=%v", len(a), a == b)
 	}
-	if _, ok := TOTPCode(a, 1); !ok {
-		t.Fatal("a new secret produced no code")
+	if key, err := TOTPSecretBytes(a); err != nil || len(key) != totpSecretSize {
+		t.Fatalf("a new secret does not decode: %d bytes, %v", len(key), err)
 	}
 }
 

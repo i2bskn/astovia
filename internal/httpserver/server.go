@@ -62,6 +62,10 @@ type Server struct {
 	accountLimiter *loginLimiter
 	// emailLimiter limits the failed password sign-ins per email address.
 	emailLimiter *emailLimiter
+	// passwordSlots bounds the password derivations running at once.
+	passwordSlots *passwordSlots
+	// patterns are the patterns of the routes handler registered last.
+	patterns []string
 	// registerLimiter limits OAuth client registrations per peer like
 	// limiter, and clientLimiter the authorization requests that can make
 	// the server fetch a client metadata document, per user.
@@ -214,7 +218,7 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 	}
 	var login *oidcLogin
 	if c.OIDC != nil {
-		login = newOIDCLogin(c.OIDC, st.OIDCLogins())
+		login = newOIDCLogin(c.OIDC, st.OIDCLogins(now), now)
 	}
 	aiClient := ai.New()
 	if c.AIAllowPrivateEndpoints {
@@ -222,14 +226,14 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 		aiClient.Endpoints = ai.NewEndpointClient(true)
 	}
 	return &Server{cfg: c, auth: a, assets: assets, oidc: login, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(),
-		emailLimiter: newEmailLimiter(now), clientLimiter: newKeyLimiter(10, time.Minute), oidcLimiter: newLoginLimiter(),
+		emailLimiter: newEmailLimiter(now), passwordSlots: newPasswordSlots(), clientLimiter: newKeyLimiter(10, time.Minute), oidcLimiter: newLoginLimiter(),
 		sessions: sessions, mcp: newMCPOAuth(c, st, now), csp: contentSecurityPolicy(c), totp: totpVerifier,
 		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: aiClient, box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute), aiTryLimiter: newKeyLimiter(5, time.Minute), aiEndpointLimiter: newKeyLimiter(10, time.Minute),
 		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute), slackSearchLimiter: newKeyLimiter(5, time.Minute), slackConversationsLimiter: newKeyLimiter(10, time.Minute),
 		slackHistoryLimiter: newKeyLimiter(4, time.Minute), slackUsersLimiter: newKeyLimiter(30, time.Minute),
 		gmailMCPLimiter: newKeyLimiter(gmailMCPUnits, time.Minute), gmailTokens: &gmailTokenCache{},
 		mfaPeerLimiter: newLoginLimiter(), mfaLimiter: newKeyLimiter(5, 15*time.Minute), mfaPasswordLimiter: newKeyLimiter(10, 5*time.Minute),
-		webauthn: newWebAuthn(c.PublicURL, st)}
+		webauthn: newWebAuthn(c.PublicURL, st, now)}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -238,7 +242,8 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 // produce the JSON 405 response, and the "/" catch-all produces a JSON 404
 // instead of the ServeMux text responses.
 func (s *Server) handler() http.Handler {
-	mux := http.NewServeMux()
+	mux := &patternMux{ServeMux: http.NewServeMux()}
+	defer func() { s.patterns = mux.patterns }()
 	mux.Handle("/healthz", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})))
@@ -260,9 +265,9 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/auth/mfa/enroll/totp/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollTOTPBegin)))))
 	mux.Handle("/auth/mfa/enroll/totp/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollTOTPFinish)))))
 	mux.Handle("/auth/mfa/webauthn/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAWebAuthnBegin)))))
-	mux.Handle("/auth/mfa/webauthn/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAWebAuthnFinish)))))
+	mux.Handle("/auth/mfa/webauthn/finish", allow(http.MethodPost, s.passwordAuth(takeWebAuthnHandle(s.browserJSON(s.mfaPeerLimit(s.handleMFAWebAuthnFinish))))))
 	mux.Handle("/auth/mfa/enroll/webauthn/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollWebAuthnBegin)))))
-	mux.Handle("/auth/mfa/enroll/webauthn/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollWebAuthnFinish)))))
+	mux.Handle("/auth/mfa/enroll/webauthn/finish", allow(http.MethodPost, s.passwordAuth(takeWebAuthnHandle(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollWebAuthnFinish))))))
 	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))
 	// The invitation and password reset links are used before signing in.
 	// They share accountLimiter.
@@ -283,7 +288,7 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/api/v1/mfa/totp/finish", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleFinishTOTP))))))
 	mux.Handle("/api/v1/mfa/totp/delete", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleDeleteTOTP))))))
 	mux.Handle("/api/v1/mfa/webauthn/begin", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleBeginWebAuthn))))))
-	mux.Handle("/api/v1/mfa/webauthn/finish", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleFinishWebAuthn))))))
+	mux.Handle("/api/v1/mfa/webauthn/finish", allow(http.MethodPost, takeWebAuthnHandle(s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleFinishWebAuthn)))))))
 	mux.Handle("/api/v1/mfa/webauthn/{id}/delete", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleDeleteWebAuthn))))))
 	mux.Handle("/api/v1/mfa/recovery-codes", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleRecoveryCodes))))))
 	mux.Handle("/api/v1/users", allow(http.MethodGet, s.requireOwner(http.HandlerFunc(s.handleListUsers))))
@@ -386,6 +391,22 @@ func (s *Server) handler() http.Handler {
 	return secureHeaders(useHSTS(s.cfg), s.csp, clearLegacyCookie(s.checkOrigin(mux)))
 }
 
+// patternMux is a ServeMux that keeps the patterns it was given, so that a
+// test can check every route against the lists of the checks they need.
+type patternMux struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func (m *patternMux) Handle(pattern string, h http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.Handle(pattern, h)
+}
+
+func (m *patternMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+	m.Handle(pattern, http.HandlerFunc(h))
+}
+
 // contentSecurityPolicy returns the Content-Security-Policy of c. With
 // OIDC, the sign-in form is sent to this server and redirected to the
 // provider, so form-action allows the provider's origins as well.
@@ -410,10 +431,22 @@ func clearLegacyCookie(next http.Handler) http.Handler {
 	})
 }
 
-// isAPITokenRequest reports whether r presents an API token
-// ("Authorization: Bearer ast_...").
-func isAPITokenRequest(r *http.Request) bool {
+// hasAPITokenPrefix reports whether r presents what looks like an API token
+// ("Authorization: Bearer ast_..."), well-formed or not. requireUser
+// refuses such a request.
+func hasAPITokenPrefix(r *http.Request) bool {
 	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ast_")
+}
+
+// presentsAPIToken reports whether r presents a well-formed API token: one
+// Authorization header whose Bearer value has the form of auth.NewAPIToken.
+// Such a request carries its credential in the header, not in a cookie.
+func presentsAPIToken(r *http.Request) bool {
+	if len(r.Header.Values("Authorization")) != 1 {
+		return false
+	}
+	token, ok := bearerToken(r)
+	return ok && auth.IsAPIToken(token)
 }
 
 // stateChanging reports whether the method of r may change state.
@@ -434,14 +467,19 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 
 // checkOrigin requires the Origin of the public URL on every state-changing
 // request under /api/ and /auth/, which the browser session cookie
-// authenticates. A request without Origin is rejected as well. Requests with
-// an API token carry no cookie credential and are not checked. The OIDC
-// sign-in form checks its origin itself, after its rate limit.
+// authenticates. A request without Origin is rejected as well. Only a
+// request under /api/ that presents a well-formed API token is not checked:
+// requireUserOrAPIToken authenticates it by the token alone, and every other
+// /api/ route refuses it. The /auth/ routes take cookies only, so a token
+// there is checked like any request. The OIDC sign-in form checks its origin
+// itself, after its rate limit.
 func (s *Server) checkOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		browser := strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/auth/")
-		if browser && stateChanging(r) && !isAPITokenRequest(r) && p != oidcLoginPath && !s.sameOrigin(r) {
+		api := strings.HasPrefix(p, "/api/")
+		browser := api || strings.HasPrefix(p, "/auth/")
+		tokenOnly := api && presentsAPIToken(r)
+		if browser && stateChanging(r) && !tokenOnly && p != oidcLoginPath && !s.sameOrigin(r) {
 			fail(w, 403, "origin_rejected", "Request origin is not allowed.")
 			return
 		}
@@ -608,11 +646,12 @@ func (s *Server) sessionUser(w http.ResponseWriter, r *http.Request) (store.User
 
 // requireUser authenticates the browser session and stores the user and
 // session ID in the request context for userFrom and sessionFrom. A request
-// that presents an API token is rejected: these routes take the session
-// only, and checkOrigin does not check such a request.
+// that presents an API token, well-formed or not, is rejected with 401:
+// these routes take the session only, and checkOrigin does not check a
+// request with a well-formed token.
 func (s *Server) requireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isAPITokenRequest(r) {
+		if hasAPITokenPrefix(r) {
 			s.authError(w, r, store.ErrUnauthorized)
 			return
 		}
@@ -725,15 +764,22 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_request", "Credentials exceed the supported length.")
 		return
 	}
+	// A request refused for want of a derivation slot is not counted.
+	release, ok := s.passwordSlot(w, r)
+	if !ok {
+		return
+	}
 	// Counted before the password is derived, so that concurrent attempts
 	// cannot all pass the check while the derivations run.
 	key := emailLimitKey(in.Email)
 	if !s.emailLimiter.attempt(key) {
+		release()
 		w.Header().Set("Retry-After", "900")
 		fail(w, 429, "rate_limited", "Too many attempts. Try again later.")
 		return
 	}
 	v, err := s.verifyPassword(r.Context(), in.Email, in.Password)
+	release()
 	if err != nil {
 		s.authError(w, r, err)
 		return

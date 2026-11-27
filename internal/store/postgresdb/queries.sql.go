@@ -237,6 +237,17 @@ func (q *Queries) CountGmailAccounts(ctx context.Context, userID string) (int64,
 	return count, err
 }
 
+const countLiveOIDCLogins = `-- name: CountLiveOIDCLogins :one
+SELECT COUNT(*) FROM oidc_logins WHERE expires_at > $1
+`
+
+func (q *Queries) CountLiveOIDCLogins(ctx context.Context, now int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countLiveOIDCLogins, now)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countMFAWebAuthnCredentials = `-- name: CountMFAWebAuthnCredentials :one
 SELECT COUNT(*) FROM mfa_webauthn_credentials WHERE user_id = $1 AND version <> ''
 `
