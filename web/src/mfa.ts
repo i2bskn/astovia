@@ -19,10 +19,10 @@ export interface TOTPSetup {
 }
 
 // WebAuthnBegin starts a WebAuthn ceremony: the options in the JSON form of
-// the specification and the state to send back with the response.
+// the specification. The server keeps the ceremony behind a short-lived
+// HttpOnly cookie, which the browser sends back with the finish request.
 export interface WebAuthnBegin {
   options: Record<string, unknown>;
-  state: string;
 }
 
 export interface MFACredential {
@@ -53,9 +53,10 @@ export function readTOTPSetup(data: unknown): TOTPSetup {
 }
 
 export function readWebAuthnBegin(data: unknown): WebAuthnBegin {
-  if (!isRecord(data) || !isRecord(data.options) || typeof data.options.challenge !== 'string' || !data.options.challenge ||
-    typeof data.state !== 'string' || !data.state) throw new Error('Unexpected WebAuthn response');
-  return { options: data.options, state: data.state };
+  if (!isRecord(data) || !isRecord(data.options) || typeof data.options.challenge !== 'string' || !data.options.challenge) {
+    throw new Error('Unexpected WebAuthn response');
+  }
+  return { options: data.options };
 }
 
 function isCodes(value: unknown): value is string[] {
@@ -110,8 +111,8 @@ const json = { 'Content-Type': 'application/json' };
 
 // createMFAClient is the client of the account screen. Starting an
 // enrollment, removing a factor and reissuing the recovery codes take the
-// current password; the finish requests carry what the begin request
-// returned instead.
+// current password; the finish requests stand on the begin request instead
+// (the setup token, or the ceremony cookie of WebAuthn).
 export function createMFAClient(request: RequestFunction) {
   const post = (path: `/api/v1/${string}`, body: object) => request<unknown>(path, { method: 'POST', headers: json, body: JSON.stringify(body) });
   return {
@@ -132,8 +133,8 @@ export function createMFAClient(request: RequestFunction) {
     async beginWebAuthn(password: string): Promise<WebAuthnBegin> {
       return readWebAuthnBegin(await post('/api/v1/mfa/webauthn/begin', { password }));
     },
-    async finishWebAuthn(state: string, credential: object, name: string): Promise<{ credential: MFACredential; recoveryCodes: string[] | null }> {
-      const data = await post('/api/v1/mfa/webauthn/finish', { state, credential, name });
+    async finishWebAuthn(credential: object, name: string): Promise<{ credential: MFACredential; recoveryCodes: string[] | null }> {
+      const data = await post('/api/v1/mfa/webauthn/finish', { credential, name });
       if (!isRecord(data) || !isCredential(data.credential)) throw new Error('Unexpected WebAuthn response');
       return { credential: data.credential, recoveryCodes: readRecoveryCodes(data, true) };
     },

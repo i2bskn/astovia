@@ -19,7 +19,7 @@ test('a notification click reuses windows showing a screen', async () => {
     assert.equal(screenWindow(`https://astovia.test${path}`), true, path);
   }
   // The link screens are used signed out and are never reused.
-  for (const url of ['https://astovia.test/consent?request=x', 'https://astovia.test/invite', 'https://astovia.test/invite/', 'https://astovia.test/reset-password', 'https://astovia.test/tasks', 'https://astovia.test/candidatesx', 'https://other.test/tasks/abc']) {
+  for (const url of ['https://astovia.test/oauth/authorize?client_id=x', 'https://astovia.test/invite', 'https://astovia.test/invite/', 'https://astovia.test/reset-password', 'https://astovia.test/tasks', 'https://astovia.test/candidatesx', 'https://other.test/tasks/abc']) {
     assert.equal(screenWindow(url), false, url);
   }
 });

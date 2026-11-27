@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { request } from './auth';
 import { dateTime } from './format';
+import { maxPasswordBytes, passwordTooLong } from './links';
 import { createMFAClient, credentialName, maxCredentialNameLength, maxCredentials, mfaEnabled, mfaErrorMessage } from './mfa';
 import type { MFACredential, MFAStatus, TOTPSetup } from './mfa';
 import { RecoveryCodes, TOTPCodeField, TOTPSetupDetails } from './MFAStep';
@@ -39,8 +40,8 @@ function PasswordForm({ submitLabel, busyLabel, danger = false, note, children, 
       setError('現在のパスワードを入力してください。');
       return;
     }
-    if (new TextEncoder().encode(password).length > 72) {
-      setError('パスワードは72バイト以内で入力してください。');
+    if (passwordTooLong(password)) {
+      setError(`パスワードは${maxPasswordBytes}バイト以内で入力してください。`);
       return;
     }
     setBusy(true);
@@ -181,7 +182,7 @@ export default function SecuritySettings() {
     // The password was right; what fails from here is the key.
     try {
       const credential = await createCredential(begin.options);
-      const result = await client.finishWebAuthn(begin.state, credential, label);
+      const result = await client.finishWebAuthn(credential, label);
       changed(`パスキー・セキュリティキー「${result.credential.name}」を登録しました。`, result.recoveryCodes);
       return null;
     } catch (failure) {

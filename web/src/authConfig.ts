@@ -64,13 +64,13 @@ const failedMessage = 'ログインできませんでした。もう一度お試
 
 const signinMessages: Record<string, string> = {
   failed: failedMessage,
-  denied: 'ログインが許可されませんでした。別のアカウントで試すときは、ログインサービスからログアウトしてから、もう一度ログインしてください。',
-  not_allowed: 'このアカウントではログインできません。招待されていないか、別のアカウントで登録されています。この Astovia のオーナーに確認してください。',
+  not_allowed: 'このアカウントではログインできません。招待されていないか、別のアカウントで登録されているか、運用者の承認がまだです。この Astovia のオーナーに確認してください。',
   email_not_verified: 'メールアドレスが確認済みでないため、ログインできません。ログインサービスでメールアドレスを確認してから、もう一度ログインしてください。',
   unsupported_account: 'この Google アカウントではログインできません。@gmail.com のアドレスか Google Workspace のアカウントでログインしてください。',
   unavailable: 'ログインサービスに接続できませんでした。しばらくしてから、もう一度お試しください。',
   disabled: 'このアカウントは無効化されています。この Astovia のオーナーに連絡してください。',
   return_too_long: 'ログイン後に元の画面に戻れませんでした。もう一度ログインしてから、元の画面を開き直してください。',
+  rate_limited: 'ログインの試行回数が上限に達しました。1分ほど待ってから、もう一度お試しください。',
 };
 
 // signinReason returns the reason of the error screen's query, or null when

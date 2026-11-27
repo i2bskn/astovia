@@ -82,16 +82,18 @@ test('failures are classified by status and code', async () => {
   assert.equal(linkFailure('x'), 'network');
 });
 
-test('new passwords are 12-72 bytes and confirmed', async () => {
+test('new passwords are 12-1024 bytes and confirmed', async () => {
   const { passwordProblem } = await fresh();
   assert.equal(passwordProblem('correct-pass', 'correct-pass'), null);
   assert.equal(passwordProblem('x'.repeat(72), 'x'.repeat(72)), null);
+  assert.equal(passwordProblem('x'.repeat(1024), 'x'.repeat(1024)), null);
   assert.match(passwordProblem('', ''), /2回入力/);
   assert.match(passwordProblem('correct-pass', ''), /2回入力/);
-  assert.match(passwordProblem('short-pass', 'short-pass'), /12〜72バイト/);
-  assert.match(passwordProblem('x'.repeat(73), 'x'.repeat(73)), /12〜72バイト/);
-  // Bytes, not characters: 25 three-byte characters are 75 bytes.
-  assert.match(passwordProblem('あ'.repeat(25), 'あ'.repeat(25)), /12〜72バイト/);
+  assert.match(passwordProblem('short-pass', 'short-pass'), /12〜1024バイト/);
+  assert.match(passwordProblem('x'.repeat(1025), 'x'.repeat(1025)), /12〜1024バイト/);
+  // Bytes, not characters: 342 three-byte characters are 1026 bytes.
+  assert.equal(passwordProblem('あ'.repeat(341), 'あ'.repeat(341)), null);
+  assert.match(passwordProblem('あ'.repeat(342), 'あ'.repeat(342)), /12〜1024バイト/);
   assert.equal(passwordProblem('あ'.repeat(4), 'あ'.repeat(4)), null);
   assert.match(passwordProblem('correct-pass', 'correct-pasS'), /一致しません/);
 });

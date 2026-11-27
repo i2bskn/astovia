@@ -10,7 +10,7 @@ const setup = {
 const key = { id: 'key-1', name: 'Laptop', created_at: '2026-10-23T01:02:03Z', last_used_at: null };
 const status = { required: false, totp: { created_at: '2026-10-23T01:02:03Z' }, webauthn: [key], recovery_codes_remaining: 10, webauthn_available: true };
 const codes = Array.from({ length: 10 }, (_, i) => `abcd-efgh-jkmn-pqr${i}`);
-const begin = { options: { challenge: 'AQID', rpId: 'astovia.test' }, state: 'v1.state' };
+const begin = { options: { challenge: 'AQID', rpId: 'astovia.test' } };
 
 test('the setup of an authenticator app is checked', () => {
   assert.deepEqual(readTOTPSetup({ ...setup, extra: 1 }), setup);
@@ -23,7 +23,9 @@ test('the setup of an authenticator app is checked', () => {
 
 test('the start of a WebAuthn ceremony is checked', () => {
   assert.deepEqual(readWebAuthnBegin(begin), begin);
-  for (const bad of [null, {}, { options: begin.options }, { ...begin, state: '' }, { ...begin, options: [] }, { ...begin, options: {} }, { ...begin, options: { challenge: 1 } }, { state: 'v1.state', options: 'x' }]) {
+  // The ceremony travels in a cookie; nothing else of the answer is kept.
+  assert.deepEqual(readWebAuthnBegin({ ...begin, state: 'v1.state' }), begin);
+  for (const bad of [null, {}, { state: 'v1.state' }, { ...begin, options: [] }, { ...begin, options: {} }, { ...begin, options: { challenge: '' } }, { ...begin, options: { challenge: 1 } }, { options: 'x' }]) {
     assert.throws(() => readWebAuthnBegin(bad), /Unexpected WebAuthn response/, JSON.stringify(bad));
   }
 });
@@ -80,7 +82,7 @@ test('the client sends the requests and checks the responses', async () => {
   assert.deepEqual(await client.finishTOTP('v1.setup-token', '123 456'), codes);
   assert.equal(await client.deleteTOTP('pw'), undefined);
   assert.deepEqual(await client.beginWebAuthn('pw'), begin);
-  assert.deepEqual(await client.finishWebAuthn('v1.state', { id: 'AQID' }, 'Laptop'), { credential: key, recoveryCodes: null });
+  assert.deepEqual(await client.finishWebAuthn({ id: 'AQID' }, 'Laptop'), { credential: key, recoveryCodes: null });
   assert.equal(await client.deleteWebAuthn('a/b', 'pw'), undefined);
   assert.deepEqual(await client.reissueRecoveryCodes('pw'), codes);
   assert.deepEqual(sent, [
@@ -89,7 +91,7 @@ test('the client sends the requests and checks the responses', async () => {
     ['POST /api/v1/mfa/totp/finish', { setup_token: 'v1.setup-token', code: '123 456' }, 'application/json'],
     ['POST /api/v1/mfa/totp/delete', { password: 'pw' }, 'application/json'],
     ['POST /api/v1/mfa/webauthn/begin', { password: 'pw' }, 'application/json'],
-    ['POST /api/v1/mfa/webauthn/finish', { state: 'v1.state', credential: { id: 'AQID' }, name: 'Laptop' }, 'application/json'],
+    ['POST /api/v1/mfa/webauthn/finish', { credential: { id: 'AQID' }, name: 'Laptop' }, 'application/json'],
     ['POST /api/v1/mfa/webauthn/a%2Fb/delete', { password: 'pw' }, 'application/json'],
     ['POST /api/v1/mfa/recovery-codes', { password: 'pw' }, 'application/json'],
   ]);
@@ -101,9 +103,9 @@ test('the client rejects unexpected responses and passes errors through', async 
   assert.equal(await reply({ recovery_codes: null }).finishTOTP('t', '123456'), null);
   await assert.rejects(reply({}).finishTOTP('t', '123456'));
   await assert.rejects(reply({ recovery_codes: null }).reissueRecoveryCodes('pw'));
-  await assert.rejects(reply({ recovery_codes: codes }).finishWebAuthn('s', {}, 'n'), /Unexpected WebAuthn response/);
-  await assert.rejects(reply({ credential: key }).finishWebAuthn('s', {}, 'n'), /Unexpected recovery codes response/);
-  assert.deepEqual(await reply({ credential: key, recovery_codes: codes }).finishWebAuthn('s', {}, 'n'), { credential: key, recoveryCodes: codes });
+  await assert.rejects(reply({ recovery_codes: codes }).finishWebAuthn({}, 'n'), /Unexpected WebAuthn response/);
+  await assert.rejects(reply({ credential: key }).finishWebAuthn({}, 'n'), /Unexpected recovery codes response/);
+  assert.deepEqual(await reply({ credential: key, recovery_codes: codes }).finishWebAuthn({}, 'n'), { credential: key, recoveryCodes: codes });
   await assert.rejects(reply({ ...status, webauthn: [{}] }).status());
   await assert.rejects(reply({ secret: 'x' }).beginTOTP('pw'));
   await assert.rejects(reply({ state: 'x' }).beginWebAuthn('pw'));

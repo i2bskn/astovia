@@ -111,7 +111,7 @@ function Verify({ pending, leave }: { pending: PendingMFA; leave: () => void }) 
     try {
       const begin = readWebAuthnBegin(await auth.beginMFA('/auth/mfa/webauthn/begin'));
       const credential = await getCredential(begin.options);
-      await auth.verifyMFA('/auth/mfa/webauthn/finish', { state: begin.state, credential }, leave);
+      await auth.verifyMFA('/auth/mfa/webauthn/finish', { credential }, leave);
       return;
     } catch (failure) {
       if (isSuperseded(failure)) return;
@@ -246,7 +246,7 @@ function Enroll({ pending, onCodes }: { pending: PendingMFA; onCodes: (codes: st
     try {
       const begin = readWebAuthnBegin(await auth.beginMFA('/auth/mfa/enroll/webauthn/begin'));
       const credential = await createCredential(begin.options);
-      onCodes(await auth.enrollMFA('/auth/mfa/enroll/webauthn/finish', { state: begin.state, credential, name: label }));
+      onCodes(await auth.enrollMFA('/auth/mfa/enroll/webauthn/finish', { credential, name: label }));
       return;
     } catch (failure) {
       if (isSuperseded(failure)) return;
