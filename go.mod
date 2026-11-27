@@ -6,7 +6,7 @@ require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/anthropics/anthropic-sdk-go v1.80.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/i2bskn/authlume v0.0.0-20261127100838-28e117f3da60
+	github.com/i2bskn/authlume v0.0.0-20261127133233-c9d9fc6ac94b
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	golang.org/x/net v0.58.0
