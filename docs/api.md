@@ -10,10 +10,11 @@
 - 以前の版のリフレッシュ用Cookie`astovia_refresh`は、要求に付いていれば`/auth/`配下の応答で消します。
 - Cookieで認証する`/api/`と`/auth/`の要求のうち、`GET`・`HEAD`・`OPTIONS`以外は、`Origin`が`ASTOVIA_PUBLIC_URL`と完全に一致しなければ403`origin_rejected`です（`Origin`のない要求も拒否します）。APIトークン（`Authorization: Bearer ast_…`）の要求と、自分で確かめる`POST /auth/oidc/login`は対象外です。CORSのヘッダーは出しません。
 - パスワードは12〜1024バイト（UTF-8）で、Argon2idで保存します。`/auth/login`は接続元IPごとに1分で10回まで、加えて正規化したメールアドレスごとに15分で10回失敗すると、そのアドレスのログインを15分止めます（429、`Retry-After: 900`）。存在しないアドレスも同じように数えます。メールアドレスを知っている人は、そのアドレスのログインを15分止められます（受け入れているリスクです。急ぐ場合はプロセスの再起動でも戻ります）。回数はプロセスのメモリに持ち、複数のインスタンスでは共有しません。
+- パスワードの照合とハッシュの計算（ログイン、招待の受諾・再設定の完了、ログイン後のパスワードの確認）は、プロセスごとにCPU数の2倍までしか同時に行いません。空きを2秒待っても空かなければ503`unavailable`（`Retry-After: 1`）で、ログインの失敗にも試行の回数にも数えません。
 
 ## OAuth
 
-Astoviaは`/mcp`のための認可サーバー（authlumeの`mcpoauth`）を内蔵しています。`ASTOVIA_PUBLIC_URL`が`https`のときだけ有効です。`http`（ローカル開発）では、メタデータ、`/oauth/*`、同意画面`/oauth/authorize`、`/api/v1/oauth/authorize`はJSONの404になり、`/mcp`はAPIトークンだけで使えます。OAuth 2.1の認可コード方式（PKCE S256必須）とトークンの失効（RFC 7009）に対応し、OpenID Connect、イントロスペクション、JWT形式のトークンは提供しません。
+Astoviaは`/mcp`のための認可サーバー（authlumeの`mcpoauth`）を内蔵しています。`ASTOVIA_PUBLIC_URL`が`https`のときだけ有効です。`http`（ローカル開発）では、メタデータ、`/oauth/*`、同意画面`/oauth/authorize`はJSONの404になり、`/mcp`はAPIトークンだけで使えます。`/api/v1/oauth/authorize`は他の`/api/v1`と同じくログインと`Origin`を先に確かめるため、ログインしていなければ401、別のオリジンからの`POST`は403`origin_rejected`で、ログインした同じオリジンの要求だけがJSONの404になります。OAuth 2.1の認可コード方式（PKCE S256必須）とトークンの失効（RFC 7009）に対応し、OpenID Connect、イントロスペクション、JWT形式のトークンは提供しません。
 
 | エンドポイント | 内容 |
 | --- | --- |
@@ -50,7 +51,7 @@ Astoviaは`/mcp`のための認可サーバー（authlumeの`mcpoauth`）を内�
 | `GET /admin/*` | 以前の版のURL。対応する新しいURLへ308でリダイレクト（不明なものは`/`へ）。`/admin/oauth/authorize`は`/`へ。`/admin/sw.js`は古い登録の更新用に`/sw.js`と同じ内容を返す |
 | `GET /healthz` | プロセスの稼働確認のみ。非公開情報は返さない |
 | `POST /auth/login` | 本文は`{ "email": "alice@example.com", "password": "…" }`（8KiB以内。メールアドレスは256バイト、パスワードは1024バイトを超えると400）。成功すると`{user}`とセッションのCookieを返す。第2要素が要るユーザーにはセッションを発行せず、200`{mfa: …}`を返す（[二段階認証](#二段階認証)）。資格情報の誤り（未登録・無効化・パスワードのないユーザーを含む）は401`unauthorized`、試行回数の上限は429（[ログインセッション](#ログインセッション)） |
-| `POST /auth/oidc/login` | OIDCの構成だけ。ログイン画面のフォーム（`application/x-www-form-urlencoded`、16KiB以内）で、項目は任意の`return_to`（ログイン後に戻る画面のパスとクエリ）だけ。接続元IPごとに1分で10回まで（超えると`/signin-error?reason=rate_limited`へ303）、`Origin`が違えば403。`return_to`が8300バイトを超えれば`/signin-error?reason=return_too_long`へ、画面のパスでなければ`/`に置き換え、IdPの認可エンドポイントへ303。IdPに届かなければ`/signin-error?reason=unavailable`へ303。`GET`は405 |
+| `POST /auth/oidc/login` | OIDCの構成だけ。ログイン画面のフォーム（`application/x-www-form-urlencoded`、16KiB以内）で、項目は任意の`return_to`（ログイン後に戻る画面のパスとクエリ）だけ。接続元IPごとに1分で10回まで（超えると`/signin-error?reason=rate_limited`へ303）、`Origin`が違えば403。`return_to`が8300バイトを超えるか、MCPの同意画面（`/oauth/authorize`）以外で1024バイトを超えれば`/signin-error?reason=return_too_long`へ、画面のパスでなければ`/`に置き換え、IdPの認可エンドポイントへ303。IdPに届かないとき、または途中のログインが全体で10000件あるときは`/signin-error?reason=unavailable`へ303（途中のログインは10分で期限が切れます）。`GET`は405 |
 | `GET /auth/oidc/callback` | OIDCの構成だけ。IdPからの戻り先。成功すると`return_to`の画面へ303。失敗は`/signin-error?reason=…`へ303（`failed`・`unavailable`・`disabled`・`not_allowed`・`email_not_verified`・`unsupported_account`）。IdPでの拒否も`failed`になる |
 | `POST /auth/logout` | セッションの失効とCookieの削除。本文は`{}`。204 |
 | `POST /auth/invitations/inspect` | 本文`{token}`で招待の`{email, role, expires_at}`を返す。無効・期限切れ・受諾済み・取り消し済み・存在しない招待は区別せず404`invitation_invalid` |
@@ -59,11 +60,11 @@ Astoviaは`/mcp`のための認可サーバー（authlumeの`mcpoauth`）を内�
 | `POST /auth/password-resets/complete` | 本文`{token, password}`でパスワードを再設定し、Loginと同じ応答とCookieを返す。既存のセッションの扱い・503・`{mfa: …}`の応答はacceptと同じ。二段階認証の設定は残る |
 | `POST /auth/mfa/totp` | 本文`{mfa_token, code}`。認証アプリのコードを確かめ、Loginと同じ応答とCookieを返す |
 | `POST /auth/mfa/recovery` | 本文`{mfa_token, code}`。リカバリーコードを使用済みにして、Loginと同じ応答とCookieを返す |
-| `POST /auth/mfa/webauthn/begin` | 本文`{mfa_token}`。パスキー・セキュリティキーでの確認を始め、200`{options}`を返し、途中の状態のハンドルをCookie`__Host-astovia_webauthn`（5分）に入れる。`options`は`PublicKeyCredentialRequestOptions`のJSON形式 |
+| `POST /auth/mfa/webauthn/begin` | 本文`{mfa_token}`。パスキー・セキュリティキーでの確認を始め、200`{options}`を返し、途中の状態のハンドルをCookie`__Host-astovia_webauthn`（5分）に入れる。`options`は`{publicKey}`で、`publicKey`は`PublicKeyCredentialRequestOptions`のJSON形式 |
 | `POST /auth/mfa/webauthn/finish` | 本文`{mfa_token, credential}`（32KiB以内）。署名を確かめ、Loginと同じ応答とCookieを返す。同じ応答の再送は401`mfa_code_invalid` |
 | `POST /auth/mfa/enroll/totp/begin` | 本文`{mfa_token}`。初回登録の認証アプリの秘密を作り、200`{secret, otpauth_url, setup_token}`を返す |
 | `POST /auth/mfa/enroll/totp/finish` | 本文`{mfa_token, setup_token, code}`。認証アプリを登録し、Loginの応答に`recovery_codes`（10個）を足したものとCookieを返す |
-| `POST /auth/mfa/enroll/webauthn/begin` | 本文`{mfa_token}`。初回登録のパスキー・セキュリティキーの登録を始め、200`{options}`を返し、途中の状態のハンドルをCookie`__Host-astovia_webauthn`（5分）に入れる。`options`は`PublicKeyCredentialCreationOptions`のJSON形式 |
+| `POST /auth/mfa/enroll/webauthn/begin` | 本文`{mfa_token}`。初回登録のパスキー・セキュリティキーの登録を始め、200`{options}`を返し、途中の状態のハンドルをCookie`__Host-astovia_webauthn`（5分）に入れる。`options`は`{publicKey}`で、`publicKey`は`PublicKeyCredentialCreationOptions`のJSON形式 |
 | `POST /auth/mfa/enroll/webauthn/finish` | 本文`{mfa_token, credential, name}`（32KiB以内）。登録し、Loginの応答に`recovery_codes`（10個）を足したものとCookieを返す |
 | `GET /api/v1/me` | 本人の`{id, email, role, password_reset}`。ログインセッションが必要で、セッションの無操作の期限を延ばす。Web画面は読み込み時にこれでログイン済みかを確かめる |
 | `GET /api/v1/users` | ユーザーの一覧`{users: [{id, email, role, disabled, created_at, mfa_enabled}]}`（作成日時の古い順、1000件まで）。`mfa_enabled`は二段階認証の方法（認証アプリかパスキー・セキュリティキー）が1つ以上あるか。オーナーのログインセッションが必要（メンバーは403`forbidden`、APIトークンは401。以下のユーザー管理APIも同じ） |
@@ -88,7 +89,7 @@ Astoviaは`/mcp`のための認可サーバー（authlumeの`mcpoauth`）を内�
 | `POST /api/v1/api-tokens` | APIトークンを発行し201を返す。本文は`{name}`（4KiB以内）。応答の`token`は一度だけ返す。50件に達していると409。ログインセッションが必要 |
 | `DELETE /api/v1/api-tokens/{id}` | APIトークンを削除し204を返す。他のユーザーのトークンと存在しないトークンは404。ログインセッションが必要 |
 | `GET /api/v1/oauth/authorize?<認可要求のクエリ>` | 同意画面の表示内容。有効な要求は200`{status: "ok", client_name, client_id, client_host, redirect_host, redirect_loopback, scopes, user_id}`（`client_host`はCIMDなら確認済みのホスト、DCRなら`null`。`user_id`はログイン中のユーザー）。クライアントへ返すべき誤り（`mcp`を含まない要求など）は200`{status: "error", error, redirect_url, redirect_host}`で、画面は利用者が押したときだけ`redirect_url`へ移る。戻り先も確かめられない要求は400（`invalid_request`・`unknown_client`・`invalid_client`）、CIMDを取得できなければ503`client_metadata_unavailable`、取得の回数の上限は429`rate_limited`。ログインセッションが必要 |
-| `POST /api/v1/oauth/authorize` | 本文`{query, decision, user_id}`（`decision`は`approve`か`deny`、16KiB以内）で要求をもう一度確かめて許可・拒否し、移動先`{redirect_url}`を返す。`user_id`がログイン中のユーザーと違えば409`user_changed`（同意画面を開いた後に別のユーザーでログインし直した場合。画面を読み込み直す）。エラーはGETと同じ。ログインセッションが必要 |
+| `POST /api/v1/oauth/authorize` | 本文`{query, decision, user_id, client_name, client_host}`（`decision`は`approve`か`deny`、16KiB以内）で要求をもう一度確かめて許可・拒否し、移動先`{redirect_url}`を返す。`user_id`・`client_name`・`client_host`は同意画面に表示したユーザーのIDとクライアントの名前・ホスト（GETの`client_name`・`client_host`をそのまま返す。ホストがなければ`null`）。`user_id`がログイン中のユーザーと違えば、クライアントを確かめる前に409`user_changed`（同意画面を開いた後に別のユーザーでログインし直した場合）。確かめ直したクライアントの名前かホストが表示したものと違えば409`client_changed`（メタデータの文書が変わった場合）。どちらも画面を読み込み直す。接続一覧のクライアント名は、許可できたときだけ保存する。エラーはGETと同じ。ログインセッションが必要 |
 | `GET /api/v1/oauth/connections` | 接続中のAIクライアントの一覧`{items: [{id, client_name, client_host, scopes, created_at, last_used_at, expires_at}]}`。ログインセッションが必要 |
 | `DELETE /api/v1/oauth/connections/{id}` | 接続を削除し204を返す。そのトークンは即座に使えなくなる。他のユーザーの接続と存在しない接続は404。ログインセッションが必要 |
 | `GET /api/v1/integrations/github` | GitHub連携の状態。未接続は`{connected: false}`、接続済みは`{connected, login, token_last4, scopes, immediate_notify, status, last_error, last_synced_at, created_at}`。トークン本体は返さない。ログインセッションが必要 |
@@ -132,7 +133,7 @@ Astoviaは`/mcp`のための認可サーバー（authlumeの`mcpoauth`）を内�
 | `POST /api/v1/notification-channels/test` | 本文`{channel}`（`webpush`・`slack`・`email`）の送り先にテスト通知を送信待ちに入れ202`{queued: true}`を返す。メールを設定していないサーバーで`email`は409`mail_unavailable`、SlackのWebhookがない・止まっていると409`no_destination`、`webpush`で端末がなければ409`no_subscription`。`POST /api/v1/push/test`と合わせて1分に4回目以降は429。ログインセッションが必要 |
 | `GET /.well-known/oauth-protected-resource/mcp` | MCPの保護リソースメタデータ（RFC 9728）。`/.well-known/oauth-protected-resource`も同じ内容 |
 | `GET /.well-known/oauth-authorization-server` | 認可サーバーのメタデータ（RFC 8414） |
-| `POST /oauth/register` | クライアント登録（RFC 7591）。`application/json`、64KiB以内。成功は201 |
+| `POST /oauth/register` | クライアント登録（RFC 7591）。`application/json`、16KiB以内。成功は201 |
 | `GET /oauth/authorize` | 認可要求。同意画面（`index.html`）を返す |
 | `POST /oauth/token` | トークン発行（`authorization_code`／`refresh_token`）。`application/x-www-form-urlencoded`、16KiB以内 |
 | `POST /oauth/revoke` | トークンの失効（RFC 7009）。`application/x-www-form-urlencoded`、16KiB以内 |
@@ -168,15 +169,15 @@ Login（と第2要素の確認・招待の受諾・パスワード再設定の�
 どれも`POST`で、本文は`application/json`の4KiB以内（WebAuthnのfinishは32KiB以内）です。`Origin`が`ASTOVIA_PUBLIC_URL`と違えば403、`Content-Type`が違えば415です。
 
 - `/auth/mfa/enroll/*`は、方法が1つもなく必須の対象であるユーザーだけが使えます。方法があれば409`mfa_already_enrolled`、必須でなければ403`mfa_not_required`です。
-- WebAuthnの`options`は仕様のJSON形式で、バイナリ（`challenge`・`user.id`・クレデンシャルのID）はパディングなしのbase64urlです。`credential`には`PublicKeyCredential.toJSON()`と同じ形を送ります。途中の状態はサーバーに保存し、そのハンドルをCookie`__Host-astovia_webauthn`（`Secure`・`HttpOnly`・`SameSite=Strict`・`Path=/`）に入れます。期限は5分で、finishで成否にかかわらず1回で使い切ります。`name`は前後の空白を除いて1〜64文字です。
+- WebAuthnの`options`は`navigator.credentials.create`・`get`の引数の形`{publicKey: …}`で、`publicKey`の中は仕様のJSON形式です。バイナリ（`challenge`・`user.id`・クレデンシャルのID）はパディングなしのbase64urlです。`credential`には`PublicKeyCredential.toJSON()`と同じ形を送ります。途中の状態はサーバーに保存し、そのハンドルをCookie`__Host-astovia_webauthn`（`Secure`・`HttpOnly`・`SameSite=Strict`・`Path=/`）に入れます。期限は5分で、finishで成否にかかわらず1回で使い切ります。`name`は前後の空白を除いて1〜64文字です。
 - `setup_token`の期限は30分です。登録の確認に使ったコードは、直後のログインには使えません。
 - リカバリーコードは`xxxx-xxxx-xxxx-xxxx`の形で、1個につき1回だけ使えます。大文字・空白・ハイフンの有無は区別しません。DBにはハッシュだけを保存します。
 
 | エラー | 状況 |
 | --- | --- |
 | 401`mfa_token_invalid` | MFAトークンが不正・期限切れ、またはユーザーのパスワードか状態が変わった。ログインからやり直す |
-| 401`mfa_code_invalid` | コード・署名が正しくない、その方法が登録されていない、使用済みのコード、WebAuthnの応答の再送 |
-| 400`mfa_state_invalid` | `setup_token`・WebAuthnのハンドルのCookieがない・不正・期限切れ・別のユーザーのもの |
+| 401`mfa_code_invalid` | コード・署名が正しくない、その方法が登録されていない、使用済みのコード、WebAuthnの応答の再送、WebAuthnの途中の状態が期限切れ・使用済み・別のユーザーのもの |
+| 400`mfa_state_invalid` | `setup_token`がない・不正・期限切れ・別のユーザーのもの、WebAuthnのハンドルのCookieがない（長すぎるものも含む） |
 | 409`mfa_limit`、409`mfa_credential_exists` | パスキー・セキュリティキーが10個ある、同じものが登録済み |
 | 429`rate_limited` | 試行回数の上限。`Retry-After`付き |
 | 503`signin_unavailable` | 確認か登録は済んだが、セッションの発行だけに失敗した。使ったコードは戻らず、登録は残る。ログインからやり直す（登録の場合、リカバリーコードはログイン後に再発行する） |
@@ -191,8 +192,8 @@ Login（と第2要素の確認・招待の受諾・パスワード再設定の�
 | エラー | 状況 |
 | --- | --- |
 | 400`password_invalid` | 現在のパスワードが違う |
-| 400`mfa_code_invalid` | 認証アプリのコード・WebAuthnの応答が正しくない |
-| 400`mfa_state_invalid` | `setup_token`・WebAuthnのハンドルのCookieがない・不正・期限切れ・別のユーザーのもの |
+| 400`mfa_code_invalid` | 認証アプリのコード・WebAuthnの応答が正しくない、WebAuthnの途中の状態が期限切れ・使用済み・別のユーザーのもの |
+| 400`mfa_state_invalid` | `setup_token`がない・不正・期限切れ・別のユーザーのもの、WebAuthnのハンドルのCookieがない（長すぎるものも含む） |
 | 400`webauthn_unavailable` | このサーバーではパスキー・セキュリティキーを使えない（削除はできる） |
 | 409`mfa_required` | 必須の対象のユーザーが最後の方法を削除しようとした |
 | 409`mfa_limit`、409`mfa_credential_exists`、409`mfa_not_enrolled` | 10個ある、同じものが登録済み、方法がないのにコードを再発行しようとした |

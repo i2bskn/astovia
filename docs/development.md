@@ -14,9 +14,9 @@ Docker ComposeとGNU Make、OpenSSLが必要です。この開発方法ではホ
 make env
 ```
 
-`.env.example`から`.env`を作成し、`ASTOVIA_JWT_SECRET`に`openssl rand -base64 32`で生成した署名鍵を、`LOCAL_UID`と`LOCAL_GID`にホストの`id -u`／`id -g`を設定します。ファイルのパーミッションは600です。`.env`が既にある場合は「.env already exists; nothing changed」と表示し、内容を一切変更しません。既存の`.env`を更新する場合は、`.env.example`を参考に手で追記・変更してください。
+`.env.example`から`.env`を作成し、`ASTOVIA_JWT_SECRET`に`openssl rand -base64 32`で生成した鍵を、`LOCAL_UID`と`LOCAL_GID`にホストの`id -u`／`id -g`を設定します。ファイルのパーミッションは600です。`.env`が既にある場合は「.env already exists; nothing changed」と表示し、内容を一切変更しません。既存の`.env`を更新する場合は、`.env.example`を参考に手で追記・変更してください。
 
-署名鍵は32バイト以上の乱数を標準のパディング付きBase64で表したものです。再起動時も同じ値を使用し、Gitへ追加しないでください。Docker Composeはシェルの環境変数またはリポジトリルートの`.env`から`ASTOVIA_JWT_SECRET`、`LOCAL_UID`、`LOCAL_GID`を展開します。`LOCAL_UID`と`LOCAL_GID`をホストのユーザーに合わせることで、コンテナから`data/`配下のDBを更新できます。省略時は`1000:1000`です。
+名前に`JWT`が残っていますが、この鍵はもうトークンの署名には使いません。DBに保存する秘密（連携のトークン、AIの資格情報、Slackの通知用Webhook、Web Pushの鍵、認証アプリの秘密）と、二段階認証の途中の状態を暗号化するための鍵です。32バイト以上の乱数を標準のパディング付きBase64で表したものです。値を変えると保存済みの秘密を復号できなくなるため、再起動時も同じ値を使用し、Gitへ追加しないでください。Docker Composeはシェルの環境変数またはリポジトリルートの`.env`から`ASTOVIA_JWT_SECRET`、`LOCAL_UID`、`LOCAL_GID`を展開します。`LOCAL_UID`と`LOCAL_GID`をホストのユーザーに合わせることで、コンテナから`data/`配下のDBを更新できます。省略時は`1000:1000`です。
 
 ### 2. スキーマを適用する
 
@@ -79,7 +79,7 @@ CLIを実行しにくい構成では、更新する前（v0.1.0のうち）に�
 
 issuerがGoogle（`https://accounts.google.com`）の場合、`@gmail.com`以外のアドレスの初回ログインにはGoogle Workspaceの`hd`クレームが必要です。v0.1.0でログインしていた「独自ドメインのアドレスで作った個人のGoogleアカウント」は、更新後は紐付けられません。回避する設定はありません。Google以外のissuerでは`ASTOVIA_OIDC_REQUIRE_GOOGLE_HD=true`で同じ確認をします。issuerがGoogleのときに`false`を設定すると起動エラーになります。
 
-ユーザー操作は`docker compose run --rm app go run ./cmd/astovia users ...`で、イメージ内の古いバイナリではなく現在のソースから実行します。そのため、CLIのコードを変更してもイメージの再ビルドは不要です。ユーザー操作CLIには署名鍵は不要ですが、Airから起動する`serve`では必須です。
+ユーザー操作は`docker compose run --rm app go run ./cmd/astovia users ...`で、イメージ内の古いバイナリではなく現在のソースから実行します。そのため、CLIのコードを変更してもイメージの再ビルドは不要です。ユーザー操作CLIにはこの鍵は不要ですが、Airから起動する`serve`では必須です。
 
 ### 4. 起動・確認・停止する
 
@@ -125,7 +125,7 @@ make check
 
 `ASTOVIA_SCHEMA_DEV_URL`でPostgreSQLの開発用URLを変更する場合も、**使い捨てDBだけ**を指定してください。Atlasはスキーマの正規化中にそのDBを変更する場合があります。このURLはAtlasコンテナ内で解決するため、`compose.test.yaml`のネットワークから到達できるURL（サービス名など）だけを指定できます。`docker://`形式や`localhost`は使用できません。指定した場合、`atlas-dev-postgres`は起動しません。
 
-`make check`はUIのビルド・型チェック・認証フローテスト、SQLite／PostgreSQLのGo競合検出付き契約テスト、`go vet`を実行します。個別に実行する場合、`make test-web`はUIの認証フローテストとビルド、`make test-go`はGoのテストだけを実行します。`make test-go`は`web/dist`が存在しないかソースより古い場合だけUIをビルドします。PostgreSQLテストは個別の一時スキーマを作成し、テスト終了後に削除します。Compose外で`ASTOVIA_TEST_POSTGRES`を指定する場合も、専用テストDBだけを使用してください。未指定の場合、PostgreSQLテストはスキップします。
+`make check`はUIのビルド・型チェック・認証フローテスト、SQLite／PostgreSQLのGo競合検出付き契約テスト、authlume導入前のスキーマのSQLite／PostgreSQLのDBへ今のスキーマを適用できるかの確認（`make test-schema`）、`go vet`を実行します。個別に実行する場合、`make test-web`はUIの認証フローテストとビルド、`make test-go`はGoのテストだけを実行します。`make test-go`は`web/dist`が存在しないかソースより古い場合だけUIをビルドします。PostgreSQLテストは個別の一時スキーマを作成し、テスト終了後に削除します。Compose外で`ASTOVIA_TEST_POSTGRES`を指定する場合も、専用テストDBだけを使用してください。未指定の場合、PostgreSQLテストはスキップします。
 
 検証用`compose.test.yaml`のPostgreSQLはtmpfsを使用し、ホストのループバックアドレスの55439番ポートに公開します。本番データや既存のDBは使用しません。ローカルアプリ用の永続SQLiteとは別です。検証後は次で停止できます。
 
@@ -138,8 +138,12 @@ docker compose -f compose.test.yaml stop postgres
 メンテナー向けの手順です。
 
 1. `make check`が通ることを確認します。
-2. タグを作成します: `git tag vX.Y.Z`
-3. タグをpushします: `git push origin vX.Y.Z`
+2. OIDCの構成を、実際のIdPで確認します。テストは偽のIdPを使うため、ここだけは手で確かめます。
+   - 実際のIdP（Googleなど）で、サインインのボタンからログインし、コールバックで画面に戻ることを確認します。
+   - Cloudflare Access for SaaSを使う構成では、Accessから上流のIdPへ転送される経路でもログインできることを確認します。
+   - どちらでも、ブラウザーの開発者ツールのコンソールにCSPの`form-action`の違反が出ず、フォームの送信の後のリダイレクトがすべて通ることを確認します。違反が出たら、転送先のオリジンを`ASTOVIA_OIDC_FORM_ACTION_ORIGINS`に並べます。
+3. タグを作成します: `git tag vX.Y.Z`
+4. タグをpushします: `git push origin vX.Y.Z`
 
 タグのpushで`release`ワークフローが動き、`ghcr.io/i2bskn/astovia-migrate`、`ghcr.io/i2bskn/astovia`の順に2つのイメージ（linux/amd64・linux/arm64）を公開します。公開の前にワークフローでも`make check`を実行し、失敗したら何も公開しません。
 
