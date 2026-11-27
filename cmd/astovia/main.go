@@ -68,10 +68,7 @@ func run(args []string) error {
 	if e != nil {
 		return errors.New("embedded frontend is unavailable; build web first")
 	}
-	a, e := auth.New(s, c.Secret, c.PublicURL)
-	if e != nil {
-		return errors.New("cannot initialize authentication")
-	}
+	a := auth.New(s)
 	// One token manager is shared by the HTTP server and the
 	// synchronizations, so that the refreshes of a user's ChatGPT tokens are
 	// serialized in the process.
@@ -152,6 +149,11 @@ func startWorkers(ctx context.Context, s *store.Store, c config.Config, a *auth.
 		{"notification engine", time.Minute, engine.RunOnce},
 		{"notification dispatcher", 5 * time.Second, dispatcher.RunOnce},
 		{"notification cleanup", time.Hour, dispatcher.Cleanup},
+		{"auth cleanup", time.Hour, func(ctx context.Context) {
+			if err := s.DeleteExpiredAuth(ctx, now()); err != nil {
+				log.Printf("auth cleanup: %v", err)
+			}
+		}},
 		{"candidate sweep", 5 * time.Minute, sweeper.RunOnce},
 	} {
 		wg.Add(1)
@@ -176,22 +178,22 @@ func waitWorkers(wg *sync.WaitGroup, deadline time.Time) {
 		log.Print("background work did not stop in time")
 	}
 }
+
 // unlinkHelp is printed with the flags of users unlink.
 const unlinkHelp = `Usage: astovia users unlink (--email ADDRESS | --all)
 
 Clears the OpenID Connect identity (iss and sub) of one user or, with --all,
-of every user. Use it when the identities changed at the provider: the issuer
+of every linked user, and revokes their sessions, API tokens and MCP
+connections. Use it when the identities changed at the provider: the issuer
 (ASTOVIA_OIDC_ISSUER) changed, the OIDC client was created again at a provider
 whose sub depends on the client ID, or an account was created again.
 
-  - After unlinking, the next OIDC sign-in whose verified email address equals
-    the email address of the user links that user again.
+  - Unlinking gives no approval to link again. Before the user signs in with
+    OpenID Connect again, run "astovia users approve-oidc --email ADDRESS":
+    the next OIDC sign-in with that verified email address within 7 days then
+    links the user.
   - A user whose email address changed at the provider cannot be linked again:
     Astovia cannot change the email address of a user.
-  - If another person now uses the former email address at the provider, that
-    person is linked to the user. Disable such users before unlinking.
-  - Sessions, API tokens and MCP connections are kept. unlink does not stop
-    anyone; use "astovia users disable" for that.
 
 `
 
@@ -210,23 +212,33 @@ screens.
     knew the password of a user enrolled a second factor of their own, recover
     the account with both "astovia users reset-password" and
     "astovia users reset-mfa".
-  - Sessions, API tokens and MCP connections are kept. reset-mfa does not stop
-    anyone; use "astovia users disable" for that.
+  - Sessions, API tokens and MCP connections are revoked.
+
+`
+
+// approveOIDCHelp is printed with the flags of users approve-oidc.
+const approveOIDCHelp = `Usage: astovia users approve-oidc --email ADDRESS
+
+Approves linking a user that is not linked to an OpenID Connect identity yet
+to the first identity that signs in with its verified email address, for 7
+days. Without an approval, a user is never linked because the email addresses
+are equal. Use it after "astovia users unlink", when an approval expired, and
+for users that signed in with a password before.
 
 `
 
 func account(ctx context.Context, s *store.Store, args []string, in io.Reader) error {
 	if len(args) < 1 {
-		return errors.New("users command requires create, reset-password, disable, enable, role, unlink, or reset-mfa")
+		return errors.New("users command requires create, reset-password, disable, enable, role, unlink, approve-oidc, or reset-mfa")
 	}
 	op := args[0]
-	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" && op != "role" && op != "unlink" && op != "reset-mfa" {
+	if op != "create" && op != "reset-password" && op != "disable" && op != "enable" && op != "role" && op != "unlink" && op != "approve-oidc" && op != "reset-mfa" {
 		return errors.New("unknown users command")
 	}
 	f := flag.NewFlagSet(op, flag.ContinueOnError)
 	email := f.String("email", "", "email address")
 	stdin := f.Bool("password-stdin", false, "read password from stdin")
-	noPassword := f.Bool("no-password", false, "create a user without a password, who signs in only with OpenID Connect (create only)")
+	noPassword := f.Bool("no-password", false, "create a user without a password, who signs in only with OpenID Connect, and approve linking it for 7 days (create only)")
 	role := f.String("role", store.RoleOwner, "role of the new user, or the new role (owner or member)")
 	all := f.Bool("all", false, "unlink every user (unlink only)")
 	if op == "unlink" {
@@ -238,6 +250,12 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 	if op == "reset-mfa" {
 		f.Usage = func() {
 			fmt.Fprint(f.Output(), resetMFAHelp)
+			f.PrintDefaults()
+		}
+	}
+	if op == "approve-oidc" {
+		f.Usage = func() {
+			fmt.Fprint(f.Output(), approveOIDCHelp)
 			f.PrintDefaults()
 		}
 	}
@@ -275,11 +293,10 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		if *all == emailSet {
 			return errors.New("unlink requires exactly one of --email and --all")
 		}
-		// Unlinking keeps the sessions and tokens: it is not a way to stop a
-		// user.
+		// Unlinking revokes the sessions and tokens of the users it unlinks.
 		var e error
 		if *all {
-			e = s.UnlinkAllOIDC(ctx)
+			_, e = s.UnlinkAllOIDC(ctx)
 		} else {
 			var u string
 			if u, e = auth.Email(*email); e != nil {
@@ -301,7 +318,7 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		return e
 	}
 	hash := ""
-	if op == "disable" || op == "enable" || op == "role" || op == "reset-mfa" {
+	if op == "disable" || op == "enable" || op == "role" || op == "approve-oidc" || op == "reset-mfa" {
 		if *stdin {
 			return errors.New(op + " does not accept --password-stdin")
 		}
@@ -328,12 +345,28 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 		if e != nil {
 			return e
 		}
-		e = s.CreateUser(ctx, store.User{ID: id, Email: u, PasswordHash: hash, CreatedAt: time.Now().Unix(), Role: *role})
+		now := time.Now()
+		e = s.CreateUser(ctx, store.User{ID: id, Email: u, PasswordHash: hash, CreatedAt: now.Unix(), Role: *role})
 		if e != nil {
 			if errors.Is(e, store.ErrConflict) {
 				return e
 			}
 			return errors.New("could not create user")
+		}
+		// The first OIDC sign-in with the address links the user only
+		// while the operator's approval lasts.
+		if *noPassword {
+			if e = s.ApproveOIDCLink(ctx, u, now.Add(store.OIDCLinkApproval).Unix()); e != nil {
+				return errors.New("user was created, but linking could not be approved; run users approve-oidc")
+			}
+		}
+	case "approve-oidc":
+		e = s.ApproveOIDCLink(ctx, u, time.Now().Add(store.OIDCLinkApproval).Unix())
+		if e != nil {
+			if errors.Is(e, store.ErrNotFound) || errors.Is(e, store.ErrOIDCLinked) {
+				return e
+			}
+			return errors.New("could not update user")
 		}
 	case "role":
 		// The CLI does not apply the last-owner rule either. A demotion
@@ -354,7 +387,8 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 			return errors.New("could not update user")
 		}
 	case "reset-mfa":
-		// The sessions and tokens are kept, as with unlink.
+		// The sessions, API tokens and MCP connections are revoked with the
+		// factors.
 		e = s.ResetMFA(ctx, u)
 		if e != nil {
 			if errors.Is(e, store.ErrNotFound) {
@@ -379,7 +413,7 @@ func account(ctx context.Context, s *store.Store, args []string, in io.Reader) e
 
 // maxPasswordInput is the longest accepted --password-stdin input, including
 // one trailing line break.
-const maxPasswordInput = 75
+const maxPasswordInput = auth.MaxPasswordBytes + 2
 
 // readPassword reads the password from in when fromStdin is set. The input
 // must be a single line: one trailing \r\n, \n or \r is removed, and any other

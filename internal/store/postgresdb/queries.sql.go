@@ -35,29 +35,22 @@ func (q *Queries) AcceptInvitation(ctx context.Context, arg AcceptInvitationPara
 	return result.RowsAffected()
 }
 
-const capGrantOAuthTokens = `-- name: CapGrantOAuthTokens :exec
-UPDATE oauth_tokens SET expires_at = $1
-WHERE grant_id = $2 AND user_id = $3 AND expires_at > $1
+const activateMCPRegistration = `-- name: ActivateMCPRegistration :execrows
+UPDATE mcp_oauth_registrations SET expires_at = NULL
+WHERE id = $1 AND (expires_at IS NULL OR expires_at > $2::bigint)
 `
 
-type CapGrantOAuthTokensParams struct {
-	MaxExpiresAt int64
-	GrantID      string
-	UserID       string
+type ActivateMCPRegistrationParams struct {
+	ID  string
+	Now int64
 }
 
-func (q *Queries) CapGrantOAuthTokens(ctx context.Context, arg CapGrantOAuthTokensParams) error {
-	_, err := q.db.ExecContext(ctx, capGrantOAuthTokens, arg.MaxExpiresAt, arg.GrantID, arg.UserID)
-	return err
-}
-
-const clearAllUserOIDC = `-- name: ClearAllUserOIDC :exec
-UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE oidc_issuer IS NOT NULL OR oidc_subject IS NOT NULL
-`
-
-func (q *Queries) ClearAllUserOIDC(ctx context.Context) error {
-	_, err := q.db.ExecContext(ctx, clearAllUserOIDC)
-	return err
+func (q *Queries) ActivateMCPRegistration(ctx context.Context, arg ActivateMCPRegistrationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, activateMCPRegistration, arg.ID, arg.Now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const clearSlackWebhook = `-- name: ClearSlackWebhook :exec
@@ -84,17 +77,18 @@ func (q *Queries) ClearUserOIDC(ctx context.Context, id string) error {
 	return err
 }
 
-const consumeRefresh = `-- name: ConsumeRefresh :execrows
-UPDATE refresh_tokens SET consumed_at = $1 WHERE hash = $2 AND consumed_at IS NULL
+const consumeMFATOTPStep = `-- name: ConsumeMFATOTPStep :execrows
+UPDATE mfa_totp SET last_step = $1 WHERE user_id = $2 AND id = $3 AND last_step < $1
 `
 
-type ConsumeRefreshParams struct {
-	ConsumedAt sql.NullInt64
-	Hash       string
+type ConsumeMFATOTPStepParams struct {
+	Step   int64
+	UserID string
+	ID     string
 }
 
-func (q *Queries) ConsumeRefresh(ctx context.Context, arg ConsumeRefreshParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, consumeRefresh, arg.ConsumedAt, arg.Hash)
+func (q *Queries) ConsumeMFATOTPStep(ctx context.Context, arg ConsumeMFATOTPStepParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, consumeMFATOTPStep, arg.Step, arg.UserID, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -210,6 +204,28 @@ func (q *Queries) CountChildrenByParents(ctx context.Context, arg CountChildrenB
 	return items, nil
 }
 
+const countClientMCPCodes = `-- name: CountClientMCPCodes :one
+SELECT COUNT(*) FROM mcp_oauth_codes WHERE client_id = $1
+`
+
+func (q *Queries) CountClientMCPCodes(ctx context.Context, clientID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countClientMCPCodes, clientID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countClientMCPConnections = `-- name: CountClientMCPConnections :one
+SELECT COUNT(*) FROM mcp_oauth_connections WHERE client_id = $1
+`
+
+func (q *Queries) CountClientMCPConnections(ctx context.Context, clientID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countClientMCPConnections, clientID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countGmailAccounts = `-- name: CountGmailAccounts :one
 SELECT COUNT(*) FROM gmail_accounts WHERE user_id = $1
 `
@@ -222,7 +238,7 @@ func (q *Queries) CountGmailAccounts(ctx context.Context, userID string) (int64,
 }
 
 const countMFAWebAuthnCredentials = `-- name: CountMFAWebAuthnCredentials :one
-SELECT COUNT(*) FROM mfa_webauthn_credentials WHERE user_id = $1
+SELECT COUNT(*) FROM mfa_webauthn_credentials WHERE user_id = $1 AND version <> ''
 `
 
 func (q *Queries) CountMFAWebAuthnCredentials(ctx context.Context, userID string) (int64, error) {
@@ -651,12 +667,13 @@ func (q *Queries) CreateMFARecoveryCode(ctx context.Context, arg CreateMFARecove
 }
 
 const createMFATOTP = `-- name: CreateMFATOTP :exec
-INSERT INTO mfa_totp (user_id,secret_sealed,last_step,created_at)
-VALUES ($1,$2,$3,$4)
+INSERT INTO mfa_totp (user_id,id,secret_sealed,last_step,created_at)
+VALUES ($1,$2,$3,$4,$5)
 `
 
 type CreateMFATOTPParams struct {
 	UserID       string
+	ID           string
 	SecretSealed string
 	LastStep     int64
 	CreatedAt    int64
@@ -665,6 +682,7 @@ type CreateMFATOTPParams struct {
 func (q *Queries) CreateMFATOTP(ctx context.Context, arg CreateMFATOTPParams) error {
 	_, err := q.db.ExecContext(ctx, createMFATOTP,
 		arg.UserID,
+		arg.ID,
 		arg.SecretSealed,
 		arg.LastStep,
 		arg.CreatedAt,
@@ -672,28 +690,9 @@ func (q *Queries) CreateMFATOTP(ctx context.Context, arg CreateMFATOTPParams) er
 	return err
 }
 
-const createMFAUsedChallenge = `-- name: CreateMFAUsedChallenge :execrows
-INSERT INTO mfa_used_challenges (challenge_hash,expires_at)
-VALUES ($1,$2)
-ON CONFLICT (challenge_hash) DO NOTHING
-`
-
-type CreateMFAUsedChallengeParams struct {
-	ChallengeHash string
-	ExpiresAt     int64
-}
-
-func (q *Queries) CreateMFAUsedChallenge(ctx context.Context, arg CreateMFAUsedChallengeParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, createMFAUsedChallenge, arg.ChallengeHash, arg.ExpiresAt)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
 const createMFAWebAuthnCredential = `-- name: CreateMFAWebAuthnCredential :execrows
-INSERT INTO mfa_webauthn_credentials (id,user_id,credential_id,credential,name,created_at)
-VALUES ($1,$2,$3,$4,$5,$6)
+INSERT INTO mfa_webauthn_credentials (id,user_id,credential_id,credential,name,created_at,version,passkey)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 ON CONFLICT (credential_id) DO NOTHING
 `
 
@@ -704,6 +703,8 @@ type CreateMFAWebAuthnCredentialParams struct {
 	Credential   string
 	Name         string
 	CreatedAt    int64
+	Version      string
+	Passkey      int64
 }
 
 func (q *Queries) CreateMFAWebAuthnCredential(ctx context.Context, arg CreateMFAWebAuthnCredentialParams) (int64, error) {
@@ -714,6 +715,8 @@ func (q *Queries) CreateMFAWebAuthnCredential(ctx context.Context, arg CreateMFA
 		arg.Credential,
 		arg.Name,
 		arg.CreatedAt,
+		arg.Version,
+		arg.Passkey,
 	)
 	if err != nil {
 		return 0, err
@@ -744,102 +747,6 @@ func (q *Queries) CreateNotificationSettingsIfMissing(ctx context.Context, arg C
 		arg.StaleDays,
 		arg.UpdatedAt,
 		arg.CandidateExpireDays,
-	)
-	return err
-}
-
-const createOAuthClient = `-- name: CreateOAuthClient :exec
-INSERT INTO oauth_clients (client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-`
-
-type CreateOAuthClientParams struct {
-	ClientID          string
-	Kind              string
-	Name              string
-	RedirectUris      string
-	AuthMethod        string
-	SecretHash        sql.NullString
-	MetadataExpiresAt sql.NullInt64
-	CreatedAt         int64
-	UpdatedAt         int64
-}
-
-func (q *Queries) CreateOAuthClient(ctx context.Context, arg CreateOAuthClientParams) error {
-	_, err := q.db.ExecContext(ctx, createOAuthClient,
-		arg.ClientID,
-		arg.Kind,
-		arg.Name,
-		arg.RedirectUris,
-		arg.AuthMethod,
-		arg.SecretHash,
-		arg.MetadataExpiresAt,
-		arg.CreatedAt,
-		arg.UpdatedAt,
-	)
-	return err
-}
-
-const createOAuthGrant = `-- name: CreateOAuthGrant :exec
-INSERT INTO oauth_grants (id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL,$11,$12,NULL)
-`
-
-type CreateOAuthGrantParams struct {
-	ID            string
-	UserID        string
-	ClientID      string
-	ClientName    string
-	Scope         string
-	Resource      string
-	RedirectUri   string
-	CodeHash      string
-	CodeChallenge string
-	CodeExpiresAt int64
-	CreatedAt     int64
-	ExpiresAt     int64
-}
-
-func (q *Queries) CreateOAuthGrant(ctx context.Context, arg CreateOAuthGrantParams) error {
-	_, err := q.db.ExecContext(ctx, createOAuthGrant,
-		arg.ID,
-		arg.UserID,
-		arg.ClientID,
-		arg.ClientName,
-		arg.Scope,
-		arg.Resource,
-		arg.RedirectUri,
-		arg.CodeHash,
-		arg.CodeChallenge,
-		arg.CodeExpiresAt,
-		arg.CreatedAt,
-		arg.ExpiresAt,
-	)
-	return err
-}
-
-const createOAuthToken = `-- name: CreateOAuthToken :exec
-INSERT INTO oauth_tokens (token_hash,kind,grant_id,user_id,created_at,expires_at)
-VALUES ($1,$2,$3,$4,$5,$6)
-`
-
-type CreateOAuthTokenParams struct {
-	TokenHash string
-	Kind      string
-	GrantID   string
-	UserID    string
-	CreatedAt int64
-	ExpiresAt int64
-}
-
-func (q *Queries) CreateOAuthToken(ctx context.Context, arg CreateOAuthTokenParams) error {
-	_, err := q.db.ExecContext(ctx, createOAuthToken,
-		arg.TokenHash,
-		arg.Kind,
-		arg.GrantID,
-		arg.UserID,
-		arg.CreatedAt,
-		arg.ExpiresAt,
 	)
 	return err
 }
@@ -893,42 +800,6 @@ func (q *Queries) CreatePushSubscription(ctx context.Context, arg CreatePushSubs
 		arg.P256dh,
 		arg.Auth,
 		arg.Label,
-		arg.CreatedAt,
-	)
-	return err
-}
-
-const createRefresh = `-- name: CreateRefresh :exec
-INSERT INTO refresh_tokens (hash,session_id,created_at) VALUES ($1,$2,$3)
-`
-
-type CreateRefreshParams struct {
-	Hash      string
-	SessionID string
-	CreatedAt int64
-}
-
-func (q *Queries) CreateRefresh(ctx context.Context, arg CreateRefreshParams) error {
-	_, err := q.db.ExecContext(ctx, createRefresh, arg.Hash, arg.SessionID, arg.CreatedAt)
-	return err
-}
-
-const createSession = `-- name: CreateSession :exec
-INSERT INTO sessions (id,user_id,expires_at,created_at) VALUES ($1,$2,$3,$4)
-`
-
-type CreateSessionParams struct {
-	ID        string
-	UserID    string
-	ExpiresAt int64
-	CreatedAt int64
-}
-
-func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) error {
-	_, err := q.db.ExecContext(ctx, createSession,
-		arg.ID,
-		arg.UserID,
-		arg.ExpiresAt,
 		arg.CreatedAt,
 	)
 	return err
@@ -1080,6 +951,27 @@ func (q *Queries) DeleteChatworkConnection(ctx context.Context, userID string) e
 	return err
 }
 
+const deleteClientMCPCodes = `-- name: DeleteClientMCPCodes :exec
+DELETE FROM mcp_oauth_codes WHERE client_id = $1
+`
+
+func (q *Queries) DeleteClientMCPCodes(ctx context.Context, clientID string) error {
+	_, err := q.db.ExecContext(ctx, deleteClientMCPCodes, clientID)
+	return err
+}
+
+const deleteClientMCPConnections = `-- name: DeleteClientMCPConnections :execrows
+DELETE FROM mcp_oauth_connections WHERE client_id = $1
+`
+
+func (q *Queries) DeleteClientMCPConnections(ctx context.Context, clientID string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteClientMCPConnections, clientID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const deleteExpiredGoogleAuthStates = `-- name: DeleteExpiredGoogleAuthStates :exec
 DELETE FROM google_auth_states WHERE user_id = $1 AND expires_at <= $2
 `
@@ -1094,40 +986,89 @@ func (q *Queries) DeleteExpiredGoogleAuthStates(ctx context.Context, arg DeleteE
 	return err
 }
 
-const deleteExpiredMFAUsedChallenges = `-- name: DeleteExpiredMFAUsedChallenges :exec
-DELETE FROM mfa_used_challenges WHERE expires_at <= $1
+const deleteExpiredMCPCodes = `-- name: DeleteExpiredMCPCodes :exec
+DELETE FROM mcp_oauth_codes WHERE expires_at <= $1::bigint
 `
 
-func (q *Queries) DeleteExpiredMFAUsedChallenges(ctx context.Context, now int64) error {
-	_, err := q.db.ExecContext(ctx, deleteExpiredMFAUsedChallenges, now)
+func (q *Queries) DeleteExpiredMCPCodes(ctx context.Context, now int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredMCPCodes, now)
 	return err
 }
 
-const deleteExpiredOAuthGrants = `-- name: DeleteExpiredOAuthGrants :exec
-DELETE FROM oauth_grants WHERE user_id = $1 AND expires_at <= $2
+const deleteExpiredMCPConnections = `-- name: DeleteExpiredMCPConnections :exec
+DELETE FROM mcp_oauth_connections
+WHERE refresh_expiry <= $1::bigint OR absolute_expiry <= $1::bigint
 `
 
-type DeleteExpiredOAuthGrantsParams struct {
-	UserID string
-	Now    int64
-}
-
-func (q *Queries) DeleteExpiredOAuthGrants(ctx context.Context, arg DeleteExpiredOAuthGrantsParams) error {
-	_, err := q.db.ExecContext(ctx, deleteExpiredOAuthGrants, arg.UserID, arg.Now)
+func (q *Queries) DeleteExpiredMCPConnections(ctx context.Context, now int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredMCPConnections, now)
 	return err
 }
 
-const deleteExpiredOAuthTokens = `-- name: DeleteExpiredOAuthTokens :exec
-DELETE FROM oauth_tokens WHERE user_id = $1 AND expires_at <= $2
+const deleteExpiredMCPRegistrations = `-- name: DeleteExpiredMCPRegistrations :exec
+DELETE FROM mcp_oauth_registrations
+WHERE mcp_oauth_registrations.expires_at IS NOT NULL AND mcp_oauth_registrations.expires_at <= $1::bigint
+AND NOT EXISTS (SELECT 1 FROM mcp_oauth_connections c WHERE c.client_id = mcp_oauth_registrations.id)
+AND NOT EXISTS (SELECT 1 FROM mcp_oauth_codes k WHERE k.client_id = mcp_oauth_registrations.id)
 `
 
-type DeleteExpiredOAuthTokensParams struct {
-	UserID string
-	Now    int64
+func (q *Queries) DeleteExpiredMCPRegistrations(ctx context.Context, now int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredMCPRegistrations, now)
+	return err
 }
 
-func (q *Queries) DeleteExpiredOAuthTokens(ctx context.Context, arg DeleteExpiredOAuthTokensParams) error {
-	_, err := q.db.ExecContext(ctx, deleteExpiredOAuthTokens, arg.UserID, arg.Now)
+const deleteExpiredOIDCLogin = `-- name: DeleteExpiredOIDCLogin :exec
+DELETE FROM oidc_logins WHERE key = $1 AND expires_at <= $2::bigint
+`
+
+type DeleteExpiredOIDCLoginParams struct {
+	Key string
+	Now int64
+}
+
+func (q *Queries) DeleteExpiredOIDCLogin(ctx context.Context, arg DeleteExpiredOIDCLoginParams) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredOIDCLogin, arg.Key, arg.Now)
+	return err
+}
+
+const deleteExpiredOIDCLogins = `-- name: DeleteExpiredOIDCLogins :exec
+DELETE FROM oidc_logins WHERE expires_at <= $1::bigint
+`
+
+func (q *Queries) DeleteExpiredOIDCLogins(ctx context.Context, now int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredOIDCLogins, now)
+	return err
+}
+
+const deleteExpiredWebAuthnCeremonies = `-- name: DeleteExpiredWebAuthnCeremonies :exec
+DELETE FROM webauthn_ceremonies WHERE expires_at <= $1::bigint
+`
+
+func (q *Queries) DeleteExpiredWebAuthnCeremonies(ctx context.Context, now int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredWebAuthnCeremonies, now)
+	return err
+}
+
+const deleteExpiredWebAuthnCeremony = `-- name: DeleteExpiredWebAuthnCeremony :exec
+DELETE FROM webauthn_ceremonies WHERE key = $1 AND expires_at <= $2::bigint
+`
+
+type DeleteExpiredWebAuthnCeremonyParams struct {
+	Key string
+	Now int64
+}
+
+func (q *Queries) DeleteExpiredWebAuthnCeremony(ctx context.Context, arg DeleteExpiredWebAuthnCeremonyParams) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredWebAuthnCeremony, arg.Key, arg.Now)
+	return err
+}
+
+const deleteExpiredWebSessions = `-- name: DeleteExpiredWebSessions :exec
+DELETE FROM web_sessions WHERE absolute_expiry <= $1::bigint OR last_activity + idle_seconds <= $1::bigint
+`
+
+func (q *Queries) DeleteExpiredWebSessions(ctx context.Context, now int64) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredWebSessions, now)
 	return err
 }
 
@@ -1174,20 +1115,6 @@ func (q *Queries) DeleteGoogleAuthState(ctx context.Context, arg DeleteGoogleAut
 	return result.RowsAffected()
 }
 
-const deleteGrantOAuthTokens = `-- name: DeleteGrantOAuthTokens :exec
-DELETE FROM oauth_tokens WHERE grant_id = $1 AND user_id = $2
-`
-
-type DeleteGrantOAuthTokensParams struct {
-	GrantID string
-	UserID  string
-}
-
-func (q *Queries) DeleteGrantOAuthTokens(ctx context.Context, arg DeleteGrantOAuthTokensParams) error {
-	_, err := q.db.ExecContext(ctx, deleteGrantOAuthTokens, arg.GrantID, arg.UserID)
-	return err
-}
-
 const deleteItemPendingNotifications = `-- name: DeleteItemPendingNotifications :exec
 DELETE FROM notifications WHERE user_id = $1 AND action_item_id = $2 AND sent_at IS NULL
 `
@@ -1200,6 +1127,67 @@ type DeleteItemPendingNotificationsParams struct {
 func (q *Queries) DeleteItemPendingNotifications(ctx context.Context, arg DeleteItemPendingNotificationsParams) error {
 	_, err := q.db.ExecContext(ctx, deleteItemPendingNotifications, arg.UserID, arg.ActionItemID)
 	return err
+}
+
+const deleteMCPCode = `-- name: DeleteMCPCode :exec
+DELETE FROM mcp_oauth_codes WHERE key = $1
+`
+
+func (q *Queries) DeleteMCPCode(ctx context.Context, key string) error {
+	_, err := q.db.ExecContext(ctx, deleteMCPCode, key)
+	return err
+}
+
+const deleteMCPConnection = `-- name: DeleteMCPConnection :exec
+DELETE FROM mcp_oauth_connections WHERE id = $1
+`
+
+func (q *Queries) DeleteMCPConnection(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, deleteMCPConnection, id)
+	return err
+}
+
+const deleteMCPConnectionByCode = `-- name: DeleteMCPConnectionByCode :many
+DELETE FROM mcp_oauth_connections WHERE code = $1
+RETURNING id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at
+`
+
+func (q *Queries) DeleteMCPConnectionByCode(ctx context.Context, code sql.NullString) ([]McpOauthConnection, error) {
+	rows, err := q.db.QueryContext(ctx, deleteMCPConnectionByCode, code)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []McpOauthConnection
+	for rows.Next() {
+		var i McpOauthConnection
+		if err := rows.Scan(
+			&i.ID,
+			&i.Selector,
+			&i.Subject,
+			&i.ClientID,
+			&i.Scopes,
+			&i.CreatedAt,
+			&i.RefreshedAt,
+			&i.AbsoluteExpiry,
+			&i.Access,
+			&i.AccessExpiry,
+			&i.Refresh,
+			&i.RefreshExpiry,
+			&i.Code,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const deleteMFATOTP = `-- name: DeleteMFATOTP :execrows
@@ -1225,23 +1213,6 @@ type DeleteMFAWebAuthnCredentialParams struct {
 
 func (q *Queries) DeleteMFAWebAuthnCredential(ctx context.Context, arg DeleteMFAWebAuthnCredentialParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteMFAWebAuthnCredential, arg.UserID, arg.ID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const deleteOAuthGrant = `-- name: DeleteOAuthGrant :execrows
-DELETE FROM oauth_grants WHERE id = $1 AND user_id = $2
-`
-
-type DeleteOAuthGrantParams struct {
-	ID     string
-	UserID string
-}
-
-func (q *Queries) DeleteOAuthGrant(ctx context.Context, arg DeleteOAuthGrantParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteOAuthGrant, arg.ID, arg.UserID)
 	if err != nil {
 		return 0, err
 	}
@@ -1289,6 +1260,50 @@ DELETE FROM slack_connections WHERE user_id = $1
 
 func (q *Queries) DeleteSlackConnection(ctx context.Context, userID string) error {
 	_, err := q.db.ExecContext(ctx, deleteSlackConnection, userID)
+	return err
+}
+
+const deleteSubjectMCPCodes = `-- name: DeleteSubjectMCPCodes :exec
+DELETE FROM mcp_oauth_codes WHERE subject = $1
+`
+
+func (q *Queries) DeleteSubjectMCPCodes(ctx context.Context, subject string) error {
+	_, err := q.db.ExecContext(ctx, deleteSubjectMCPCodes, subject)
+	return err
+}
+
+const deleteSubjectMCPConnection = `-- name: DeleteSubjectMCPConnection :execrows
+DELETE FROM mcp_oauth_connections WHERE id = $1 AND subject = $2
+`
+
+type DeleteSubjectMCPConnectionParams struct {
+	ID      string
+	Subject string
+}
+
+func (q *Queries) DeleteSubjectMCPConnection(ctx context.Context, arg DeleteSubjectMCPConnectionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteSubjectMCPConnection, arg.ID, arg.Subject)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteSubjectMCPConnections = `-- name: DeleteSubjectMCPConnections :exec
+DELETE FROM mcp_oauth_connections WHERE subject = $1
+`
+
+func (q *Queries) DeleteSubjectMCPConnections(ctx context.Context, subject string) error {
+	_, err := q.db.ExecContext(ctx, deleteSubjectMCPConnections, subject)
+	return err
+}
+
+const deleteSubjectWebAuthnCeremonies = `-- name: DeleteSubjectWebAuthnCeremonies :exec
+DELETE FROM webauthn_ceremonies WHERE subject = $1
+`
+
+func (q *Queries) DeleteSubjectWebAuthnCeremonies(ctx context.Context, subject string) error {
+	_, err := q.db.ExecContext(ctx, deleteSubjectWebAuthnCeremonies, subject)
 	return err
 }
 
@@ -1343,24 +1358,6 @@ DELETE FROM mfa_webauthn_credentials WHERE user_id = $1
 
 func (q *Queries) DeleteUserMFAWebAuthnCredentials(ctx context.Context, userID string) error {
 	_, err := q.db.ExecContext(ctx, deleteUserMFAWebAuthnCredentials, userID)
-	return err
-}
-
-const deleteUserOAuthGrants = `-- name: DeleteUserOAuthGrants :exec
-DELETE FROM oauth_grants WHERE user_id = $1
-`
-
-func (q *Queries) DeleteUserOAuthGrants(ctx context.Context, userID string) error {
-	_, err := q.db.ExecContext(ctx, deleteUserOAuthGrants, userID)
-	return err
-}
-
-const deleteUserOAuthTokens = `-- name: DeleteUserOAuthTokens :exec
-DELETE FROM oauth_tokens WHERE user_id = $1
-`
-
-func (q *Queries) DeleteUserOAuthTokens(ctx context.Context, userID string) error {
-	_, err := q.db.ExecContext(ctx, deleteUserOAuthTokens, userID)
 	return err
 }
 
@@ -1428,8 +1425,26 @@ func (q *Queries) DeleteUserPushSubscriptions(ctx context.Context, userID string
 	return err
 }
 
+const deleteUserWebSessions = `-- name: DeleteUserWebSessions :exec
+DELETE FROM web_sessions WHERE user_id = $1
+`
+
+func (q *Queries) DeleteUserWebSessions(ctx context.Context, userID string) error {
+	_, err := q.db.ExecContext(ctx, deleteUserWebSessions, userID)
+	return err
+}
+
+const deleteWebSession = `-- name: DeleteWebSession :exec
+DELETE FROM web_sessions WHERE id = $1
+`
+
+func (q *Queries) DeleteWebSession(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, deleteWebSession, id)
+	return err
+}
+
 const disableUser = `-- name: DisableUser :exec
-UPDATE users SET disabled = 1 WHERE id = $1
+UPDATE users SET disabled = 1, oidc_link_approved_until = NULL WHERE id = $1
 `
 
 func (q *Queries) DisableUser(ctx context.Context, id string) error {
@@ -1559,21 +1574,6 @@ func (q *Queries) ExpireEvents(ctx context.Context, arg ExpireEventsParams) ([]s
 		return nil, err
 	}
 	return items, nil
-}
-
-const extendOAuthGrant = `-- name: ExtendOAuthGrant :exec
-UPDATE oauth_grants SET expires_at = $1 WHERE id = $2 AND user_id = $3
-`
-
-type ExtendOAuthGrantParams struct {
-	ExpiresAt int64
-	ID        string
-	UserID    string
-}
-
-func (q *Queries) ExtendOAuthGrant(ctx context.Context, arg ExtendOAuthGrantParams) error {
-	_, err := q.db.ExecContext(ctx, extendOAuthGrant, arg.ExpiresAt, arg.ID, arg.UserID)
-	return err
 }
 
 const getAISettings = `-- name: GetAISettings :one
@@ -1740,26 +1740,27 @@ func (q *Queries) GetActionItemsByIDs(ctx context.Context, arg GetActionItemsByI
 	return items, nil
 }
 
-const getActiveSession = `-- name: GetActiveSession :one
-SELECT id, user_id, expires_at, revoked_at, created_at FROM sessions
-WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL AND expires_at > $3
+const getActiveWebSession = `-- name: GetActiveWebSession :one
+SELECT id, user_id, authenticated_at, last_activity, absolute_expiry, idle_seconds FROM web_sessions
+WHERE id = $1 AND user_id = $2 AND absolute_expiry > $3::bigint AND last_activity + idle_seconds > $3::bigint
 `
 
-type GetActiveSessionParams struct {
+type GetActiveWebSessionParams struct {
 	ID     string
 	UserID string
 	Now    int64
 }
 
-func (q *Queries) GetActiveSession(ctx context.Context, arg GetActiveSessionParams) (Session, error) {
-	row := q.db.QueryRowContext(ctx, getActiveSession, arg.ID, arg.UserID, arg.Now)
-	var i Session
+func (q *Queries) GetActiveWebSession(ctx context.Context, arg GetActiveWebSessionParams) (WebSession, error) {
+	row := q.db.QueryRowContext(ctx, getActiveWebSession, arg.ID, arg.UserID, arg.Now)
+	var i WebSession
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
-		&i.ExpiresAt,
-		&i.RevokedAt,
-		&i.CreatedAt,
+		&i.AuthenticatedAt,
+		&i.LastActivity,
+		&i.AbsoluteExpiry,
+		&i.IdleSeconds,
 	)
 	return i, err
 }
@@ -1923,14 +1924,128 @@ func (q *Queries) GetInvitationByTokenHash(ctx context.Context, tokenHash string
 	return i, err
 }
 
+const getLiveMCPConnectionByAccess = `-- name: GetLiveMCPConnectionByAccess :one
+SELECT id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at FROM mcp_oauth_connections
+WHERE access = $1 AND access_expiry > $2::bigint
+AND (absolute_expiry IS NULL OR absolute_expiry > $2::bigint)
+`
+
+type GetLiveMCPConnectionByAccessParams struct {
+	Access string
+	Now    int64
+}
+
+func (q *Queries) GetLiveMCPConnectionByAccess(ctx context.Context, arg GetLiveMCPConnectionByAccessParams) (McpOauthConnection, error) {
+	row := q.db.QueryRowContext(ctx, getLiveMCPConnectionByAccess, arg.Access, arg.Now)
+	var i McpOauthConnection
+	err := row.Scan(
+		&i.ID,
+		&i.Selector,
+		&i.Subject,
+		&i.ClientID,
+		&i.Scopes,
+		&i.CreatedAt,
+		&i.RefreshedAt,
+		&i.AbsoluteExpiry,
+		&i.Access,
+		&i.AccessExpiry,
+		&i.Refresh,
+		&i.RefreshExpiry,
+		&i.Code,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
+const getLiveMCPConnectionBySelector = `-- name: GetLiveMCPConnectionBySelector :one
+SELECT id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at FROM mcp_oauth_connections
+WHERE selector = $1 AND refresh_expiry > $2::bigint
+AND (absolute_expiry IS NULL OR absolute_expiry > $2::bigint)
+`
+
+type GetLiveMCPConnectionBySelectorParams struct {
+	Selector string
+	Now      int64
+}
+
+func (q *Queries) GetLiveMCPConnectionBySelector(ctx context.Context, arg GetLiveMCPConnectionBySelectorParams) (McpOauthConnection, error) {
+	row := q.db.QueryRowContext(ctx, getLiveMCPConnectionBySelector, arg.Selector, arg.Now)
+	var i McpOauthConnection
+	err := row.Scan(
+		&i.ID,
+		&i.Selector,
+		&i.Subject,
+		&i.ClientID,
+		&i.Scopes,
+		&i.CreatedAt,
+		&i.RefreshedAt,
+		&i.AbsoluteExpiry,
+		&i.Access,
+		&i.AccessExpiry,
+		&i.Refresh,
+		&i.RefreshExpiry,
+		&i.Code,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
+const getLiveMCPRegistration = `-- name: GetLiveMCPRegistration :one
+SELECT id, name, redirect_uris, created_at, expires_at FROM mcp_oauth_registrations
+WHERE id = $1 AND (expires_at IS NULL OR expires_at > $2::bigint)
+`
+
+type GetLiveMCPRegistrationParams struct {
+	ID  string
+	Now int64
+}
+
+func (q *Queries) GetLiveMCPRegistration(ctx context.Context, arg GetLiveMCPRegistrationParams) (McpOauthRegistration, error) {
+	row := q.db.QueryRowContext(ctx, getLiveMCPRegistration, arg.ID, arg.Now)
+	var i McpOauthRegistration
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.RedirectUris,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const getLiveWebSession = `-- name: GetLiveWebSession :one
+SELECT id, user_id, authenticated_at, last_activity, absolute_expiry, idle_seconds FROM web_sessions
+WHERE id = $1 AND absolute_expiry > $2::bigint AND last_activity + idle_seconds > $2::bigint
+`
+
+type GetLiveWebSessionParams struct {
+	ID  string
+	Now int64
+}
+
+func (q *Queries) GetLiveWebSession(ctx context.Context, arg GetLiveWebSessionParams) (WebSession, error) {
+	row := q.db.QueryRowContext(ctx, getLiveWebSession, arg.ID, arg.Now)
+	var i WebSession
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.AuthenticatedAt,
+		&i.LastActivity,
+		&i.AbsoluteExpiry,
+		&i.IdleSeconds,
+	)
+	return i, err
+}
+
 const getMFATOTP = `-- name: GetMFATOTP :one
-SELECT user_id, secret_sealed, last_step, created_at FROM mfa_totp WHERE user_id = $1
+SELECT id, user_id, secret_sealed, last_step, created_at FROM mfa_totp WHERE user_id = $1
 `
 
 func (q *Queries) GetMFATOTP(ctx context.Context, userID string) (MfaTotp, error) {
 	row := q.db.QueryRowContext(ctx, getMFATOTP, userID)
 	var i MfaTotp
 	err := row.Scan(
+		&i.ID,
 		&i.UserID,
 		&i.SecretSealed,
 		&i.LastStep,
@@ -1978,105 +2093,6 @@ func (q *Queries) GetNotificationSettings(ctx context.Context, userID string) (N
 	return i, err
 }
 
-const getOAuthClient = `-- name: GetOAuthClient :one
-SELECT client_id, kind, name, redirect_uris, auth_method, secret_hash, metadata_expires_at, created_at, updated_at FROM oauth_clients
-WHERE client_id = $1
-`
-
-func (q *Queries) GetOAuthClient(ctx context.Context, clientID string) (OauthClient, error) {
-	row := q.db.QueryRowContext(ctx, getOAuthClient, clientID)
-	var i OauthClient
-	err := row.Scan(
-		&i.ClientID,
-		&i.Kind,
-		&i.Name,
-		&i.RedirectUris,
-		&i.AuthMethod,
-		&i.SecretHash,
-		&i.MetadataExpiresAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const getOAuthGrant = `-- name: GetOAuthGrant :one
-SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
-WHERE id = $1 AND user_id = $2
-`
-
-type GetOAuthGrantParams struct {
-	ID     string
-	UserID string
-}
-
-func (q *Queries) GetOAuthGrant(ctx context.Context, arg GetOAuthGrantParams) (OauthGrant, error) {
-	row := q.db.QueryRowContext(ctx, getOAuthGrant, arg.ID, arg.UserID)
-	var i OauthGrant
-	err := row.Scan(
-		&i.ID,
-		&i.UserID,
-		&i.ClientID,
-		&i.ClientName,
-		&i.Scope,
-		&i.Resource,
-		&i.RedirectUri,
-		&i.CodeHash,
-		&i.CodeChallenge,
-		&i.CodeExpiresAt,
-		&i.CodeUsedAt,
-		&i.CreatedAt,
-		&i.ExpiresAt,
-		&i.LastUsedAt,
-	)
-	return i, err
-}
-
-const getOAuthGrantByCode = `-- name: GetOAuthGrantByCode :one
-SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
-WHERE code_hash = $1
-`
-
-func (q *Queries) GetOAuthGrantByCode(ctx context.Context, codeHash string) (OauthGrant, error) {
-	row := q.db.QueryRowContext(ctx, getOAuthGrantByCode, codeHash)
-	var i OauthGrant
-	err := row.Scan(
-		&i.ID,
-		&i.UserID,
-		&i.ClientID,
-		&i.ClientName,
-		&i.Scope,
-		&i.Resource,
-		&i.RedirectUri,
-		&i.CodeHash,
-		&i.CodeChallenge,
-		&i.CodeExpiresAt,
-		&i.CodeUsedAt,
-		&i.CreatedAt,
-		&i.ExpiresAt,
-		&i.LastUsedAt,
-	)
-	return i, err
-}
-
-const getOAuthTokenByHash = `-- name: GetOAuthTokenByHash :one
-SELECT token_hash, kind, grant_id, user_id, created_at, expires_at FROM oauth_tokens WHERE token_hash = $1
-`
-
-func (q *Queries) GetOAuthTokenByHash(ctx context.Context, tokenHash string) (OauthToken, error) {
-	row := q.db.QueryRowContext(ctx, getOAuthTokenByHash, tokenHash)
-	var i OauthToken
-	err := row.Scan(
-		&i.TokenHash,
-		&i.Kind,
-		&i.GrantID,
-		&i.UserID,
-		&i.CreatedAt,
-		&i.ExpiresAt,
-	)
-	return i, err
-}
-
 const getPasswordResetByTokenHash = `-- name: GetPasswordResetByTokenHash :one
 SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, revoked_at FROM password_resets WHERE token_hash = $1
 `
@@ -2093,39 +2109,6 @@ func (q *Queries) GetPasswordResetByTokenHash(ctx context.Context, tokenHash str
 		&i.ExpiresAt,
 		&i.UsedAt,
 		&i.RevokedAt,
-	)
-	return i, err
-}
-
-const getRefresh = `-- name: GetRefresh :one
-SELECT hash, session_id, consumed_at, created_at FROM refresh_tokens WHERE hash = $1
-`
-
-func (q *Queries) GetRefresh(ctx context.Context, hash string) (RefreshToken, error) {
-	row := q.db.QueryRowContext(ctx, getRefresh, hash)
-	var i RefreshToken
-	err := row.Scan(
-		&i.Hash,
-		&i.SessionID,
-		&i.ConsumedAt,
-		&i.CreatedAt,
-	)
-	return i, err
-}
-
-const getSession = `-- name: GetSession :one
-SELECT id, user_id, expires_at, revoked_at, created_at FROM sessions WHERE id = $1
-`
-
-func (q *Queries) GetSession(ctx context.Context, id string) (Session, error) {
-	row := q.db.QueryRowContext(ctx, getSession, id)
-	var i Session
-	err := row.Scan(
-		&i.ID,
-		&i.UserID,
-		&i.ExpiresAt,
-		&i.RevokedAt,
-		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -2167,7 +2150,7 @@ func (q *Queries) GetSlackConnection(ctx context.Context, userID string) (SlackC
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE email = $1
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -2182,12 +2165,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.Role,
 		&i.OidcIssuer,
 		&i.OidcSubject,
+		&i.OidcLinkApprovedUntil,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE id = $1
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
@@ -2202,12 +2186,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id string) (User, error) {
 		&i.Role,
 		&i.OidcIssuer,
 		&i.OidcSubject,
+		&i.OidcLinkApprovedUntil,
 	)
 	return i, err
 }
 
 const getUserByOIDC = `-- name: GetUserByOIDC :one
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users
 WHERE oidc_issuer = $1 AND oidc_subject = $2
 `
 
@@ -2228,12 +2213,13 @@ func (q *Queries) GetUserByOIDC(ctx context.Context, arg GetUserByOIDCParams) (U
 		&i.Role,
 		&i.OidcIssuer,
 		&i.OidcSubject,
+		&i.OidcLinkApprovedUntil,
 	)
 	return i, err
 }
 
 const getUsersByIDs = `-- name: GetUsersByIDs :many
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE strpos(',' || $1::text || ',', ',' || id || ',') > 0
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users WHERE strpos(',' || $1::text || ',', ',' || id || ',') > 0
 `
 
 func (q *Queries) GetUsersByIDs(ctx context.Context, ids string) ([]User, error) {
@@ -2254,6 +2240,7 @@ func (q *Queries) GetUsersByIDs(ctx context.Context, ids string) ([]User, error)
 			&i.Role,
 			&i.OidcIssuer,
 			&i.OidcSubject,
+			&i.OidcLinkApprovedUntil,
 		); err != nil {
 			return nil, err
 		}
@@ -2266,6 +2253,142 @@ func (q *Queries) GetUsersByIDs(ctx context.Context, ids string) ([]User, error)
 		return nil, err
 	}
 	return items, nil
+}
+
+const insertMCPCode = `-- name: InsertMCPCode :execrows
+INSERT INTO mcp_oauth_codes (key,client_id,redirect_uri,subject,scopes,challenge,expires_at,consumed,reused)
+VALUES ($1,$2,$3,$4,$5,$6,$7,0,0)
+ON CONFLICT DO NOTHING
+`
+
+type InsertMCPCodeParams struct {
+	Key         string
+	ClientID    string
+	RedirectUri string
+	Subject     string
+	Scopes      string
+	Challenge   string
+	ExpiresAt   int64
+}
+
+func (q *Queries) InsertMCPCode(ctx context.Context, arg InsertMCPCodeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertMCPCode,
+		arg.Key,
+		arg.ClientID,
+		arg.RedirectUri,
+		arg.Subject,
+		arg.Scopes,
+		arg.Challenge,
+		arg.ExpiresAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const insertMCPConnection = `-- name: InsertMCPConnection :execrows
+INSERT INTO mcp_oauth_connections (id,selector,subject,client_id,scopes,created_at,refreshed_at,absolute_expiry,access,access_expiry,refresh,refresh_expiry,code,last_used_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NULL)
+ON CONFLICT DO NOTHING
+`
+
+type InsertMCPConnectionParams struct {
+	ID             string
+	Selector       string
+	Subject        string
+	ClientID       string
+	Scopes         string
+	CreatedAt      int64
+	RefreshedAt    int64
+	AbsoluteExpiry sql.NullInt64
+	Access         string
+	AccessExpiry   int64
+	Refresh        string
+	RefreshExpiry  int64
+	Code           sql.NullString
+}
+
+func (q *Queries) InsertMCPConnection(ctx context.Context, arg InsertMCPConnectionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertMCPConnection,
+		arg.ID,
+		arg.Selector,
+		arg.Subject,
+		arg.ClientID,
+		arg.Scopes,
+		arg.CreatedAt,
+		arg.RefreshedAt,
+		arg.AbsoluteExpiry,
+		arg.Access,
+		arg.AccessExpiry,
+		arg.Refresh,
+		arg.RefreshExpiry,
+		arg.Code,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const insertMCPRegistration = `-- name: InsertMCPRegistration :execrows
+INSERT INTO mcp_oauth_registrations (id,name,redirect_uris,created_at,expires_at)
+VALUES ($1,$2,$3,$4,$5)
+ON CONFLICT DO NOTHING
+`
+
+type InsertMCPRegistrationParams struct {
+	ID           string
+	Name         string
+	RedirectUris string
+	CreatedAt    int64
+	ExpiresAt    sql.NullInt64
+}
+
+func (q *Queries) InsertMCPRegistration(ctx context.Context, arg InsertMCPRegistrationParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertMCPRegistration,
+		arg.ID,
+		arg.Name,
+		arg.RedirectUris,
+		arg.CreatedAt,
+		arg.ExpiresAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const insertOIDCLogin = `-- name: InsertOIDCLogin :execrows
+INSERT INTO oidc_logins (key,nonce,verifier,started_at,expires_at,max_age_seconds,app_data)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT (key) DO NOTHING
+`
+
+type InsertOIDCLoginParams struct {
+	Key           string
+	Nonce         string
+	Verifier      string
+	StartedAt     int64
+	ExpiresAt     int64
+	MaxAgeSeconds sql.NullInt64
+	AppData       sql.NullString
+}
+
+func (q *Queries) InsertOIDCLogin(ctx context.Context, arg InsertOIDCLoginParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertOIDCLogin,
+		arg.Key,
+		arg.Nonce,
+		arg.Verifier,
+		arg.StartedAt,
+		arg.ExpiresAt,
+		arg.MaxAgeSeconds,
+		arg.AppData,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const insertSourcedActionItem = `-- name: InsertSourcedActionItem :execrows
@@ -2327,6 +2450,62 @@ func (q *Queries) InsertSourcedActionItem(ctx context.Context, arg InsertSourced
 		arg.EventEndAt,
 		arg.ParentID,
 		arg.Importance,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const insertWebAuthnCeremony = `-- name: InsertWebAuthnCeremony :execrows
+INSERT INTO webauthn_ceremonies (key,subject,record,expires_at)
+VALUES ($1,$2,$3,$4)
+ON CONFLICT (key) DO NOTHING
+`
+
+type InsertWebAuthnCeremonyParams struct {
+	Key       string
+	Subject   string
+	Record    string
+	ExpiresAt int64
+}
+
+func (q *Queries) InsertWebAuthnCeremony(ctx context.Context, arg InsertWebAuthnCeremonyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertWebAuthnCeremony,
+		arg.Key,
+		arg.Subject,
+		arg.Record,
+		arg.ExpiresAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const insertWebSession = `-- name: InsertWebSession :execrows
+INSERT INTO web_sessions (id,user_id,authenticated_at,last_activity,absolute_expiry,idle_seconds)
+VALUES ($1,$2,$3,$4,$5,$6)
+ON CONFLICT (id) DO NOTHING
+`
+
+type InsertWebSessionParams struct {
+	ID              string
+	UserID          string
+	AuthenticatedAt int64
+	LastActivity    int64
+	AbsoluteExpiry  int64
+	IdleSeconds     int64
+}
+
+func (q *Queries) InsertWebSession(ctx context.Context, arg InsertWebSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertWebSession,
+		arg.ID,
+		arg.UserID,
+		arg.AuthenticatedAt,
+		arg.LastActivity,
+		arg.AbsoluteExpiry,
+		arg.IdleSeconds,
 	)
 	if err != nil {
 		return 0, err
@@ -3676,6 +3855,65 @@ func (q *Queries) ListGoogleAuthStateHashes(ctx context.Context, userID string) 
 	return items, nil
 }
 
+const listLiveMCPConnections = `-- name: ListLiveMCPConnections :many
+SELECT c.id, c.client_id, c.scopes, c.created_at, c.refresh_expiry, c.absolute_expiry, c.last_used_at,
+COALESCE(l.name, '')::text AS client_name, COALESCE(l.host, '')::text AS client_host
+FROM mcp_oauth_connections c LEFT JOIN mcp_oauth_client_labels l ON l.client_id = c.client_id
+WHERE c.subject = $1 AND c.refresh_expiry > $2::bigint
+AND (c.absolute_expiry IS NULL OR c.absolute_expiry > $2::bigint)
+ORDER BY c.created_at DESC, c.id DESC
+`
+
+type ListLiveMCPConnectionsParams struct {
+	Subject string
+	Now     int64
+}
+
+type ListLiveMCPConnectionsRow struct {
+	ID             string
+	ClientID       string
+	Scopes         string
+	CreatedAt      int64
+	RefreshExpiry  int64
+	AbsoluteExpiry sql.NullInt64
+	LastUsedAt     sql.NullInt64
+	ClientName     string
+	ClientHost     string
+}
+
+func (q *Queries) ListLiveMCPConnections(ctx context.Context, arg ListLiveMCPConnectionsParams) ([]ListLiveMCPConnectionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveMCPConnections, arg.Subject, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLiveMCPConnectionsRow
+	for rows.Next() {
+		var i ListLiveMCPConnectionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ClientID,
+			&i.Scopes,
+			&i.CreatedAt,
+			&i.RefreshExpiry,
+			&i.AbsoluteExpiry,
+			&i.LastUsedAt,
+			&i.ClientName,
+			&i.ClientHost,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMFATOTPUserIDs = `-- name: ListMFATOTPUserIDs :many
 SELECT user_id FROM mfa_totp
 `
@@ -3704,7 +3942,7 @@ func (q *Queries) ListMFATOTPUserIDs(ctx context.Context) ([]string, error) {
 }
 
 const listMFAWebAuthnCredentials = `-- name: ListMFAWebAuthnCredentials :many
-SELECT id, user_id, credential_id, credential, name, created_at, last_used_at FROM mfa_webauthn_credentials
+SELECT id, user_id, credential_id, credential, name, created_at, last_used_at, version, passkey FROM mfa_webauthn_credentials
 WHERE user_id = $1 ORDER BY created_at, id
 `
 
@@ -3725,6 +3963,8 @@ func (q *Queries) ListMFAWebAuthnCredentials(ctx context.Context, userID string)
 			&i.Name,
 			&i.CreatedAt,
 			&i.LastUsedAt,
+			&i.Version,
+			&i.Passkey,
 		); err != nil {
 			return nil, err
 		}
@@ -3799,45 +4039,23 @@ func (q *Queries) ListNotificationUserIDs(ctx context.Context) ([]string, error)
 	return items, nil
 }
 
-const listOAuthGrants = `-- name: ListOAuthGrants :many
-SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
-WHERE user_id = $1 AND code_used_at IS NOT NULL AND expires_at > $2
-ORDER BY created_at DESC, id DESC
+const listOIDCLinkedUserIDs = `-- name: ListOIDCLinkedUserIDs :many
+SELECT id FROM users WHERE oidc_issuer IS NOT NULL OR oidc_subject IS NOT NULL ORDER BY id
 `
 
-type ListOAuthGrantsParams struct {
-	UserID string
-	Now    int64
-}
-
-func (q *Queries) ListOAuthGrants(ctx context.Context, arg ListOAuthGrantsParams) ([]OauthGrant, error) {
-	rows, err := q.db.QueryContext(ctx, listOAuthGrants, arg.UserID, arg.Now)
+func (q *Queries) ListOIDCLinkedUserIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listOIDCLinkedUserIDs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []OauthGrant
+	var items []string
 	for rows.Next() {
-		var i OauthGrant
-		if err := rows.Scan(
-			&i.ID,
-			&i.UserID,
-			&i.ClientID,
-			&i.ClientName,
-			&i.Scope,
-			&i.Resource,
-			&i.RedirectUri,
-			&i.CodeHash,
-			&i.CodeChallenge,
-			&i.CodeExpiresAt,
-			&i.CodeUsedAt,
-			&i.CreatedAt,
-			&i.ExpiresAt,
-			&i.LastUsedAt,
-		); err != nil {
+		var id string
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		items = append(items, i)
+		items = append(items, id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -4255,7 +4473,7 @@ func (q *Queries) ListTrackedSourcePrefixItems(ctx context.Context, arg ListTrac
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users ORDER BY created_at, id LIMIT $1
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users ORDER BY created_at, id LIMIT $1
 `
 
 func (q *Queries) ListUsers(ctx context.Context, pageSize int32) ([]User, error) {
@@ -4276,6 +4494,7 @@ func (q *Queries) ListUsers(ctx context.Context, pageSize int32) ([]User, error)
 			&i.Role,
 			&i.OidcIssuer,
 			&i.OidcSubject,
+			&i.OidcLinkApprovedUntil,
 		); err != nil {
 			return nil, err
 		}
@@ -4635,58 +4854,51 @@ func (q *Queries) LockInvitationByTokenHash(ctx context.Context, tokenHash strin
 	return i, err
 }
 
-const lockOAuthGrantByCode = `-- name: LockOAuthGrantByCode :one
-SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
-WHERE code_hash = $1 AND user_id = $2 FOR UPDATE
+const lockMCPCode = `-- name: LockMCPCode :one
+SELECT key, client_id, redirect_uri, subject, scopes, challenge, expires_at, consumed, reused FROM mcp_oauth_codes
+WHERE key = $1 FOR UPDATE
 `
 
-type LockOAuthGrantByCodeParams struct {
-	CodeHash string
-	UserID   string
-}
-
-func (q *Queries) LockOAuthGrantByCode(ctx context.Context, arg LockOAuthGrantByCodeParams) (OauthGrant, error) {
-	row := q.db.QueryRowContext(ctx, lockOAuthGrantByCode, arg.CodeHash, arg.UserID)
-	var i OauthGrant
+func (q *Queries) LockMCPCode(ctx context.Context, key string) (McpOauthCode, error) {
+	row := q.db.QueryRowContext(ctx, lockMCPCode, key)
+	var i McpOauthCode
 	err := row.Scan(
-		&i.ID,
-		&i.UserID,
+		&i.Key,
 		&i.ClientID,
-		&i.ClientName,
-		&i.Scope,
-		&i.Resource,
 		&i.RedirectUri,
-		&i.CodeHash,
-		&i.CodeChallenge,
-		&i.CodeExpiresAt,
-		&i.CodeUsedAt,
-		&i.CreatedAt,
+		&i.Subject,
+		&i.Scopes,
+		&i.Challenge,
 		&i.ExpiresAt,
-		&i.LastUsedAt,
+		&i.Consumed,
+		&i.Reused,
 	)
 	return i, err
 }
 
-const lockOAuthTokenByHash = `-- name: LockOAuthTokenByHash :one
-SELECT token_hash, kind, grant_id, user_id, created_at, expires_at FROM oauth_tokens
-WHERE token_hash = $1 AND user_id = $2 FOR UPDATE
+const lockMCPConnectionBySelector = `-- name: LockMCPConnectionBySelector :one
+SELECT id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at FROM mcp_oauth_connections
+WHERE selector = $1 FOR UPDATE
 `
 
-type LockOAuthTokenByHashParams struct {
-	TokenHash string
-	UserID    string
-}
-
-func (q *Queries) LockOAuthTokenByHash(ctx context.Context, arg LockOAuthTokenByHashParams) (OauthToken, error) {
-	row := q.db.QueryRowContext(ctx, lockOAuthTokenByHash, arg.TokenHash, arg.UserID)
-	var i OauthToken
+func (q *Queries) LockMCPConnectionBySelector(ctx context.Context, selector string) (McpOauthConnection, error) {
+	row := q.db.QueryRowContext(ctx, lockMCPConnectionBySelector, selector)
+	var i McpOauthConnection
 	err := row.Scan(
-		&i.TokenHash,
-		&i.Kind,
-		&i.GrantID,
-		&i.UserID,
+		&i.ID,
+		&i.Selector,
+		&i.Subject,
+		&i.ClientID,
+		&i.Scopes,
 		&i.CreatedAt,
-		&i.ExpiresAt,
+		&i.RefreshedAt,
+		&i.AbsoluteExpiry,
+		&i.Access,
+		&i.AccessExpiry,
+		&i.Refresh,
+		&i.RefreshExpiry,
+		&i.Code,
+		&i.LastUsedAt,
 	)
 	return i, err
 }
@@ -4749,7 +4961,7 @@ func (q *Queries) LockSlackConnection(ctx context.Context, userID string) (Slack
 }
 
 const lockUserByID = `-- name: LockUserByID :one
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE id = $1 FOR UPDATE
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {
@@ -4764,12 +4976,13 @@ func (q *Queries) LockUserByID(ctx context.Context, id string) (User, error) {
 		&i.Role,
 		&i.OidcIssuer,
 		&i.OidcSubject,
+		&i.OidcLinkApprovedUntil,
 	)
 	return i, err
 }
 
 const lockUsersForOwnerChange = `-- name: LockUsersForOwnerChange :many
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users
 WHERE id = $1 OR id = $2 OR (role = 'owner' AND disabled = 0)
 ORDER BY id FOR UPDATE
 `
@@ -4797,6 +5010,7 @@ func (q *Queries) LockUsersForOwnerChange(ctx context.Context, arg LockUsersForO
 			&i.Role,
 			&i.OidcIssuer,
 			&i.OidcSubject,
+			&i.OidcLinkApprovedUntil,
 		); err != nil {
 			return nil, err
 		}
@@ -4811,41 +5025,22 @@ func (q *Queries) LockUsersForOwnerChange(ctx context.Context, arg LockUsersForO
 	return items, nil
 }
 
-const markOAuthCodeUsed = `-- name: MarkOAuthCodeUsed :execrows
-UPDATE oauth_grants SET code_used_at = $1
-WHERE id = $2 AND user_id = $3 AND code_used_at IS NULL
+const markMCPCodeConsumed = `-- name: MarkMCPCodeConsumed :exec
+UPDATE mcp_oauth_codes SET consumed = 1 WHERE key = $1
 `
 
-type MarkOAuthCodeUsedParams struct {
-	CodeUsedAt sql.NullInt64
-	ID         string
-	UserID     string
+func (q *Queries) MarkMCPCodeConsumed(ctx context.Context, key string) error {
+	_, err := q.db.ExecContext(ctx, markMCPCodeConsumed, key)
+	return err
 }
 
-func (q *Queries) MarkOAuthCodeUsed(ctx context.Context, arg MarkOAuthCodeUsedParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, markOAuthCodeUsed, arg.CodeUsedAt, arg.ID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const markOAuthRefreshUsed = `-- name: MarkOAuthRefreshUsed :execrows
-UPDATE oauth_tokens SET kind = 'refresh_used'
-WHERE token_hash = $1 AND user_id = $2 AND kind = 'refresh'
+const markMCPCodeReused = `-- name: MarkMCPCodeReused :exec
+UPDATE mcp_oauth_codes SET reused = 1 WHERE key = $1
 `
 
-type MarkOAuthRefreshUsedParams struct {
-	TokenHash string
-	UserID    string
-}
-
-func (q *Queries) MarkOAuthRefreshUsed(ctx context.Context, arg MarkOAuthRefreshUsedParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, markOAuthRefreshUsed, arg.TokenHash, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+func (q *Queries) MarkMCPCodeReused(ctx context.Context, key string) error {
+	_, err := q.db.ExecContext(ctx, markMCPCodeReused, key)
+	return err
 }
 
 const markSlackWebhookInvalid = `-- name: MarkSlackWebhookInvalid :execrows
@@ -4902,6 +5097,23 @@ func (q *Queries) ReconnectGmailAccount(ctx context.Context, arg ReconnectGmailA
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const releaseMCPRegistrations = `-- name: ReleaseMCPRegistrations :exec
+UPDATE mcp_oauth_registrations SET expires_at = $1
+WHERE mcp_oauth_registrations.expires_at IS NULL AND mcp_oauth_registrations.created_at <= $2::bigint
+AND NOT EXISTS (SELECT 1 FROM mcp_oauth_connections c WHERE c.client_id = mcp_oauth_registrations.id)
+AND NOT EXISTS (SELECT 1 FROM mcp_oauth_codes k WHERE k.client_id = mcp_oauth_registrations.id)
+`
+
+type ReleaseMCPRegistrationsParams struct {
+	ReleaseAt       sql.NullInt64
+	ActivatedBefore int64
+}
+
+func (q *Queries) ReleaseMCPRegistrations(ctx context.Context, arg ReleaseMCPRegistrationsParams) error {
+	_, err := q.db.ExecContext(ctx, releaseMCPRegistrations, arg.ReleaseAt, arg.ActivatedBefore)
+	return err
 }
 
 const replaceAISettings = `-- name: ReplaceAISettings :execrows
@@ -5071,11 +5283,12 @@ func (q *Queries) ReplaceInstanceSecret(ctx context.Context, arg ReplaceInstance
 }
 
 const replaceMFATOTP = `-- name: ReplaceMFATOTP :execrows
-UPDATE mfa_totp SET secret_sealed = $1, last_step = $2, created_at = $3
-WHERE user_id = $4
+UPDATE mfa_totp SET id = $1, secret_sealed = $2, last_step = $3, created_at = $4
+WHERE user_id = $5
 `
 
 type ReplaceMFATOTPParams struct {
+	ID           string
 	SecretSealed string
 	LastStep     int64
 	CreatedAt    int64
@@ -5084,6 +5297,7 @@ type ReplaceMFATOTPParams struct {
 
 func (q *Queries) ReplaceMFATOTP(ctx context.Context, arg ReplaceMFATOTPParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, replaceMFATOTP,
+		arg.ID,
 		arg.SecretSealed,
 		arg.LastStep,
 		arg.CreatedAt,
@@ -5232,36 +5446,67 @@ func (q *Queries) RevokePasswordReset(ctx context.Context, arg RevokePasswordRes
 	return err
 }
 
-const revokeSession = `-- name: RevokeSession :exec
-UPDATE sessions SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL
+const rotateMCPConnection = `-- name: RotateMCPConnection :one
+UPDATE mcp_oauth_connections
+SET access = $1, access_expiry = $2, refresh = $3, refresh_expiry = $4, refreshed_at = $5
+WHERE id = $6
+RETURNING id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at
 `
 
-type RevokeSessionParams struct {
-	RevokedAt sql.NullInt64
-	ID        string
+type RotateMCPConnectionParams struct {
+	Access        string
+	AccessExpiry  int64
+	Refresh       string
+	RefreshExpiry int64
+	RefreshedAt   int64
+	ID            string
 }
 
-func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) error {
-	_, err := q.db.ExecContext(ctx, revokeSession, arg.RevokedAt, arg.ID)
-	return err
+func (q *Queries) RotateMCPConnection(ctx context.Context, arg RotateMCPConnectionParams) (McpOauthConnection, error) {
+	row := q.db.QueryRowContext(ctx, rotateMCPConnection,
+		arg.Access,
+		arg.AccessExpiry,
+		arg.Refresh,
+		arg.RefreshExpiry,
+		arg.RefreshedAt,
+		arg.ID,
+	)
+	var i McpOauthConnection
+	err := row.Scan(
+		&i.ID,
+		&i.Selector,
+		&i.Subject,
+		&i.ClientID,
+		&i.Scopes,
+		&i.CreatedAt,
+		&i.RefreshedAt,
+		&i.AbsoluteExpiry,
+		&i.Access,
+		&i.AccessExpiry,
+		&i.Refresh,
+		&i.RefreshExpiry,
+		&i.Code,
+		&i.LastUsedAt,
+	)
+	return i, err
 }
 
-const revokeUserSessions = `-- name: RevokeUserSessions :exec
-UPDATE sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL
+const setOIDCLinkApproval = `-- name: SetOIDCLinkApproval :exec
+UPDATE users SET oidc_link_approved_until = $1 WHERE id = $2
 `
 
-type RevokeUserSessionsParams struct {
-	RevokedAt sql.NullInt64
-	UserID    string
+type SetOIDCLinkApprovalParams struct {
+	ApprovedUntil sql.NullInt64
+	ID            string
 }
 
-func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessionsParams) error {
-	_, err := q.db.ExecContext(ctx, revokeUserSessions, arg.RevokedAt, arg.UserID)
+func (q *Queries) SetOIDCLinkApproval(ctx context.Context, arg SetOIDCLinkApprovalParams) error {
+	_, err := q.db.ExecContext(ctx, setOIDCLinkApproval, arg.ApprovedUntil, arg.ID)
 	return err
 }
 
 const setUserOIDC = `-- name: SetUserOIDC :exec
-UPDATE users SET oidc_issuer = $1, oidc_subject = $2 WHERE id = $3
+UPDATE users SET oidc_issuer = $1, oidc_subject = $2, oidc_link_approved_until = NULL WHERE id = $3
 `
 
 type SetUserOIDCParams struct {
@@ -5327,6 +5572,43 @@ func (q *Queries) StopTrackingSourcePrefixItems(ctx context.Context, arg StopTra
 	return err
 }
 
+const takeOIDCLogin = `-- name: TakeOIDCLogin :one
+DELETE FROM oidc_logins WHERE key = $1
+RETURNING key, nonce, verifier, started_at, expires_at, max_age_seconds, app_data
+`
+
+func (q *Queries) TakeOIDCLogin(ctx context.Context, key string) (OidcLogin, error) {
+	row := q.db.QueryRowContext(ctx, takeOIDCLogin, key)
+	var i OidcLogin
+	err := row.Scan(
+		&i.Key,
+		&i.Nonce,
+		&i.Verifier,
+		&i.StartedAt,
+		&i.ExpiresAt,
+		&i.MaxAgeSeconds,
+		&i.AppData,
+	)
+	return i, err
+}
+
+const takeWebAuthnCeremony = `-- name: TakeWebAuthnCeremony :one
+DELETE FROM webauthn_ceremonies WHERE key = $1
+RETURNING key, subject, record, expires_at
+`
+
+func (q *Queries) TakeWebAuthnCeremony(ctx context.Context, key string) (WebauthnCeremony, error) {
+	row := q.db.QueryRowContext(ctx, takeWebAuthnCeremony, key)
+	var i WebauthnCeremony
+	err := row.Scan(
+		&i.Key,
+		&i.Subject,
+		&i.Record,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const touchAPIToken = `-- name: TouchAPIToken :exec
 UPDATE api_tokens SET last_used_at = $1
 WHERE id = $2 AND (last_used_at IS NULL OR last_used_at < $3)
@@ -5368,25 +5650,44 @@ func (q *Queries) TouchActionItemTracked(ctx context.Context, arg TouchActionIte
 	return result.RowsAffected()
 }
 
-const touchOAuthGrant = `-- name: TouchOAuthGrant :exec
-UPDATE oauth_grants SET last_used_at = $1
-WHERE id = $2 AND user_id = $3 AND (last_used_at IS NULL OR last_used_at < $4)
+const touchLiveWebSession = `-- name: TouchLiveWebSession :one
+UPDATE web_sessions SET last_activity = GREATEST(last_activity, $1::bigint)
+WHERE id = $2 AND absolute_expiry > $1::bigint AND last_activity + idle_seconds > $1::bigint
+RETURNING id, user_id, authenticated_at, last_activity, absolute_expiry, idle_seconds
 `
 
-type TouchOAuthGrantParams struct {
-	LastUsedAt    sql.NullInt64
-	ID            string
-	UserID        string
-	TouchedBefore sql.NullInt64
+type TouchLiveWebSessionParams struct {
+	Now int64
+	ID  string
 }
 
-func (q *Queries) TouchOAuthGrant(ctx context.Context, arg TouchOAuthGrantParams) error {
-	_, err := q.db.ExecContext(ctx, touchOAuthGrant,
-		arg.LastUsedAt,
-		arg.ID,
-		arg.UserID,
-		arg.TouchedBefore,
+func (q *Queries) TouchLiveWebSession(ctx context.Context, arg TouchLiveWebSessionParams) (WebSession, error) {
+	row := q.db.QueryRowContext(ctx, touchLiveWebSession, arg.Now, arg.ID)
+	var i WebSession
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.AuthenticatedAt,
+		&i.LastActivity,
+		&i.AbsoluteExpiry,
+		&i.IdleSeconds,
 	)
+	return i, err
+}
+
+const touchMCPConnection = `-- name: TouchMCPConnection :exec
+UPDATE mcp_oauth_connections SET last_used_at = $1::bigint
+WHERE id = $2 AND (last_used_at IS NULL OR last_used_at <= $3::bigint)
+`
+
+type TouchMCPConnectionParams struct {
+	Now           int64
+	ID            string
+	TouchedBefore int64
+}
+
+func (q *Queries) TouchMCPConnection(ctx context.Context, arg TouchMCPConnectionParams) error {
+	_, err := q.db.ExecContext(ctx, touchMCPConnection, arg.Now, arg.ID, arg.TouchedBefore)
 	return err
 }
 
@@ -5751,23 +6052,27 @@ func (q *Queries) UpdateGmailTokenSealed(ctx context.Context, arg UpdateGmailTok
 }
 
 const updateMFAWebAuthnCredential = `-- name: UpdateMFAWebAuthnCredential :execrows
-UPDATE mfa_webauthn_credentials SET credential = $1, last_used_at = $2
-WHERE user_id = $3 AND credential_id = $4
+UPDATE mfa_webauthn_credentials SET credential = $1, version = $2, last_used_at = $3
+WHERE user_id = $4 AND credential_id = $5 AND version = $6
 `
 
 type UpdateMFAWebAuthnCredentialParams struct {
 	Credential   string
+	NewVersion   string
 	LastUsedAt   sql.NullInt64
 	UserID       string
 	CredentialID string
+	OldVersion   string
 }
 
 func (q *Queries) UpdateMFAWebAuthnCredential(ctx context.Context, arg UpdateMFAWebAuthnCredentialParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, updateMFAWebAuthnCredential,
 		arg.Credential,
+		arg.NewVersion,
 		arg.LastUsedAt,
 		arg.UserID,
 		arg.CredentialID,
+		arg.OldVersion,
 	)
 	if err != nil {
 		return 0, err
@@ -5910,28 +6215,24 @@ func (q *Queries) UpsertAIInstruction(ctx context.Context, arg UpsertAIInstructi
 	return err
 }
 
-const upsertCIMDClient = `-- name: UpsertCIMDClient :exec
-INSERT INTO oauth_clients (client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at)
-VALUES ($1,'cimd',$2,$3,'none',NULL,$4,$5,$6)
-ON CONFLICT (client_id) DO UPDATE SET name = excluded.name, redirect_uris = excluded.redirect_uris, metadata_expires_at = excluded.metadata_expires_at, updated_at = excluded.updated_at
+const upsertMCPClientLabel = `-- name: UpsertMCPClientLabel :exec
+INSERT INTO mcp_oauth_client_labels (client_id,name,host,updated_at)
+VALUES ($1,$2,$3,$4)
+ON CONFLICT (client_id) DO UPDATE SET name = excluded.name, host = excluded.host, updated_at = excluded.updated_at
 `
 
-type UpsertCIMDClientParams struct {
-	ClientID          string
-	Name              string
-	RedirectUris      string
-	MetadataExpiresAt sql.NullInt64
-	CreatedAt         int64
-	UpdatedAt         int64
+type UpsertMCPClientLabelParams struct {
+	ClientID  string
+	Name      string
+	Host      string
+	UpdatedAt int64
 }
 
-func (q *Queries) UpsertCIMDClient(ctx context.Context, arg UpsertCIMDClientParams) error {
-	_, err := q.db.ExecContext(ctx, upsertCIMDClient,
+func (q *Queries) UpsertMCPClientLabel(ctx context.Context, arg UpsertMCPClientLabelParams) error {
+	_, err := q.db.ExecContext(ctx, upsertMCPClientLabel,
 		arg.ClientID,
 		arg.Name,
-		arg.RedirectUris,
-		arg.MetadataExpiresAt,
-		arg.CreatedAt,
+		arg.Host,
 		arg.UpdatedAt,
 	)
 	return err
@@ -6019,23 +6320,6 @@ type UseMFARecoveryCodeParams struct {
 
 func (q *Queries) UseMFARecoveryCode(ctx context.Context, arg UseMFARecoveryCodeParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, useMFARecoveryCode, arg.UsedAt, arg.UserID, arg.CodeHash)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const useMFATOTPStep = `-- name: UseMFATOTPStep :execrows
-UPDATE mfa_totp SET last_step = $1 WHERE user_id = $2 AND last_step < $1
-`
-
-type UseMFATOTPStepParams struct {
-	Step   int64
-	UserID string
-}
-
-func (q *Queries) UseMFATOTPStep(ctx context.Context, arg UseMFATOTPStepParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, useMFATOTPStep, arg.Step, arg.UserID)
 	if err != nil {
 		return 0, err
 	}

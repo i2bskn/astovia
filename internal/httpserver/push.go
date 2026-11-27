@@ -13,7 +13,6 @@ import (
 
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
-	"github.com/i2bskn/astovia/internal/oauth"
 	"github.com/i2bskn/astovia/internal/store"
 )
 
@@ -162,7 +161,7 @@ func (s *Server) handleCreatePushSubscription(w http.ResponseWriter, r *http.Req
 	}
 	label := ""
 	if in.Label != nil {
-		label = oauth.ClientName(*in.Label, "")
+		label = clientName(*in.Label, "")
 		if utf8.RuneCountInString(label) > 64 {
 			label = string([]rune(label)[:64])
 		}

@@ -73,7 +73,7 @@ var (
 // Link-local, unspecified and multicast addresses and the known metadata
 // services are always refused; the other addresses are allowed when
 // allowPrivate is set, and otherwise only public ones
-// (oauth.AllowedCIMDAddr). IPv4-mapped IPv6 addresses are checked as IPv4.
+// (oauth.AllowedPublicAddr). IPv4-mapped IPv6 addresses are checked as IPv4.
 func endpointAddrAllowed(a netip.Addr, allowPrivate bool) bool {
 	a = a.Unmap().WithZone("")
 	if !a.IsValid() || a.IsLinkLocalUnicast() || a.IsUnspecified() || a.IsMulticast() {
@@ -91,11 +91,11 @@ func endpointAddrAllowed(a netip.Addr, allowPrivate bool) bool {
 	if allowPrivate {
 		return true
 	}
-	return oauth.AllowedCIMDAddr(a)
+	return oauth.AllowedPublicAddr(a)
 }
 
 // NewEndpointClient returns the HTTP client of the OpenAI API and the
-// OpenAI-compatible endpoints. Like the client of the metadata documents, it
+// OpenAI-compatible endpoints. Like the client of the push services, it
 // checks the address of every connection after name resolution, ignores the
 // proxy environment variables and does not follow redirects. With
 // allowPrivate, non-public addresses are reached as well (except the ones

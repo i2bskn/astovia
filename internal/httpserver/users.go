@@ -5,6 +5,8 @@ import (
 	"errors"
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/store"
+	"github.com/i2bskn/authlume/password"
+	"github.com/i2bskn/authlume/session"
 	"log"
 	"net/http"
 )
@@ -350,7 +352,7 @@ func linkError(w http.ResponseWriter, op string, err error) {
 func linkPassword(w http.ResponseWriter, password string) (string, bool) {
 	hash, err := auth.Password(password)
 	if err != nil {
-		if len(password) < 12 || len(password) > 72 {
+		if len(password) < auth.MinPasswordBytes || len(password) > auth.MaxPasswordBytes {
 			fail(w, 400, "invalid_request", err.Error())
 		} else {
 			log.Printf("auth: hash password: %v", err)
@@ -361,20 +363,32 @@ func linkPassword(w http.ResponseWriter, password string) (string, bool) {
 	return hash, true
 }
 
-// signInAfterLink revokes the session of the refresh cookie the browser
-// sent, if any, and signs u in through passwordSignIn, which asks for the
-// second factor when one is needed. It is called only after the invitation
-// or reset was committed. A failure is a 503 whatever its cause: the
-// account change stays committed and the screen sends the user to the
-// login form.
-func (s *Server) signInAfterLink(w http.ResponseWriter, r *http.Request, op string, u store.User) {
+// signInAfterLink revokes the session of the cookie the browser sent, if
+// any, and signs u in through passwordSignIn, which asks for the second
+// factor when one is needed. passwordHash is the hash the link stored; the
+// session or the MFA token is bound to it, as to a verified password. It is
+// called only after the invitation or reset was committed. A failure is a
+// 503 whatever its cause: the account change stays committed and the screen
+// sends the user to the login form.
+func (s *Server) signInAfterLink(w http.ResponseWriter, r *http.Request, op string, u store.User, passwordHash string) {
 	// A browser signed in to another account must not keep that session
-	// next to the new one.
-	if err := s.auth.Logout(r.Context(), refreshCookie(r)); err != nil {
+	// next to the new one, also while the second factor is asked for.
+	err := s.sessions.Logout(w, r)
+	if errors.Is(err, session.ErrInvalid) {
+		err = s.sessions.ResetInvalidCookie(w, r)
+	}
+	if err != nil {
 		linkError(w, op+": revoke previous session", err)
 		return
 	}
-	s.passwordSignIn(w, r, u, func(err error) { linkError(w, op+": sign in", err) })
+	r = withoutCookie(r, SessionCookieName)
+	status, decision, err := s.mfaDecision(r.Context(), u)
+	if err != nil {
+		linkError(w, op+": sign in", err)
+		return
+	}
+	v := verifiedUser{user: u, digest: auth.Hash(passwordHash), status: status, requireMFA: decision == password.RequireMFA}
+	s.passwordSignIn(w, r, v, func(err error) { linkError(w, op+": sign in", err) })
 }
 
 func (s *Server) handleInspectInvitation(w http.ResponseWriter, r *http.Request) {
@@ -453,7 +467,7 @@ func (s *Server) handleAcceptInvitation(w http.ResponseWriter, r *http.Request) 
 		linkError(w, "accept invitation", err)
 		return
 	}
-	s.signInAfterLink(w, r, "accept invitation", u)
+	s.signInAfterLink(w, r, "accept invitation", u, passwordHash)
 }
 
 func (s *Server) handleInspectPasswordReset(w http.ResponseWriter, r *http.Request) {
@@ -520,5 +534,5 @@ func (s *Server) handleCompletePasswordReset(w http.ResponseWriter, r *http.Requ
 		linkError(w, "complete password reset", err)
 		return
 	}
-	s.signInAfterLink(w, r, "complete password reset", u)
+	s.signInAfterLink(w, r, "complete password reset", u, passwordHash)
 }

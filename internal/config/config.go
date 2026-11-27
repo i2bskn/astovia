@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"github.com/i2bskn/astovia/internal/mfa"
 	"net"
 	"net/mail"
@@ -10,8 +11,10 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -40,7 +43,23 @@ type Config struct {
 	// X-Forwarded-For is read to find the client address of a request.
 	// Empty trusts no proxy and uses the peer address only.
 	TrustedProxies []netip.Prefix
+	// MCP holds the lifetimes of the MCP OAuth connections.
+	MCP MCPConfig
 }
+
+// MCPConfig holds the lifetimes of the MCP OAuth connections
+// (ASTOVIA_MCP_ACCESS_TTL, ASTOVIA_MCP_REFRESH_IDLE and
+// ASTOVIA_MCP_CONNECTION_ABSOLUTE). ConnectionAbsolute 0 means that a
+// connection has no absolute limit.
+type MCPConfig struct {
+	AccessTTL, RefreshIdle, ConnectionAbsolute time.Duration
+}
+
+// Default lifetimes of the MCP OAuth connections.
+const (
+	DefaultMCPAccessTTL   = time.Hour
+	DefaultMCPRefreshIdle = 30 * 24 * time.Hour
+)
 
 // Values of ASTOVIA_MFA_REQUIRED.
 const (
@@ -86,6 +105,11 @@ type OIDCClient struct {
 	// address outside gmail.com whatever the issuer is. With Google as the
 	// issuer the claim is required even when this is false.
 	RequireGoogleHD bool
+	// FormActionOrigins are the origins the sign-in form may be sent to and
+	// redirected through, other than 'self': the issuer's origin and the
+	// origins of ASTOVIA_OIDC_FORM_ACTION_ORIGINS, in that order and without
+	// duplicates.
+	FormActionOrigins []string
 }
 
 // GoogleIssuer is the issuer of Google. Its hd claim tells a Google
@@ -144,6 +168,9 @@ func Load(requireSecret bool) (Config, error) {
 		return c, err
 	}
 	if c.TrustedProxies, err = trustedProxies(os.Getenv("ASTOVIA_TRUSTED_PROXIES")); err != nil {
+		return c, err
+	}
+	if c.MCP, err = mcpConfig(); err != nil {
 		return c, err
 	}
 	if requireSecret {
@@ -262,7 +289,77 @@ func oidcClient(publicURL string, serve bool) (*OIDCClient, error) {
 	if !strings.HasPrefix(publicURL, "https://") {
 		return nil, errors.New("ASTOVIA_PUBLIC_URL must use https with ASTOVIA_AUTH_MODE=oidc")
 	}
-	return &OIDCClient{Issuer: issuer, ClientID: id, Secret: secret, RedirectURI: publicURL + OIDCCallbackPath, RequireEmailVerified: requireVerified, RequireGoogleHD: googleHD}, nil
+	origins, err := formActionOrigins(issuer, os.Getenv("ASTOVIA_OIDC_FORM_ACTION_ORIGINS"))
+	if err != nil {
+		return nil, err
+	}
+	return &OIDCClient{Issuer: issuer, ClientID: id, Secret: secret, RedirectURI: publicURL + OIDCCallbackPath, RequireEmailVerified: requireVerified, RequireGoogleHD: googleHD, FormActionOrigins: origins}, nil
+}
+
+const formActionError = "ASTOVIA_OIDC_FORM_ACTION_ORIGINS must be a whitespace-separated list of https origins without path, credentials, query or fragment"
+
+// formActionOrigins returns the origin of the issuer followed by the origins
+// of v, a whitespace-separated list of https origins (ASTOVIA_OIDC_FORM_ACTION_ORIGINS).
+// Each listed value must be exactly an origin: https, a host, an optional
+// port, and nothing else. Duplicates are dropped.
+func formActionOrigins(issuer, v string) ([]string, error) {
+	u, err := url.Parse(issuer)
+	if err != nil {
+		return nil, errors.New("ASTOVIA_OIDC_ISSUER is not a valid URL")
+	}
+	origins := []string{"https://" + strings.ToLower(u.Host)}
+	for _, raw := range strings.Fields(v) {
+		origin, secure, err := canonicalOrigin(raw)
+		if err != nil || !secure || origin != strings.ToLower(raw) {
+			return nil, errors.New(formActionError)
+		}
+		if !slices.Contains(origins, origin) {
+			origins = append(origins, origin)
+		}
+	}
+	return origins, nil
+}
+
+// mcpDuration reads the duration variable k in the form of
+// time.ParseDuration. Unset or blank gives def. The value must be in
+// [min, max], or 0 when zero is true.
+func mcpDuration(k string, def, min, max time.Duration, zero bool) (time.Duration, error) {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err == nil && ((zero && d == 0) || (d >= min && d <= max)) {
+		return d, nil
+	}
+	if zero {
+		return 0, fmt.Errorf("%s must be 0 or a duration from %s to %s, such as 720h", k, min, max)
+	}
+	return 0, fmt.Errorf("%s must be a duration from %s to %s, such as 720h", k, min, max)
+}
+
+// mcpConfig reads the lifetimes of the MCP OAuth connections. The access
+// token lifetime must not exceed the refresh token's idle lifetime, nor the
+// absolute lifetime when there is one.
+func mcpConfig() (MCPConfig, error) {
+	var c MCPConfig
+	var err error
+	if c.AccessTTL, err = mcpDuration("ASTOVIA_MCP_ACCESS_TTL", DefaultMCPAccessTTL, 5*time.Minute, 24*time.Hour, false); err != nil {
+		return c, err
+	}
+	if c.RefreshIdle, err = mcpDuration("ASTOVIA_MCP_REFRESH_IDLE", DefaultMCPRefreshIdle, time.Hour, 8760*time.Hour, false); err != nil {
+		return c, err
+	}
+	if c.ConnectionAbsolute, err = mcpDuration("ASTOVIA_MCP_CONNECTION_ABSOLUTE", 0, 24*time.Hour, 87600*time.Hour, true); err != nil {
+		return c, err
+	}
+	if c.AccessTTL > c.RefreshIdle {
+		return c, errors.New("ASTOVIA_MCP_ACCESS_TTL must not exceed ASTOVIA_MCP_REFRESH_IDLE")
+	}
+	if c.ConnectionAbsolute != 0 && c.AccessTTL > c.ConnectionAbsolute {
+		return c, errors.New("ASTOVIA_MCP_ACCESS_TTL must not exceed ASTOVIA_MCP_CONNECTION_ABSOLUTE")
+	}
+	return c, nil
 }
 
 // validOIDCIssuer accepts an absolute https URL of 1-2048 bytes with a host

@@ -1,54 +1,37 @@
 -- name: GetUserByEmail :one
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE email = sqlc.arg(email);
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users WHERE email = sqlc.arg(email);
 -- name: GetUserByID :one
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE id = sqlc.arg(id);
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users WHERE id = sqlc.arg(id);
 -- name: LockUserByID :one
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE id = sqlc.arg(id) FOR UPDATE;
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users WHERE id = sqlc.arg(id) FOR UPDATE;
 -- name: CreateUser :exec
 INSERT INTO users (id,email,password_hash,disabled,created_at,role,oidc_issuer,oidc_subject)
 VALUES (sqlc.arg(id),sqlc.arg(email),sqlc.arg(password_hash),0,sqlc.arg(created_at),sqlc.arg(role),sqlc.arg(oidc_issuer),sqlc.arg(oidc_subject));
 -- name: GetUserByOIDC :one
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users
 WHERE oidc_issuer = sqlc.arg(oidc_issuer) AND oidc_subject = sqlc.arg(oidc_subject);
 -- name: SetUserOIDC :exec
-UPDATE users SET oidc_issuer = sqlc.arg(oidc_issuer), oidc_subject = sqlc.arg(oidc_subject) WHERE id = sqlc.arg(id);
+UPDATE users SET oidc_issuer = sqlc.arg(oidc_issuer), oidc_subject = sqlc.arg(oidc_subject), oidc_link_approved_until = NULL WHERE id = sqlc.arg(id);
 -- name: ClearUserOIDC :exec
 UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE id = sqlc.arg(id);
--- name: ClearAllUserOIDC :exec
-UPDATE users SET oidc_issuer = NULL, oidc_subject = NULL WHERE oidc_issuer IS NOT NULL OR oidc_subject IS NOT NULL;
+-- name: ListOIDCLinkedUserIDs :many
+SELECT id FROM users WHERE oidc_issuer IS NOT NULL OR oidc_subject IS NOT NULL ORDER BY id;
 -- name: ResetPassword :exec
 UPDATE users SET password_hash = $1 WHERE id = $2;
 -- name: DisableUser :exec
-UPDATE users SET disabled = 1 WHERE id = $1;
+UPDATE users SET disabled = 1, oidc_link_approved_until = NULL WHERE id = $1;
 -- name: EnableUser :exec
 UPDATE users SET disabled = 0 WHERE id = sqlc.arg(id);
 -- name: SetUserRole :exec
 UPDATE users SET role = sqlc.arg(role) WHERE id = sqlc.arg(id);
 -- name: ListUsers :many
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users ORDER BY created_at, id LIMIT sqlc.arg(page_size);
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users ORDER BY created_at, id LIMIT sqlc.arg(page_size);
 -- name: GetUsersByIDs :many
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users WHERE strpos(',' || sqlc.arg(ids)::text || ',', ',' || id || ',') > 0;
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users WHERE strpos(',' || sqlc.arg(ids)::text || ',', ',' || id || ',') > 0;
 -- name: LockUsersForOwnerChange :many
-SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject FROM users
+SELECT id, email, password_hash, disabled, created_at, role, oidc_issuer, oidc_subject, oidc_link_approved_until FROM users
 WHERE id = sqlc.arg(operator_id) OR id = sqlc.arg(target_id) OR (role = 'owner' AND disabled = 0)
 ORDER BY id FOR UPDATE;
--- name: CreateSession :exec
-INSERT INTO sessions (id,user_id,expires_at,created_at) VALUES ($1,$2,$3,$4);
--- name: GetSession :one
-SELECT id, user_id, expires_at, revoked_at, created_at FROM sessions WHERE id = sqlc.arg(id);
--- name: GetActiveSession :one
-SELECT id, user_id, expires_at, revoked_at, created_at FROM sessions
-WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND revoked_at IS NULL AND expires_at > sqlc.arg(now);
--- name: RevokeSession :exec
-UPDATE sessions SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL;
--- name: RevokeUserSessions :exec
-UPDATE sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL;
--- name: CreateRefresh :exec
-INSERT INTO refresh_tokens (hash,session_id,created_at) VALUES ($1,$2,$3);
--- name: GetRefresh :one
-SELECT hash, session_id, consumed_at, created_at FROM refresh_tokens WHERE hash = sqlc.arg(hash);
--- name: ConsumeRefresh :execrows
-UPDATE refresh_tokens SET consumed_at = $1 WHERE hash = $2 AND consumed_at IS NULL;
 -- name: CreateActionItem :exec
 INSERT INTO action_items (id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance)
 VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(content),sqlc.arg(status),sqlc.arg(note),sqlc.arg(due_at),sqlc.arg(refs),sqlc.arg(version),sqlc.arg(created_at),sqlc.arg(updated_at),sqlc.arg(source),sqlc.arg(source_key),sqlc.arg(tracking),sqlc.arg(auto_reason),sqlc.arg(auto_ref),sqlc.arg(auto_at),sqlc.arg(detected_at),sqlc.arg(tracked_at),sqlc.arg(kind),sqlc.arg(event_title),sqlc.arg(event_start_at),sqlc.arg(event_end_at),sqlc.arg(parent_id),sqlc.arg(importance));
@@ -148,66 +131,6 @@ UPDATE api_tokens SET last_used_at = sqlc.arg(last_used_at)
 WHERE id = sqlc.arg(id) AND (last_used_at IS NULL OR last_used_at < sqlc.arg(touched_before));
 -- name: DeleteUserAPITokens :exec
 DELETE FROM api_tokens WHERE user_id = sqlc.arg(user_id);
--- name: GetOAuthClient :one
-SELECT client_id, kind, name, redirect_uris, auth_method, secret_hash, metadata_expires_at, created_at, updated_at FROM oauth_clients
-WHERE client_id = sqlc.arg(client_id);
--- name: CreateOAuthClient :exec
-INSERT INTO oauth_clients (client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at)
-VALUES (sqlc.arg(client_id),sqlc.arg(kind),sqlc.arg(name),sqlc.arg(redirect_uris),sqlc.arg(auth_method),sqlc.arg(secret_hash),sqlc.arg(metadata_expires_at),sqlc.arg(created_at),sqlc.arg(updated_at));
--- name: UpsertCIMDClient :exec
-INSERT INTO oauth_clients (client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at)
-VALUES (sqlc.arg(client_id),'cimd',sqlc.arg(name),sqlc.arg(redirect_uris),'none',NULL,sqlc.arg(metadata_expires_at),sqlc.arg(created_at),sqlc.arg(updated_at))
-ON CONFLICT (client_id) DO UPDATE SET name = excluded.name, redirect_uris = excluded.redirect_uris, metadata_expires_at = excluded.metadata_expires_at, updated_at = excluded.updated_at;
--- name: CreateOAuthGrant :exec
-INSERT INTO oauth_grants (id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at)
-VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(client_id),sqlc.arg(client_name),sqlc.arg(scope),sqlc.arg(resource),sqlc.arg(redirect_uri),sqlc.arg(code_hash),sqlc.arg(code_challenge),sqlc.arg(code_expires_at),NULL,sqlc.arg(created_at),sqlc.arg(expires_at),NULL);
--- name: GetOAuthGrantByCode :one
-SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
-WHERE code_hash = sqlc.arg(code_hash);
--- name: LockOAuthGrantByCode :one
-SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
-WHERE code_hash = sqlc.arg(code_hash) AND user_id = sqlc.arg(user_id) FOR UPDATE;
--- name: GetOAuthGrant :one
-SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
-WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
--- name: MarkOAuthCodeUsed :execrows
-UPDATE oauth_grants SET code_used_at = sqlc.arg(code_used_at)
-WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND code_used_at IS NULL;
--- name: ExtendOAuthGrant :exec
-UPDATE oauth_grants SET expires_at = sqlc.arg(expires_at) WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
--- name: ListOAuthGrants :many
-SELECT id, user_id, client_id, client_name, scope, resource, redirect_uri, code_hash, code_challenge, code_expires_at, code_used_at, created_at, expires_at, last_used_at FROM oauth_grants
-WHERE user_id = sqlc.arg(user_id) AND code_used_at IS NOT NULL AND expires_at > sqlc.arg(now)
-ORDER BY created_at DESC, id DESC;
--- name: DeleteOAuthGrant :execrows
-DELETE FROM oauth_grants WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
--- name: TouchOAuthGrant :exec
-UPDATE oauth_grants SET last_used_at = sqlc.arg(last_used_at)
-WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND (last_used_at IS NULL OR last_used_at < sqlc.arg(touched_before));
--- name: DeleteExpiredOAuthGrants :exec
-DELETE FROM oauth_grants WHERE user_id = sqlc.arg(user_id) AND expires_at <= sqlc.arg(now);
--- name: DeleteUserOAuthGrants :exec
-DELETE FROM oauth_grants WHERE user_id = sqlc.arg(user_id);
--- name: CreateOAuthToken :exec
-INSERT INTO oauth_tokens (token_hash,kind,grant_id,user_id,created_at,expires_at)
-VALUES (sqlc.arg(token_hash),sqlc.arg(kind),sqlc.arg(grant_id),sqlc.arg(user_id),sqlc.arg(created_at),sqlc.arg(expires_at));
--- name: GetOAuthTokenByHash :one
-SELECT token_hash, kind, grant_id, user_id, created_at, expires_at FROM oauth_tokens WHERE token_hash = sqlc.arg(token_hash);
--- name: LockOAuthTokenByHash :one
-SELECT token_hash, kind, grant_id, user_id, created_at, expires_at FROM oauth_tokens
-WHERE token_hash = sqlc.arg(token_hash) AND user_id = sqlc.arg(user_id) FOR UPDATE;
--- name: MarkOAuthRefreshUsed :execrows
-UPDATE oauth_tokens SET kind = 'refresh_used'
-WHERE token_hash = sqlc.arg(token_hash) AND user_id = sqlc.arg(user_id) AND kind = 'refresh';
--- name: CapGrantOAuthTokens :exec
-UPDATE oauth_tokens SET expires_at = sqlc.arg(max_expires_at)
-WHERE grant_id = sqlc.arg(grant_id) AND user_id = sqlc.arg(user_id) AND expires_at > sqlc.arg(max_expires_at);
--- name: DeleteGrantOAuthTokens :exec
-DELETE FROM oauth_tokens WHERE grant_id = sqlc.arg(grant_id) AND user_id = sqlc.arg(user_id);
--- name: DeleteExpiredOAuthTokens :exec
-DELETE FROM oauth_tokens WHERE user_id = sqlc.arg(user_id) AND expires_at <= sqlc.arg(now);
--- name: DeleteUserOAuthTokens :exec
-DELETE FROM oauth_tokens WHERE user_id = sqlc.arg(user_id);
 -- name: GetGitHubConnection :one
 SELECT user_id, generation, token_sealed, token_last4, login, scopes, immediate_notify, status, last_error, failure_count, last_modified, initial_import_pending, next_poll_at, last_synced_at, last_reconciled_at, last_tracked_at, created_at, updated_at FROM github_connections
 WHERE user_id = sqlc.arg(user_id);
@@ -563,31 +486,31 @@ SELECT id, token_hash, user_id, created_by, created_at, expires_at, used_at, rev
 WHERE user_id = sqlc.arg(user_id) AND used_at > sqlc.arg(since)
 ORDER BY used_at DESC, id DESC LIMIT 1;
 -- name: GetMFATOTP :one
-SELECT user_id, secret_sealed, last_step, created_at FROM mfa_totp WHERE user_id = sqlc.arg(user_id);
+SELECT id, user_id, secret_sealed, last_step, created_at FROM mfa_totp WHERE user_id = sqlc.arg(user_id);
 -- name: CreateMFATOTP :exec
-INSERT INTO mfa_totp (user_id,secret_sealed,last_step,created_at)
-VALUES (sqlc.arg(user_id),sqlc.arg(secret_sealed),sqlc.arg(last_step),sqlc.arg(created_at));
+INSERT INTO mfa_totp (user_id,id,secret_sealed,last_step,created_at)
+VALUES (sqlc.arg(user_id),sqlc.arg(id),sqlc.arg(secret_sealed),sqlc.arg(last_step),sqlc.arg(created_at));
 -- name: ReplaceMFATOTP :execrows
-UPDATE mfa_totp SET secret_sealed = sqlc.arg(secret_sealed), last_step = sqlc.arg(last_step), created_at = sqlc.arg(created_at)
+UPDATE mfa_totp SET id = sqlc.arg(id), secret_sealed = sqlc.arg(secret_sealed), last_step = sqlc.arg(last_step), created_at = sqlc.arg(created_at)
 WHERE user_id = sqlc.arg(user_id);
--- name: UseMFATOTPStep :execrows
-UPDATE mfa_totp SET last_step = sqlc.arg(step) WHERE user_id = sqlc.arg(user_id) AND last_step < sqlc.arg(step);
+-- name: ConsumeMFATOTPStep :execrows
+UPDATE mfa_totp SET last_step = sqlc.arg(step) WHERE user_id = sqlc.arg(user_id) AND id = sqlc.arg(id) AND last_step < sqlc.arg(step);
 -- name: DeleteMFATOTP :execrows
 DELETE FROM mfa_totp WHERE user_id = sqlc.arg(user_id);
 -- name: ListMFATOTPUserIDs :many
 SELECT user_id FROM mfa_totp;
 -- name: ListMFAWebAuthnCredentials :many
-SELECT id, user_id, credential_id, credential, name, created_at, last_used_at FROM mfa_webauthn_credentials
+SELECT id, user_id, credential_id, credential, name, created_at, last_used_at, version, passkey FROM mfa_webauthn_credentials
 WHERE user_id = sqlc.arg(user_id) ORDER BY created_at, id;
 -- name: CountMFAWebAuthnCredentials :one
-SELECT COUNT(*) FROM mfa_webauthn_credentials WHERE user_id = sqlc.arg(user_id);
+SELECT COUNT(*) FROM mfa_webauthn_credentials WHERE user_id = sqlc.arg(user_id) AND version <> '';
 -- name: CreateMFAWebAuthnCredential :execrows
-INSERT INTO mfa_webauthn_credentials (id,user_id,credential_id,credential,name,created_at)
-VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(credential_id),sqlc.arg(credential),sqlc.arg(name),sqlc.arg(created_at))
+INSERT INTO mfa_webauthn_credentials (id,user_id,credential_id,credential,name,created_at,version,passkey)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(credential_id),sqlc.arg(credential),sqlc.arg(name),sqlc.arg(created_at),sqlc.arg(version),sqlc.arg(passkey))
 ON CONFLICT (credential_id) DO NOTHING;
 -- name: UpdateMFAWebAuthnCredential :execrows
-UPDATE mfa_webauthn_credentials SET credential = sqlc.arg(credential), last_used_at = sqlc.arg(last_used_at)
-WHERE user_id = sqlc.arg(user_id) AND credential_id = sqlc.arg(credential_id);
+UPDATE mfa_webauthn_credentials SET credential = sqlc.arg(credential), version = sqlc.arg(new_version), last_used_at = sqlc.arg(last_used_at)
+WHERE user_id = sqlc.arg(user_id) AND credential_id = sqlc.arg(credential_id) AND version = sqlc.arg(old_version);
 -- name: DeleteMFAWebAuthnCredential :execrows
 DELETE FROM mfa_webauthn_credentials WHERE user_id = sqlc.arg(user_id) AND id = sqlc.arg(id);
 -- name: DeleteUserMFAWebAuthnCredentials :exec
@@ -604,9 +527,140 @@ UPDATE mfa_recovery_codes SET used_at = sqlc.arg(used_at)
 WHERE user_id = sqlc.arg(user_id) AND code_hash = sqlc.arg(code_hash) AND used_at IS NULL;
 -- name: DeleteUserMFARecoveryCodes :exec
 DELETE FROM mfa_recovery_codes WHERE user_id = sqlc.arg(user_id);
--- name: DeleteExpiredMFAUsedChallenges :exec
-DELETE FROM mfa_used_challenges WHERE expires_at <= sqlc.arg(now);
--- name: CreateMFAUsedChallenge :execrows
-INSERT INTO mfa_used_challenges (challenge_hash,expires_at)
-VALUES (sqlc.arg(challenge_hash),sqlc.arg(expires_at))
-ON CONFLICT (challenge_hash) DO NOTHING;
+-- name: SetOIDCLinkApproval :exec
+UPDATE users SET oidc_link_approved_until = sqlc.narg(approved_until) WHERE id = sqlc.arg(id);
+-- name: InsertWebSession :execrows
+INSERT INTO web_sessions (id,user_id,authenticated_at,last_activity,absolute_expiry,idle_seconds)
+VALUES (sqlc.arg(id),sqlc.arg(user_id),sqlc.arg(authenticated_at),sqlc.arg(last_activity),sqlc.arg(absolute_expiry),sqlc.arg(idle_seconds))
+ON CONFLICT (id) DO NOTHING;
+-- name: GetLiveWebSession :one
+SELECT id, user_id, authenticated_at, last_activity, absolute_expiry, idle_seconds FROM web_sessions
+WHERE id = sqlc.arg(id) AND absolute_expiry > sqlc.arg(now)::bigint AND last_activity + idle_seconds > sqlc.arg(now)::bigint;
+-- name: TouchLiveWebSession :one
+UPDATE web_sessions SET last_activity = GREATEST(last_activity, sqlc.arg(now)::bigint)
+WHERE id = sqlc.arg(id) AND absolute_expiry > sqlc.arg(now)::bigint AND last_activity + idle_seconds > sqlc.arg(now)::bigint
+RETURNING id, user_id, authenticated_at, last_activity, absolute_expiry, idle_seconds;
+-- name: GetActiveWebSession :one
+SELECT id, user_id, authenticated_at, last_activity, absolute_expiry, idle_seconds FROM web_sessions
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND absolute_expiry > sqlc.arg(now)::bigint AND last_activity + idle_seconds > sqlc.arg(now)::bigint;
+-- name: DeleteWebSession :exec
+DELETE FROM web_sessions WHERE id = sqlc.arg(id);
+-- name: DeleteUserWebSessions :exec
+DELETE FROM web_sessions WHERE user_id = sqlc.arg(user_id);
+-- name: DeleteExpiredWebSessions :exec
+DELETE FROM web_sessions WHERE absolute_expiry <= sqlc.arg(now)::bigint OR last_activity + idle_seconds <= sqlc.arg(now)::bigint;
+-- name: DeleteExpiredOIDCLogin :exec
+DELETE FROM oidc_logins WHERE key = sqlc.arg(key) AND expires_at <= sqlc.arg(now)::bigint;
+-- name: DeleteExpiredOIDCLogins :exec
+DELETE FROM oidc_logins WHERE expires_at <= sqlc.arg(now)::bigint;
+-- name: InsertOIDCLogin :execrows
+INSERT INTO oidc_logins (key,nonce,verifier,started_at,expires_at,max_age_seconds,app_data)
+VALUES (sqlc.arg(key),sqlc.arg(nonce),sqlc.arg(verifier),sqlc.arg(started_at),sqlc.arg(expires_at),sqlc.narg(max_age_seconds),sqlc.narg(app_data))
+ON CONFLICT (key) DO NOTHING;
+-- name: TakeOIDCLogin :one
+DELETE FROM oidc_logins WHERE key = sqlc.arg(key)
+RETURNING key, nonce, verifier, started_at, expires_at, max_age_seconds, app_data;
+-- name: DeleteExpiredWebAuthnCeremony :exec
+DELETE FROM webauthn_ceremonies WHERE key = sqlc.arg(key) AND expires_at <= sqlc.arg(now)::bigint;
+-- name: DeleteExpiredWebAuthnCeremonies :exec
+DELETE FROM webauthn_ceremonies WHERE expires_at <= sqlc.arg(now)::bigint;
+-- name: InsertWebAuthnCeremony :execrows
+INSERT INTO webauthn_ceremonies (key,subject,record,expires_at)
+VALUES (sqlc.arg(key),sqlc.arg(subject),sqlc.arg(record),sqlc.arg(expires_at))
+ON CONFLICT (key) DO NOTHING;
+-- name: TakeWebAuthnCeremony :one
+DELETE FROM webauthn_ceremonies WHERE key = sqlc.arg(key)
+RETURNING key, subject, record, expires_at;
+-- name: DeleteSubjectWebAuthnCeremonies :exec
+DELETE FROM webauthn_ceremonies WHERE subject = sqlc.arg(subject);
+-- name: DeleteExpiredMCPCodes :exec
+DELETE FROM mcp_oauth_codes WHERE expires_at <= sqlc.arg(now)::bigint;
+-- name: InsertMCPCode :execrows
+INSERT INTO mcp_oauth_codes (key,client_id,redirect_uri,subject,scopes,challenge,expires_at,consumed,reused)
+VALUES (sqlc.arg(key),sqlc.arg(client_id),sqlc.arg(redirect_uri),sqlc.arg(subject),sqlc.arg(scopes),sqlc.arg(challenge),sqlc.arg(expires_at),0,0)
+ON CONFLICT DO NOTHING;
+-- name: LockMCPCode :one
+SELECT key, client_id, redirect_uri, subject, scopes, challenge, expires_at, consumed, reused FROM mcp_oauth_codes
+WHERE key = sqlc.arg(key) FOR UPDATE;
+-- name: DeleteMCPCode :exec
+DELETE FROM mcp_oauth_codes WHERE key = sqlc.arg(key);
+-- name: MarkMCPCodeConsumed :exec
+UPDATE mcp_oauth_codes SET consumed = 1 WHERE key = sqlc.arg(key);
+-- name: MarkMCPCodeReused :exec
+UPDATE mcp_oauth_codes SET reused = 1 WHERE key = sqlc.arg(key);
+-- name: DeleteMCPConnectionByCode :many
+DELETE FROM mcp_oauth_connections WHERE code = sqlc.arg(code)
+RETURNING id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at;
+-- name: DeleteExpiredMCPConnections :exec
+DELETE FROM mcp_oauth_connections
+WHERE refresh_expiry <= sqlc.arg(now)::bigint OR absolute_expiry <= sqlc.arg(now)::bigint;
+-- name: InsertMCPConnection :execrows
+INSERT INTO mcp_oauth_connections (id,selector,subject,client_id,scopes,created_at,refreshed_at,absolute_expiry,access,access_expiry,refresh,refresh_expiry,code,last_used_at)
+VALUES (sqlc.arg(id),sqlc.arg(selector),sqlc.arg(subject),sqlc.arg(client_id),sqlc.arg(scopes),sqlc.arg(created_at),sqlc.arg(refreshed_at),sqlc.narg(absolute_expiry),sqlc.arg(access),sqlc.arg(access_expiry),sqlc.arg(refresh),sqlc.arg(refresh_expiry),sqlc.narg(code),NULL)
+ON CONFLICT DO NOTHING;
+-- name: LockMCPConnectionBySelector :one
+SELECT id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at FROM mcp_oauth_connections
+WHERE selector = sqlc.arg(selector) FOR UPDATE;
+-- name: RotateMCPConnection :one
+UPDATE mcp_oauth_connections
+SET access = sqlc.arg(access), access_expiry = sqlc.arg(access_expiry), refresh = sqlc.arg(refresh), refresh_expiry = sqlc.arg(refresh_expiry), refreshed_at = sqlc.arg(refreshed_at)
+WHERE id = sqlc.arg(id)
+RETURNING id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at;
+-- name: GetLiveMCPConnectionBySelector :one
+SELECT id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at FROM mcp_oauth_connections
+WHERE selector = sqlc.arg(selector) AND refresh_expiry > sqlc.arg(now)::bigint
+AND (absolute_expiry IS NULL OR absolute_expiry > sqlc.arg(now)::bigint);
+-- name: GetLiveMCPConnectionByAccess :one
+SELECT id, selector, subject, client_id, scopes, created_at, refreshed_at, absolute_expiry, access, access_expiry, refresh, refresh_expiry, code, last_used_at FROM mcp_oauth_connections
+WHERE access = sqlc.arg(access) AND access_expiry > sqlc.arg(now)::bigint
+AND (absolute_expiry IS NULL OR absolute_expiry > sqlc.arg(now)::bigint);
+-- name: DeleteMCPConnection :exec
+DELETE FROM mcp_oauth_connections WHERE id = sqlc.arg(id);
+-- name: ListLiveMCPConnections :many
+SELECT c.id, c.client_id, c.scopes, c.created_at, c.refresh_expiry, c.absolute_expiry, c.last_used_at,
+COALESCE(l.name, '')::text AS client_name, COALESCE(l.host, '')::text AS client_host
+FROM mcp_oauth_connections c LEFT JOIN mcp_oauth_client_labels l ON l.client_id = c.client_id
+WHERE c.subject = sqlc.arg(subject) AND c.refresh_expiry > sqlc.arg(now)::bigint
+AND (c.absolute_expiry IS NULL OR c.absolute_expiry > sqlc.arg(now)::bigint)
+ORDER BY c.created_at DESC, c.id DESC;
+-- name: DeleteSubjectMCPConnection :execrows
+DELETE FROM mcp_oauth_connections WHERE id = sqlc.arg(id) AND subject = sqlc.arg(subject);
+-- name: TouchMCPConnection :exec
+UPDATE mcp_oauth_connections SET last_used_at = sqlc.arg(now)::bigint
+WHERE id = sqlc.arg(id) AND (last_used_at IS NULL OR last_used_at <= sqlc.arg(touched_before)::bigint);
+-- name: DeleteSubjectMCPCodes :exec
+DELETE FROM mcp_oauth_codes WHERE subject = sqlc.arg(subject);
+-- name: DeleteSubjectMCPConnections :exec
+DELETE FROM mcp_oauth_connections WHERE subject = sqlc.arg(subject);
+-- name: DeleteClientMCPCodes :exec
+DELETE FROM mcp_oauth_codes WHERE client_id = sqlc.arg(client_id);
+-- name: DeleteClientMCPConnections :execrows
+DELETE FROM mcp_oauth_connections WHERE client_id = sqlc.arg(client_id);
+-- name: CountClientMCPCodes :one
+SELECT COUNT(*) FROM mcp_oauth_codes WHERE client_id = sqlc.arg(client_id);
+-- name: CountClientMCPConnections :one
+SELECT COUNT(*) FROM mcp_oauth_connections WHERE client_id = sqlc.arg(client_id);
+-- name: UpsertMCPClientLabel :exec
+INSERT INTO mcp_oauth_client_labels (client_id,name,host,updated_at)
+VALUES (sqlc.arg(client_id),sqlc.arg(name),sqlc.arg(host),sqlc.arg(updated_at))
+ON CONFLICT (client_id) DO UPDATE SET name = excluded.name, host = excluded.host, updated_at = excluded.updated_at;
+-- name: ReleaseMCPRegistrations :exec
+UPDATE mcp_oauth_registrations SET expires_at = sqlc.arg(release_at)
+WHERE mcp_oauth_registrations.expires_at IS NULL AND mcp_oauth_registrations.created_at <= sqlc.arg(activated_before)::bigint
+AND NOT EXISTS (SELECT 1 FROM mcp_oauth_connections c WHERE c.client_id = mcp_oauth_registrations.id)
+AND NOT EXISTS (SELECT 1 FROM mcp_oauth_codes k WHERE k.client_id = mcp_oauth_registrations.id);
+-- name: DeleteExpiredMCPRegistrations :exec
+DELETE FROM mcp_oauth_registrations
+WHERE mcp_oauth_registrations.expires_at IS NOT NULL AND mcp_oauth_registrations.expires_at <= sqlc.arg(now)::bigint
+AND NOT EXISTS (SELECT 1 FROM mcp_oauth_connections c WHERE c.client_id = mcp_oauth_registrations.id)
+AND NOT EXISTS (SELECT 1 FROM mcp_oauth_codes k WHERE k.client_id = mcp_oauth_registrations.id);
+-- name: InsertMCPRegistration :execrows
+INSERT INTO mcp_oauth_registrations (id,name,redirect_uris,created_at,expires_at)
+VALUES (sqlc.arg(id),sqlc.arg(name),sqlc.arg(redirect_uris),sqlc.arg(created_at),sqlc.narg(expires_at))
+ON CONFLICT DO NOTHING;
+-- name: GetLiveMCPRegistration :one
+SELECT id, name, redirect_uris, created_at, expires_at FROM mcp_oauth_registrations
+WHERE id = sqlc.arg(id) AND (expires_at IS NULL OR expires_at > sqlc.arg(now)::bigint);
+-- name: ActivateMCPRegistration :execrows
+UPDATE mcp_oauth_registrations SET expires_at = NULL
+WHERE id = sqlc.arg(id) AND (expires_at IS NULL OR expires_at > sqlc.arg(now)::bigint);

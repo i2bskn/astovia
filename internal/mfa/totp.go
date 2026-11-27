@@ -4,7 +4,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1" // Authenticator apps use HMAC-SHA1 (RFC 6238).
-	"crypto/subtle"
 	"encoding/base32"
 	"encoding/binary"
 	"net/url"
@@ -20,9 +19,6 @@ const (
 	totpPeriod = 30
 	// totpDigits is the length of a code.
 	totpDigits = 6
-	// totpSkew is the number of time steps accepted before and after the
-	// current one.
-	totpSkew = 1
 )
 
 // secretEncoding is how a secret is shown to the user and put in the
@@ -42,7 +38,8 @@ func NewTOTPSecret() (string, error) {
 func TOTPStep(t time.Time) int64 { return t.Unix() / totpPeriod }
 
 // TOTPCode returns the code of the base32 secret at step, or false when the
-// secret is not valid base32.
+// secret is not valid base32. Codes are verified by authlume's totp package;
+// this is kept to show and test the codes of a secret.
 func TOTPCode(secret string, step int64) (string, bool) {
 	key, err := secretEncoding.DecodeString(secret)
 	if err != nil || len(key) == 0 || step < 0 {
@@ -87,30 +84,6 @@ func NormalizeTOTPCode(v string) (string, bool) {
 	return code, true
 }
 
-// MatchTOTP returns the time step whose code is code: the step of now or
-// one step before or after it. Steps up to after, the last step accepted
-// for the secret, never match, so that a code cannot be used again. code
-// must come from NormalizeTOTPCode. Every candidate step is compared, in
-// constant time.
-func MatchTOTP(secret, code string, now time.Time, after int64) (int64, bool) {
-	key, err := secretEncoding.DecodeString(secret)
-	if err != nil || len(key) == 0 {
-		return 0, false
-	}
-	current := TOTPStep(now)
-	matched, found := int64(0), 0
-	for step := current - totpSkew; step <= current+totpSkew; step++ {
-		if step < 0 {
-			continue
-		}
-		equal := subtle.ConstantTimeCompare([]byte(totpCode(key, step, totpDigits)), []byte(code))
-		if equal == 1 && step > after {
-			matched, found = step, 1
-		}
-	}
-	return matched, found == 1
-}
-
 // TOTPURL returns the otpauth URL an authenticator app reads from a QR
 // code. The issuer carries host, so that the accounts of several Astovia
 // servers can be told apart in the app.
@@ -125,3 +98,6 @@ func TOTPURL(secret, host, email string) string {
 	// url.Values encodes a space as "+", which some apps show as it is.
 	return "otpauth://totp/" + url.PathEscape(issuer+":"+email) + "?" + strings.ReplaceAll(q.Encode(), "+", "%20")
 }
+
+// TOTPSecretBytes decodes a secret in the base32 form of NewTOTPSecret.
+func TOTPSecretBytes(secret string) ([]byte, error) { return secretEncoding.DecodeString(secret) }

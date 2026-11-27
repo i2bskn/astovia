@@ -3,13 +3,16 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
-	"github.com/i2bskn/astovia/internal/oauth"
-	"github.com/i2bskn/astovia/internal/store"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"log"
 	"net/http"
 	"strings"
+
+	"github.com/i2bskn/astovia/internal/store"
+	"github.com/i2bskn/authlume/mcpoauth"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // mcpInstructions is sent to MCP clients on initialize.
@@ -83,8 +86,8 @@ func (w *noStoreWriter) FlushError() error {
 func (w *noStoreWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // mcpAuth guards /mcp: it rejects foreign browser origins and requires an
-// API token ("ast_") or an OAuth access token ("aso_"). Access JWTs are not
-// accepted here.
+// API token ("ast_") or an access token of the MCP authorization server with
+// the mcp scope. Browser sessions are not accepted here.
 func (s *Server) mcpAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// MCP clients outside a browser do not send Origin. When it is
@@ -93,39 +96,64 @@ func (s *Server) mcpAuth(next http.Handler) http.Handler {
 			fail(w, 403, "origin_rejected", "Request origin is not allowed.")
 			return
 		}
-		token, ok := bearerToken(r)
-		if !ok {
-			s.mcpAuthError(w, r, store.ErrUnauthorized, false)
+		if token, ok := bearerToken(r); ok && strings.HasPrefix(token, "ast_") {
+			u, err := s.auth.AuthenticateAPIToken(r.Context(), token)
+			if err != nil {
+				s.mcpAuthError(w, r, err)
+				return
+			}
+			next.ServeHTTP(w, withSession(r, u, ""))
 			return
 		}
-		var u store.User
-		var err error
-		switch {
-		case strings.HasPrefix(token, "ast_"):
-			u, err = s.auth.AuthenticateAPIToken(r.Context(), token)
-		case strings.HasPrefix(token, "aso_"):
-			u, err = s.auth.AuthenticateOAuthAccess(r.Context(), token)
-		default:
-			err = store.ErrUnauthorized
+		if s.mcp == nil {
+			s.mcpAuthError(w, r, store.ErrUnauthorized)
+			return
 		}
+		access, err := s.mcp.Verify(r)
 		if err != nil {
-			s.mcpAuthError(w, r, err, true)
+			if !errors.Is(err, mcpoauth.ErrInvalid) {
+				log.Printf("mcp: verify access token: %v", err)
+			}
+			s.mcp.Challenge(w, r, err, scopeMCP)
 			return
+		}
+		if !access.Has(scopeMCP) {
+			s.mcp.InsufficientScope(w, scopeMCP)
+			return
+		}
+		u, err := s.auth.Store.UserByID(r.Context(), access.Subject)
+		switch {
+		case errors.Is(err, sql.ErrNoRows) || err == nil && u.Disabled != 0:
+			s.mcp.Challenge(w, r, mcpoauth.ErrInvalid, scopeMCP)
+			return
+		case err != nil:
+			log.Printf("mcp: read user=%s: %v", access.Subject, err)
+			s.mcp.Challenge(w, r, err, scopeMCP)
+			return
+		}
+		// last_used_at is only shown on the account screen; a failure to
+		// record it does not stop the request.
+		if err := s.auth.Store.TouchMCPConnection(r.Context(), access.ConnectionID, s.auth.Now()); err != nil {
+			log.Printf("mcp: touch connection user=%s: %v", u.ID, err)
 		}
 		next.ServeHTTP(w, withSession(r, u, ""))
 	})
 }
 
-// mcpAuthError is authError with the WWW-Authenticate challenge on 401. The
-// challenge points to the protected resource metadata (RFC 9728) and the
-// scope to request, which MCP clients use to start the OAuth flow. Following
-// RFC 6750 section 3.1, the invalid_token error code is added only when a
-// bearer token was presented.
-func (s *Server) mcpAuthError(w http.ResponseWriter, r *http.Request, err error, presented bool) {
+// mcpAuthError is authError with a WWW-Authenticate challenge on 401. With
+// the authorization server, the challenge points to the protected resource
+// metadata (RFC 9728) and the scope to request, which MCP clients use to
+// start the OAuth flow, as mcpoauth's Challenge does; without it, it is a
+// bare Bearer challenge.
+func (s *Server) mcpAuthError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, store.ErrUnauthorized) {
-		challenge := `Bearer resource_metadata="` + s.cfg.PublicURL + protectedResourcePath + `", scope="` + oauth.ScopeMCP + `"`
-		if presented {
-			challenge = `Bearer error="invalid_token", resource_metadata="` + s.cfg.PublicURL + protectedResourcePath + `", scope="` + oauth.ScopeMCP + `"`
+		challenge := "Bearer"
+		if s.mcp != nil {
+			code := ""
+			if len(r.Header.Values("Authorization")) != 0 {
+				code = `error="invalid_token", `
+			}
+			challenge = `Bearer ` + code + `resource_metadata="` + s.cfg.PublicURL + s.mcp.ResourceMetadataPath() + `", scope="` + scopeMCP + `"`
 		}
 		w.Header().Set("WWW-Authenticate", challenge)
 	}

@@ -509,6 +509,11 @@ func (s *Store) LinkOIDCUser(ctx context.Context, issuer, subject, email string,
 				}
 				return ErrOIDCLinked
 			}
+			// The same email alone never links an existing user: the
+			// operator approves it for a limited time (users approve-oidc).
+			if !u.OidcLinkApprovedUntil.Valid || u.OidcLinkApprovedUntil.Int64 <= now {
+				return ErrOIDCNotApproved
+			}
 			stage = linkStageLink
 			if e = q.setUserOIDC(ctx, u.ID, issuer, subject); e != nil {
 				return e
@@ -518,6 +523,7 @@ func (s *Store) LinkOIDCUser(ctx context.Context, issuer, subject, email string,
 			}
 			u.OidcIssuer = sql.NullString{String: issuer, Valid: true}
 			u.OidcSubject = sql.NullString{String: subject, Valid: true}
+			u.OidcLinkApprovedUntil = sql.NullInt64{}
 			out = u
 			return nil
 		}
@@ -568,7 +574,7 @@ func (s *Store) LinkOIDCUser(ctx context.Context, issuer, subject, email string,
 	if err == nil {
 		return out, created, nil
 	}
-	if errors.Is(err, ErrNotInvited) || errors.Is(err, ErrOIDCLinked) || errors.Is(err, ErrUserDisabled) || errors.Is(err, ErrConflict) {
+	if errors.Is(err, ErrNotInvited) || errors.Is(err, ErrOIDCLinked) || errors.Is(err, ErrOIDCNotApproved) || errors.Is(err, ErrUserDisabled) || errors.Is(err, ErrConflict) {
 		return User{}, false, err
 	}
 	// A unique violation of users.email or users_oidc_identity_key by a
@@ -587,9 +593,9 @@ func (s *Store) LinkOIDCUser(ctx context.Context, issuer, subject, email string,
 }
 
 // UnlinkOIDC clears the OIDC identity of the user with email, for the
-// operator's CLI, so that the next OIDC sign-in with the verified email links
-// the user again. A user that is not linked is left as it is. The sessions
-// and tokens are kept.
+// operator's CLI, and revokes its sessions, API tokens and MCP connections
+// in the same transaction. It gives no approval to link again: that is
+// ApproveOIDCLink. A user that is not linked is left as it is.
 func (s *Store) UnlinkOIDC(ctx context.Context, email string) error {
 	u, err := s.q.userByEmail(ctx, email)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -599,17 +605,51 @@ func (s *Store) UnlinkOIDC(ctx context.Context, email string) error {
 		return err
 	}
 	return s.transaction(ctx, func(q queries) error {
-		if _, e := q.lockUser(ctx, u.ID); e != nil {
+		u, e := q.lockUser(ctx, u.ID)
+		if e != nil {
 			return e
 		}
-		return q.clearUserOIDC(ctx, u.ID)
+		if !u.OidcIssuer.Valid && !u.OidcSubject.Valid {
+			return nil
+		}
+		if e = q.clearUserOIDC(ctx, u.ID); e != nil {
+			return e
+		}
+		return revokeAccess(ctx, q, u.ID)
 	})
 }
 
-// UnlinkAllOIDC clears the OIDC identity of every user, for the operator's
-// CLI, with one UPDATE. The sessions and tokens are kept.
-func (s *Store) UnlinkAllOIDC(ctx context.Context) error {
-	return s.transaction(ctx, func(q queries) error { return q.clearAllUserOIDC(ctx) })
+// UnlinkAllOIDC does what UnlinkOIDC does for every linked user, in one
+// transaction, and returns how many users were unlinked.
+func (s *Store) UnlinkAllOIDC(ctx context.Context) (int, error) {
+	n := 0
+	err := s.transaction(ctx, func(q queries) error {
+		ids, e := q.listOIDCLinkedUserIDs(ctx)
+		if e != nil {
+			return e
+		}
+		for _, id := range ids {
+			u, e := q.lockUser(ctx, id)
+			if e != nil {
+				return e
+			}
+			if !u.OidcIssuer.Valid && !u.OidcSubject.Valid {
+				continue
+			}
+			if e = q.clearUserOIDC(ctx, id); e != nil {
+				return e
+			}
+			if e = revokeAccess(ctx, q, id); e != nil {
+				return e
+			}
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // PasswordResetUser returns the enabled user of the active password reset

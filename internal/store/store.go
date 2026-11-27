@@ -23,7 +23,7 @@ var ErrTooManyTokens = errors.New("too many API tokens")
 // MaxAPITokens is the number of API tokens a user can hold at once.
 const MaxAPITokens = 50
 
-// User, Session and Refresh are storage types. They are not serialized
+// User is a storage type. They are not serialized
 // directly; HTTP handlers define their own response types.
 type User struct {
 	ID           string
@@ -38,17 +38,10 @@ type User struct {
 	// sign-in links them, and both are set from then on.
 	OidcIssuer  sql.NullString
 	OidcSubject sql.NullString
-}
-type Session struct {
-	ID, UserID string
-	ExpiresAt  int64
-	RevokedAt  sql.NullInt64
-	CreatedAt  int64
-}
-type Refresh struct {
-	Hash, SessionID string
-	ConsumedAt      sql.NullInt64
-	CreatedAt       int64
+	// OidcLinkApprovedUntil is the end of the operator's approval to link
+	// the user to the first OpenID Connect identity with its email address.
+	// It is null without an approval, and cleared by linking and disabling.
+	OidcLinkApprovedUntil sql.NullInt64
 }
 type ActionItem struct {
 	ID, UserID, Content, Status string
@@ -158,6 +151,7 @@ type AutoActionItemCursor struct {
 // distinct types per package, so each driver has a small adapter that is
 // checked against this interface at compile time.
 type queries interface {
+	authQueries
 	userByEmail(ctx context.Context, email string) (User, error)
 	userByID(ctx context.Context, id string) (User, error)
 	lockUser(ctx context.Context, id string) (User, error)
@@ -165,17 +159,10 @@ type queries interface {
 	userByOIDC(ctx context.Context, issuer, subject string) (User, error)
 	setUserOIDC(ctx context.Context, id, issuer, subject string) error
 	clearUserOIDC(ctx context.Context, id string) error
-	clearAllUserOIDC(ctx context.Context) error
 	resetPassword(ctx context.Context, id, hash string) error
 	disableUser(ctx context.Context, id string) error
-	createSession(ctx context.Context, session Session) error
-	sessionByID(ctx context.Context, id string) (Session, error)
-	activeSession(ctx context.Context, id, userID string, now int64) (Session, error)
-	revokeSession(ctx context.Context, id string, now int64) error
-	revokeUserSessions(ctx context.Context, userID string, now int64) error
-	createRefresh(ctx context.Context, refresh Refresh) error
-	refreshByHash(ctx context.Context, hash string) (Refresh, error)
-	consumeRefresh(ctx context.Context, hash string, now int64) (int64, error)
+	activeSession(ctx context.Context, id, userID string, now int64) (WebSession, error)
+	revokeUserSessions(ctx context.Context, userID string) error
 	createActionItem(ctx context.Context, item ActionItem) error
 	actionItem(ctx context.Context, userID, id string) (ActionItem, error)
 	lockActionItem(ctx context.Context, userID, id string) (ActionItem, error)
@@ -209,28 +196,6 @@ type queries interface {
 	deleteAPIToken(ctx context.Context, userID, id string) (int64, error)
 	touchAPIToken(ctx context.Context, id string, now, before int64) error
 	deleteUserAPITokens(ctx context.Context, userID string) error
-	oauthClient(ctx context.Context, clientID string) (OAuthClient, error)
-	createOAuthClient(ctx context.Context, c OAuthClient, secretHash sql.NullString) error
-	upsertCIMDClient(ctx context.Context, c OAuthClient) error
-	createOAuthGrant(ctx context.Context, g OAuthGrant) error
-	oauthGrantByCode(ctx context.Context, codeHash string) (OAuthGrant, error)
-	lockOAuthGrantByCode(ctx context.Context, codeHash, userID string) (OAuthGrant, error)
-	oauthGrant(ctx context.Context, userID, id string) (OAuthGrant, error)
-	markOAuthCodeUsed(ctx context.Context, userID, id string, now int64) (int64, error)
-	extendOAuthGrant(ctx context.Context, userID, id string, expiresAt int64) error
-	listOAuthGrants(ctx context.Context, userID string, now int64) ([]OAuthGrant, error)
-	deleteOAuthGrant(ctx context.Context, userID, id string) (int64, error)
-	touchOAuthGrant(ctx context.Context, userID, id string, now, before int64) error
-	deleteExpiredOAuthGrants(ctx context.Context, userID string, now int64) error
-	deleteUserOAuthGrants(ctx context.Context, userID string) error
-	createOAuthToken(ctx context.Context, t OAuthToken) error
-	oauthTokenByHash(ctx context.Context, hash string) (OAuthToken, error)
-	lockOAuthTokenByHash(ctx context.Context, hash, userID string) (OAuthToken, error)
-	markOAuthRefreshUsed(ctx context.Context, userID, hash string) (int64, error)
-	capGrantOAuthTokens(ctx context.Context, userID, grantID string, maxExpiresAt int64) error
-	deleteGrantOAuthTokens(ctx context.Context, userID, grantID string) error
-	deleteExpiredOAuthTokens(ctx context.Context, userID string, now int64) error
-	deleteUserOAuthTokens(ctx context.Context, userID string) error
 	githubConnection(ctx context.Context, userID string) (GitHubConnection, error)
 	lockGitHubConnection(ctx context.Context, userID string) (GitHubConnection, error)
 	createGitHubConnection(ctx context.Context, c GitHubConnection) error
@@ -349,13 +314,13 @@ type queries interface {
 	mfaTOTP(ctx context.Context, userID string) (MFATOTP, error)
 	createMFATOTP(ctx context.Context, t MFATOTP) error
 	replaceMFATOTP(ctx context.Context, t MFATOTP) (int64, error)
-	useMFATOTPStep(ctx context.Context, userID string, step int64) (int64, error)
+	consumeMFATOTPStep(ctx context.Context, userID, id string, step int64) (int64, error)
 	deleteMFATOTP(ctx context.Context, userID string) (int64, error)
 	listMFATOTPUserIDs(ctx context.Context) ([]string, error)
 	listWebAuthnCredentials(ctx context.Context, userID string) ([]WebAuthnCredential, error)
 	countWebAuthnCredentials(ctx context.Context, userID string) (int64, error)
 	createWebAuthnCredential(ctx context.Context, c WebAuthnCredential) (int64, error)
-	updateWebAuthnCredential(ctx context.Context, userID, credentialID, credential string, now int64) (int64, error)
+	updateWebAuthnCredential(ctx context.Context, userID, credentialID, credential, oldVersion, newVersion string, now int64) (int64, error)
 	deleteWebAuthnCredential(ctx context.Context, userID, id string) (int64, error)
 	deleteUserWebAuthnCredentials(ctx context.Context, userID string) error
 	listWebAuthnUserIDs(ctx context.Context) ([]string, error)
@@ -363,8 +328,6 @@ type queries interface {
 	countUnusedRecoveryCodes(ctx context.Context, userID string) (int64, error)
 	useRecoveryCode(ctx context.Context, userID, hash string, now int64) (int64, error)
 	deleteUserRecoveryCodes(ctx context.Context, userID string) error
-	deleteExpiredUsedChallenges(ctx context.Context, now int64) error
-	createUsedChallenge(ctx context.Context, hash string, expiresAt int64) (int64, error)
 }
 type Store struct {
 	db     *sql.DB
@@ -404,7 +367,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) CheckSchema(ctx context.Context) error {
-	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role,oidc_issuer,oidc_subject FROM users LIMIT 0", "SELECT id,user_id,expires_at,revoked_at,created_at FROM sessions LIMIT 0", "SELECT hash,session_id,consumed_at,created_at FROM refresh_tokens LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT client_id,kind,name,redirect_uris,auth_method,secret_hash,metadata_expires_at,created_at,updated_at FROM oauth_clients LIMIT 0", "SELECT id,user_id,client_id,client_name,scope,resource,redirect_uri,code_hash,code_challenge,code_expires_at,code_used_at,created_at,expires_at,last_used_at FROM oauth_grants LIMIT 0", "SELECT token_hash,kind,grant_id,user_id,created_at,expires_at FROM oauth_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM gmail_accounts LIMIT 0", "SELECT state_hash,user_id,verifier_sealed,expires_at,created_at FROM google_auth_states LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT user_id,scope,body,updated_at FROM ai_instructions LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at,channel FROM notifications LIMIT 0", "SELECT user_id,webpush_kinds,slack_kinds,email_kinds,slack_webhook_sealed,slack_last_error,updated_at FROM notification_channels LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0", "SELECT user_id,secret_sealed,last_step,created_at FROM mfa_totp LIMIT 0", "SELECT id,user_id,credential_id,credential,name,created_at,last_used_at FROM mfa_webauthn_credentials LIMIT 0", "SELECT id,user_id,code_hash,created_at,used_at FROM mfa_recovery_codes LIMIT 0", "SELECT challenge_hash,expires_at FROM mfa_used_challenges LIMIT 0"} {
+	for _, q := range []string{"SELECT id,email,password_hash,disabled,created_at,role,oidc_issuer,oidc_subject,oidc_link_approved_until FROM users LIMIT 0", "SELECT id,user_id,content,status,note,due_at,refs,version,created_at,updated_at,source,source_key,tracking,auto_reason,auto_ref,auto_at,detected_at,tracked_at,kind,event_title,event_start_at,event_end_at,parent_id,importance FROM action_items LIMIT 0", "SELECT id,user_id,name,token_hash,created_at,last_used_at FROM api_tokens LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,login,scopes,immediate_notify,status,last_error,failure_count,last_modified,initial_import_pending,next_poll_at,last_synced_at,last_reconciled_at,last_tracked_at,created_at,updated_at FROM github_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,team_id,team_name,team_url,slack_user_id,slack_user_name,scopes,immediate_notify,detect_mentions,detect_dms,detect_group_dms,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM slack_connections LIMIT 0", "SELECT user_id,generation,token_sealed,token_last4,account_id,account_name,organization_name,immediate_notify,detect_mentions,detect_dms,import_tasks,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,last_tasks_at,created_at,updated_at FROM chatwork_connections LIMIT 0", "SELECT id,user_id,email,generation,token_sealed,immediate_notify,status,last_error,failure_count,connected_at,next_poll_at,last_synced_at,last_tracked_at,created_at,updated_at FROM gmail_accounts LIMIT 0", "SELECT state_hash,user_id,verifier_sealed,expires_at,created_at FROM google_auth_states LIMIT 0", "SELECT user_id,generation,provider,model,api_key_sealed,key_last4,status,last_error,activated_at,created_at,updated_at FROM ai_settings LIMIT 0", "SELECT user_id,scope,body,updated_at FROM ai_instructions LIMIT 0", "SELECT id,user_id,endpoint,p256dh,auth,label,created_at,last_used_at FROM web_push_subscriptions LIMIT 0", "SELECT user_id,timezone,digest_hour,stale_days,updated_at,candidate_expire_days FROM notification_settings LIMIT 0", "SELECT id,user_id,kind,action_item_id,dedupe_key,title,body,url,scheduled_at,sent_at,attempts,last_error,created_at,channel FROM notifications LIMIT 0", "SELECT user_id,webpush_kinds,slack_kinds,email_kinds,slack_webhook_sealed,slack_last_error,updated_at FROM notification_channels LIMIT 0", "SELECT name,value,created_at,updated_at FROM instance_secrets LIMIT 0", "SELECT id,token_hash,email,role,invited_by,created_at,expires_at,accepted_at,accepted_user_id,revoked_at FROM invitations LIMIT 0", "SELECT id,token_hash,user_id,created_by,created_at,expires_at,used_at,revoked_at FROM password_resets LIMIT 0", "SELECT id,user_id,secret_sealed,last_step,created_at FROM mfa_totp LIMIT 0", "SELECT id,user_id,credential_id,credential,name,created_at,last_used_at,version,passkey FROM mfa_webauthn_credentials LIMIT 0", "SELECT id,user_id,code_hash,created_at,used_at FROM mfa_recovery_codes LIMIT 0", "SELECT id,user_id,authenticated_at,last_activity,absolute_expiry,idle_seconds FROM web_sessions LIMIT 0", "SELECT key,nonce,verifier,started_at,expires_at,max_age_seconds,app_data FROM oidc_logins LIMIT 0", "SELECT key,subject,record,expires_at FROM webauthn_ceremonies LIMIT 0", "SELECT key,client_id,redirect_uri,subject,scopes,challenge,expires_at,consumed,reused FROM mcp_oauth_codes LIMIT 0", "SELECT id,selector,subject,client_id,scopes,created_at,refreshed_at,absolute_expiry,access,access_expiry,refresh,refresh_expiry,code,last_used_at FROM mcp_oauth_connections LIMIT 0", "SELECT id,name,redirect_uris,created_at,expires_at FROM mcp_oauth_registrations LIMIT 0", "SELECT client_id,name,host,updated_at FROM mcp_oauth_client_labels LIMIT 0"} {
 		rows, e := s.db.QueryContext(ctx, q)
 		if e != nil {
 			return errors.New("database schema is not initialized or incompatible; apply the matching Atlas schema first")
@@ -486,20 +449,7 @@ func revokeAccount(ctx context.Context, q queries, userID, passwordHash string, 
 	if e != nil {
 		return e
 	}
-	if e = q.revokeUserSessions(ctx, userID, now); e != nil {
-		return e
-	}
-	// API tokens have no expiry, so a token issued from a stolen access
-	// token must not survive the password reset that recovers the account.
-	// OAuth connections are granted from a session as well and go with it.
-	// Tokens are deleted before grants because they reference them.
-	if e = q.deleteUserAPITokens(ctx, userID); e != nil {
-		return e
-	}
-	if e = q.deleteUserOAuthTokens(ctx, userID); e != nil {
-		return e
-	}
-	if e = q.deleteUserOAuthGrants(ctx, userID); e != nil {
+	if e = revokeAccess(ctx, q, userID); e != nil {
 		return e
 	}
 	// Integrations and notifications follow, in the lock order of their
@@ -557,125 +507,6 @@ func revokeAccount(ctx context.Context, q queries, userID, passwordHash string, 
 	// reset links and invitations the user issued. A link issued during a
 	// takeover must not outlive the recovery of the account.
 	return revokeLinks(ctx, q, userID, true, now)
-}
-
-func (s *Store) Login(ctx context.Context, verified User, session Session, refresh Refresh) error {
-	return s.transaction(ctx, func(q queries) error {
-		u, e := q.lockUser(ctx, verified.ID)
-		if e != nil {
-			return e
-		}
-		if u.Disabled != 0 || u.PasswordHash != verified.PasswordHash {
-			return ErrUnauthorized
-		}
-		if e = q.createSession(ctx, session); e != nil {
-			return e
-		}
-		return q.createRefresh(ctx, refresh)
-	})
-}
-
-// Rotate consumes a refresh token and stores its successor. The token and
-// session are first read outside the transaction only to learn user_id, so
-// that the transaction can lock the user row before re-reading the session and
-// token. Every writer locks user before session, keeping the lock order fixed.
-func (s *Store) Rotate(ctx context.Context, hash, next string, now int64) (User, Session, error) {
-	r, err := s.q.refreshByHash(ctx, hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return User{}, Session{}, ErrUnauthorized
-	}
-	if err != nil {
-		return User{}, Session{}, err
-	}
-	sess, err := s.q.sessionByID(ctx, r.SessionID)
-	if err != nil {
-		return User{}, Session{}, err
-	}
-	var u User
-	var invalid bool
-	err = s.transaction(ctx, func(q queries) error {
-		var e error
-		u, e = q.lockUser(ctx, sess.UserID)
-		if e != nil {
-			return e
-		}
-		sess, e = q.sessionByID(ctx, r.SessionID)
-		if e != nil {
-			return e
-		}
-		r, e = q.refreshByHash(ctx, hash)
-		if e != nil {
-			return e
-		}
-		if u.Disabled != 0 || sess.RevokedAt.Valid || sess.ExpiresAt <= now {
-			invalid = true
-			return nil
-		}
-		if r.ConsumedAt.Valid {
-			invalid = true
-			return q.revokeSession(ctx, sess.ID, now)
-		}
-		n, e := q.consumeRefresh(ctx, hash, now)
-		if e != nil {
-			return e
-		}
-		if n != 1 {
-			invalid = true
-			return q.revokeSession(ctx, sess.ID, now)
-		}
-		return q.createRefresh(ctx, Refresh{Hash: next, SessionID: sess.ID, CreatedAt: now})
-	})
-	if err != nil {
-		return User{}, Session{}, err
-	}
-	if invalid {
-		return User{}, Session{}, ErrUnauthorized
-	}
-	return u, sess, nil
-}
-
-// Logout revokes the session of a refresh token. As in Rotate, user_id is read
-// outside the transaction so the user row can be locked before the session.
-func (s *Store) Logout(ctx context.Context, hash string, now int64) error {
-	r, e := s.q.refreshByHash(ctx, hash)
-	if errors.Is(e, sql.ErrNoRows) {
-		return nil
-	}
-	if e != nil {
-		return e
-	}
-	sess, e := s.q.sessionByID(ctx, r.SessionID)
-	if e != nil {
-		return e
-	}
-	return s.transaction(ctx, func(q queries) error {
-		if _, e := q.lockUser(ctx, sess.UserID); e != nil {
-			return e
-		}
-		return q.revokeSession(ctx, sess.ID, now)
-	})
-}
-
-// Authenticated returns the user for an access token only while the session
-// belongs to that user, is not revoked or expired, and the user is enabled.
-func (s *Store) Authenticated(ctx context.Context, uid, sid string, now int64) (User, error) {
-	if _, err := s.q.activeSession(ctx, sid, uid, now); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return User{}, ErrUnauthorized
-		}
-		return User{}, err
-	}
-	u, err := s.q.userByID(ctx, uid)
-	if errors.Is(err, sql.ErrNoRows) {
-		return User{}, ErrUnauthorized
-	}
-	if err != nil {
-		return User{}, err
-	}
-	if u.Disabled != 0 {
-		return User{}, ErrUnauthorized
-	}
-	return u, nil
 }
 
 // CreateActionItem stores a new item. An item with ParentID is created in a

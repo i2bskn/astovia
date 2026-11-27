@@ -1,12 +1,18 @@
 package httpserver
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"net"
 	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/i2bskn/astovia/internal/auth"
 )
 
 // loginLimiter limits login attempts per peer in a bounded in-process table.
@@ -195,4 +201,82 @@ func (l *loginLimiter) evict() {
 	} else if oldestFound {
 		delete(l.entries, oldest)
 	}
+}
+
+// Limits of the failed password sign-ins per email address.
+const (
+	emailLimit     = 10
+	emailWindow    = 15 * time.Minute
+	emailSlotCount = 4096
+)
+
+// emailLimiter counts the password sign-ins per email address: an address
+// that had emailLimit attempts in emailWindow without a success is refused
+// until the window ends. Unknown addresses are counted the same way, so the
+// answer does not tell whether an address exists.
+//
+// The table is a fixed array of emailSlotCount slots chosen by an HMAC of
+// the address under a key made at startup, and nothing is ever evicted:
+// many unrelated addresses cannot push the record of one address out, and
+// two addresses that share a slot only make the limit stricter. Like the
+// other limiters it lives in the process.
+type emailLimiter struct {
+	mu    sync.Mutex
+	key   [32]byte
+	now   func() time.Time
+	slots [emailSlotCount]emailSlot
+}
+
+// emailSlot is the window of a slot: when it started and the attempts in it.
+type emailSlot struct {
+	start time.Time
+	count int
+}
+
+func newEmailLimiter(now func() time.Time) *emailLimiter {
+	l := &emailLimiter{now: now}
+	if _, err := rand.Read(l.key[:]); err != nil {
+		panic("httpserver: email limiter key: " + err.Error())
+	}
+	return l
+}
+
+// emailLimitKey is the key of an email address as typed: the normalized
+// address, or the input itself when it is not a valid address.
+func emailLimitKey(email string) string {
+	if normalized, err := auth.Email(email); err == nil {
+		return normalized
+	}
+	return email
+}
+
+func (l *emailLimiter) slot(key string) *emailSlot {
+	mac := hmac.New(sha256.New, l.key[:])
+	mac.Write([]byte(key))
+	sum := mac.Sum(nil)
+	return &l.slots[binary.BigEndian.Uint32(sum)%emailSlotCount]
+}
+
+// attempt counts an attempt for key and reports whether it may proceed.
+// It is called before the password is checked.
+func (l *emailLimiter) attempt(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	s := l.slot(key)
+	if s.count == 0 || !now.Before(s.start.Add(emailWindow)) || now.Before(s.start) {
+		*s = emailSlot{start: now}
+	}
+	if s.count >= emailLimit {
+		return false
+	}
+	s.count++
+	return true
+}
+
+// reset forgets the attempts of key after a successful sign-in.
+func (l *emailLimiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	*l.slot(key) = emailSlot{}
 }

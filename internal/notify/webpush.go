@@ -28,10 +28,10 @@ var errBlockedAddress = errors.New("push endpoint address is not allowed")
 
 // NewPushClient returns the HTTP client used to reach push services. Push
 // endpoints are chosen by browsers (and so by whoever registers a
-// subscription), so the client applies the same address check as Client ID
-// Metadata Document fetching: only public addresses, no redirects, no proxy.
+// subscription), so the client applies the same address check as the AI
+// endpoints: only public addresses, no redirects, no proxy.
 func NewPushClient() *http.Client {
-	return newPushClient(oauth.AllowedCIMDAddr, nil)
+	return newPushClient(oauth.AllowedPublicAddr, nil)
 }
 
 // newPushClient checks the address of every connection after name

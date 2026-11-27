@@ -60,46 +60,6 @@ func TestTOTPVectors(t *testing.T) {
 	}
 }
 
-func TestMatchTOTP(t *testing.T) {
-	now := time.Unix(1111111111, 0)
-	current := TOTPStep(now)
-	code := func(step int64) string {
-		t.Helper()
-		c, ok := TOTPCode(rfcSecret, step)
-		if !ok {
-			t.Fatal("no code")
-		}
-		return c
-	}
-	for delta := int64(-1); delta <= 1; delta++ {
-		step, ok := MatchTOTP(rfcSecret, code(current+delta), now, 0)
-		if !ok || step != current+delta {
-			t.Errorf("delta %d: %d %v", delta, step, ok)
-		}
-	}
-	for _, delta := range []int64{-2, 2, 100} {
-		if _, ok := MatchTOTP(rfcSecret, code(current+delta), now, 0); ok {
-			t.Errorf("delta %d matched", delta)
-		}
-	}
-	// A step that was accepted, and every step before it, no longer match.
-	if _, ok := MatchTOTP(rfcSecret, code(current), now, current); ok {
-		t.Error("the accepted step matched again")
-	}
-	if _, ok := MatchTOTP(rfcSecret, code(current-1), now, current); ok {
-		t.Error("a step before the accepted one matched")
-	}
-	if step, ok := MatchTOTP(rfcSecret, code(current+1), now, current); !ok || step != current+1 {
-		t.Errorf("the step after the accepted one: %d %v", step, ok)
-	}
-	if _, ok := MatchTOTP("not base32!", code(current), now, 0); ok {
-		t.Error("an invalid secret matched")
-	}
-	if _, ok := MatchTOTP("", "", now, 0); ok {
-		t.Error("an empty secret matched")
-	}
-}
-
 func TestNormalizeTOTPCode(t *testing.T) {
 	for in, want := range map[string]string{"123456": "123456", " 123 456 ": "123456", "1 2 3 4 5 6": "123456", "\t000000\n": "000000"} {
 		if got, ok := NormalizeTOTPCode(in); !ok || got != want {

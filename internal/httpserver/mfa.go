@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
@@ -8,11 +9,14 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/mfa"
+	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/store"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/i2bskn/authlume/password"
+	"github.com/i2bskn/authlume/totp"
 )
 
 const (
@@ -64,10 +68,10 @@ type mfaPendingResponse struct {
 }
 
 // mfaAuthResponse is the login response of an enrollment before the first
-// session: the session and the recovery codes, which are shown only once.
+// session: the user and the recovery codes, which are shown only once.
 type mfaAuthResponse struct {
-	authResponse
-	RecoveryCodes []string `json:"recovery_codes"`
+	User          userResponse `json:"user"`
+	RecoveryCodes []string     `json:"recovery_codes"`
 }
 
 // totpSetupResponse starts the enrollment of an authenticator app. Secret
@@ -140,7 +144,7 @@ func mfaTokenInvalid(w http.ResponseWriter) {
 
 // mfaCodeInvalid answers a wrong code and logs the failure with the user
 // ID alone. status is 401 before the session and 400 in /api/v1, where a
-// 401 would make the web UI refresh its session and send the code again.
+// 401 would make the web UI return to the sign-in screen.
 func mfaCodeInvalid(w http.ResponseWriter, status int, method, userID string) {
 	log.Printf("auth: mfa: %s failed user=%s", method, userID)
 	fail(w, status, "mfa_code_invalid", "The code is not correct.")
@@ -150,36 +154,122 @@ func mfaStateInvalid(w http.ResponseWriter) {
 	fail(w, 400, "mfa_state_invalid", "The enrollment has expired. Start again.")
 }
 
+// verifiedUser is a user whose password was just verified, or whose
+// invitation or password reset link was just completed.
+type verifiedUser struct {
+	user store.User
+	// digest is auth.Hash of the password hash that was verified or
+	// stored. The session and the MFA token are bound to it, so that a
+	// password change in the meantime stops the sign-in.
+	digest string
+	// status is the user's second factors and requireMFA whether one must
+	// be given or enrolled before the session starts.
+	status     store.MFAStatus
+	requireMFA bool
+}
+
+// mfaDecision returns the second factors of u and whether u must give or
+// enroll one: u has one, or ASTOVIA_MFA_REQUIRED asks for one. Factors
+// stored before this version count, so that such a user is not let in with
+// the password alone.
+func (s *Server) mfaDecision(ctx context.Context, u store.User) (store.MFAStatus, password.Decision, error) {
+	status, err := s.auth.Store.MFAStatus(ctx, u.ID)
+	if err != nil {
+		return store.MFAStatus{}, 0, err
+	}
+	if status.Enrolled() || s.mfaRequired(u) {
+		return status, password.RequireMFA, nil
+	}
+	return status, password.PasswordOnly, nil
+}
+
+// passwordLookup returns the password.Lookup of the sign-in. It finds the
+// user by the normalized email address and writes the user it returns to
+// found, so that the caller binds the session to the very hash that was
+// verified. A malformed address, an unknown address and a disabled user are
+// password.ErrNotFound; a user without a password returns its record, which
+// authlume rejects as password.ErrRecord. Either way authlume derives a key
+// once, so the answer takes the same time.
+func (s *Server) passwordLookup(found *store.User) password.Lookup {
+	return func(ctx context.Context, identifier string) (password.Credential, error) {
+		email, err := auth.Email(identifier)
+		if err != nil {
+			return password.Credential{}, password.ErrNotFound
+		}
+		u, err := s.auth.Store.UserByEmail(ctx, email)
+		if errors.Is(err, sql.ErrNoRows) {
+			return password.Credential{}, password.ErrNotFound
+		}
+		if err != nil {
+			return password.Credential{}, err
+		}
+		if u.Disabled != 0 {
+			return password.Credential{}, password.ErrNotFound
+		}
+		*found = u
+		return password.Credential{Subject: u.ID, Hash: u.PasswordHash}, nil
+	}
+}
+
+// verifyPassword checks the password of the user with email and decides
+// whether a second factor is needed. A wrong password, an unknown or
+// disabled user and a user without a password all fail with
+// store.ErrUnauthorized.
+func (s *Server) verifyPassword(ctx context.Context, email, secret string) (verifiedUser, error) {
+	var found store.User
+	var v verifiedUser
+	a, err := password.New(s.passwordLookup(&found), func(ctx context.Context, subject string) (password.Decision, error) {
+		if subject != found.ID {
+			return 0, errors.New("password policy for another subject")
+		}
+		status, decision, err := s.mfaDecision(ctx, found)
+		v.status = status
+		return decision, err
+	})
+	if err != nil {
+		return verifiedUser{}, err
+	}
+	result, err := a.Authenticate(ctx, email, secret)
+	if errors.Is(err, password.ErrCredentials) || errors.Is(err, password.ErrRecord) {
+		return verifiedUser{}, store.ErrUnauthorized
+	}
+	if err != nil {
+		return verifiedUser{}, err
+	}
+	if result.Subject != found.ID {
+		return verifiedUser{}, errors.New("verified subject differs from the user found")
+	}
+	v.user, v.digest, v.requireMFA = found, auth.Hash(found.PasswordHash), result.Decision == password.RequireMFA
+	return v, nil
+}
+
 // passwordSignIn is the gate every password sign-in passes after the user
 // was verified: by the password (handleLogin) or by an invitation or
 // password reset link (signInAfterLink). It starts a session only for a
-// user that has no second factor and need not have one. Any other user
-// gets an MFA token instead, and no refresh cookie; the session is started
-// by completeMFASignIn once the second factor was given or enrolled.
-// failed writes the response for an error.
-func (s *Server) passwordSignIn(w http.ResponseWriter, r *http.Request, u store.User, failed func(error)) {
-	status, err := s.auth.Store.MFAStatus(r.Context(), u.ID)
-	if err != nil {
-		failed(err)
-		return
-	}
-	enrolled := status.Enrolled()
-	if !enrolled && !s.mfaRequired(u) {
-		result, err := s.auth.LoginUser(r.Context(), u)
-		if err != nil {
+// user that has no second factor and need not have one; the store issues it
+// only while the password hash is still the verified one. Any other user
+// gets an MFA token instead, and no session; the session is started by
+// completeMFASignIn once the second factor was given or enrolled. failed
+// writes the response for an error.
+func (s *Server) passwordSignIn(w http.ResponseWriter, r *http.Request, v verifiedUser, failed func(error)) {
+	if !v.requireMFA {
+		if err := s.issueSession(w, r, v.user.ID, store.IssueGuard{PasswordDigest: v.digest}); err != nil {
 			failed(err)
 			return
 		}
-		s.writeAuthResult(w, r, result)
+		writeJSON(w, 200, authResponse{User: s.toUserResponse(r.Context(), v.user)})
 		return
 	}
+	enrolled := v.status.Enrolled()
 	out := mfaChallengeResponse{Enrolled: enrolled, WebAuthnAvailable: s.webauthnAvailable()}
 	lifetime := int64(mfaEnrollTokenLifetime)
 	if enrolled {
 		lifetime = mfaTokenLifetime
-		out.Methods = mfaMethodsResponse{TOTP: status.TOTP != nil, WebAuthn: s.webauthnAvailable() && len(status.WebAuthn) > 0, Recovery: status.RecoveryCodes > 0}
+		// Factors stored before this version cannot be used; such a user
+		// signs in with a recovery code.
+		out.Methods = mfaMethodsResponse{TOTP: v.status.UsableTOTP(), WebAuthn: s.webauthnAvailable() && v.status.UsableWebAuthn() > 0, Recovery: v.status.RecoveryCodes > 0}
 	}
-	raw, err := json.Marshal(mfaToken{UserID: u.ID, PasswordHash: auth.Hash(u.PasswordHash), ExpiresAt: s.auth.Now().Unix() + lifetime})
+	raw, err := json.Marshal(mfaToken{UserID: v.user.ID, PasswordHash: v.digest, ExpiresAt: s.auth.Now().Unix() + lifetime})
 	if err != nil {
 		failed(err)
 		return
@@ -192,27 +282,26 @@ func (s *Server) passwordSignIn(w http.ResponseWriter, r *http.Request, u store.
 }
 
 // completeMFASignIn starts the session of a password sign-in after the
-// second factor of u was verified or enrolled. u is the row read by
-// mfaUser. codes are the recovery codes of an enrollment, or nil. Nothing
-// else on the password sign-in paths starts a session, apart from
+// second factor of u was verified or enrolled. digest is the password hash
+// digest of the MFA token; the store issues the session only while it is
+// still the user's. codes are the recovery codes of an enrollment, or nil.
+// Nothing else on the password sign-in paths starts a session, apart from
 // passwordSignIn.
 //
 // A failure is a 503 signin_unavailable whatever its cause: the code was
 // spent or the enrollment is committed, so the user signs in again.
-func (s *Server) completeMFASignIn(w http.ResponseWriter, r *http.Request, u store.User, codes []string) {
-	result, err := s.auth.LoginUser(r.Context(), u)
-	if err != nil {
+func (s *Server) completeMFASignIn(w http.ResponseWriter, r *http.Request, u store.User, digest string, codes []string) {
+	if err := s.issueSession(w, r, u.ID, store.IssueGuard{PasswordDigest: digest}); err != nil {
 		log.Printf("auth: mfa: sign in user=%s: %v", u.ID, err)
 		fail(w, 503, "signin_unavailable", "The sign-in could not be completed. Sign in again.")
 		return
 	}
+	user := s.toUserResponse(r.Context(), u)
 	if codes == nil {
-		s.writeAuthResult(w, r, result)
+		writeJSON(w, 200, authResponse{User: user})
 		return
 	}
-	user := s.toUserResponse(r.Context(), result.User)
-	s.setRefreshCookie(w, result)
-	writeJSON(w, 200, mfaAuthResponse{authResponse: authResponse{AccessToken: result.AccessToken, ExpiresIn: result.ExpiresIn, User: user}, RecoveryCodes: codes})
+	writeJSON(w, 200, mfaAuthResponse{User: user, RecoveryCodes: codes})
 }
 
 // mfaPeerLimit limits the /auth/mfa/* endpoints together per peer, like
@@ -241,35 +330,36 @@ func (s *Server) allowMFAAttempt(w http.ResponseWriter, userID string) bool {
 	return false
 }
 
-// mfaUser returns the user of an MFA token, read again from the database.
-// It writes 401 mfa_token_invalid unless the token opens, has not expired,
-// and its user exists, is enabled and still has the password hash the
-// password was checked against.
-func (s *Server) mfaUser(w http.ResponseWriter, r *http.Request, token string) (store.User, bool) {
+// mfaUser returns the user of an MFA token, read again from the database,
+// and the password hash digest the token is bound to. It writes 401
+// mfa_token_invalid unless the token opens, has not expired, and its user
+// exists, is enabled and still has the password hash the password was
+// checked against.
+func (s *Server) mfaUser(w http.ResponseWriter, r *http.Request, token string) (store.User, string, bool) {
 	var t mfaToken
 	if len(token) == 0 || len(token) > maxMFATokenLength {
 		mfaTokenInvalid(w)
-		return store.User{}, false
+		return store.User{}, "", false
 	}
 	raw, err := s.box.Open(mfaTokenPurpose, token)
 	if err != nil || json.Unmarshal([]byte(raw), &t) != nil || t.UserID == "" || s.auth.Now().Unix() >= t.ExpiresAt {
 		mfaTokenInvalid(w)
-		return store.User{}, false
+		return store.User{}, "", false
 	}
 	u, err := s.auth.Store.UserByID(r.Context(), t.UserID)
 	if errors.Is(err, sql.ErrNoRows) {
 		mfaTokenInvalid(w)
-		return store.User{}, false
+		return store.User{}, "", false
 	}
 	if err != nil {
 		mfaError(w, "token", t.UserID, err)
-		return store.User{}, false
+		return store.User{}, "", false
 	}
 	if u.Disabled != 0 || subtle.ConstantTimeCompare([]byte(auth.Hash(u.PasswordHash)), []byte(t.PasswordHash)) != 1 {
 		mfaTokenInvalid(w)
-		return store.User{}, false
+		return store.User{}, "", false
 	}
-	return u, true
+	return u, t.PasswordHash, true
 }
 
 // mfaEnrollable checks that u may enroll a second factor before its first
@@ -319,11 +409,12 @@ func (s *Server) beginTOTP(w http.ResponseWriter, u store.User) {
 }
 
 // confirmTOTPSetup opens the setup token of u and checks code against its
-// secret. It returns the authenticator app to store, with the secret
-// sealed and the time step of code as the last accepted one. Otherwise it
-// writes 400 mfa_state_invalid for a token that does not open for this
-// user or has expired, and codeStatus mfa_code_invalid for a wrong code.
-func (s *Server) confirmTOTPSetup(w http.ResponseWriter, u store.User, setupToken, code string, codeStatus int) (store.MFATOTP, bool) {
+// secret with authlume's totp. It returns the authenticator app to store,
+// with a new ID, the secret sealed and the time step of code as the last
+// accepted one. Otherwise it writes 400 mfa_state_invalid for a token that
+// does not open for this user or has expired, and codeStatus
+// mfa_code_invalid for a wrong code.
+func (s *Server) confirmTOTPSetup(w http.ResponseWriter, r *http.Request, u store.User, setupToken, code string, codeStatus int) (store.MFATOTP, bool) {
 	var setup totpSetup
 	now := s.auth.Now()
 	if len(setupToken) == 0 || len(setupToken) > maxMFATokenLength {
@@ -335,14 +426,30 @@ func (s *Server) confirmTOTPSetup(w http.ResponseWriter, u store.User, setupToke
 		mfaStateInvalid(w)
 		return store.MFATOTP{}, false
 	}
+	secret, err := mfa.TOTPSecretBytes(setup.Secret)
+	if err != nil {
+		mfaStateInvalid(w)
+		return store.MFATOTP{}, false
+	}
 	normalized, ok := mfa.NormalizeTOTPCode(code)
 	if !ok {
 		mfaCodeInvalid(w, codeStatus, "totp", u.ID)
 		return store.MFATOTP{}, false
 	}
-	step, ok := mfa.MatchTOTP(setup.Secret, normalized, now, 0)
-	if !ok {
-		mfaCodeInvalid(w, codeStatus, "totp", u.ID)
+	// The pending secret is checked against a store of its own that keeps
+	// the accepted step, which becomes the last step of the stored app.
+	pending := &pendingTOTP{secret: secret}
+	verifier, err := totp.New(pending, func() time.Time { return now })
+	if err != nil {
+		mfaError(w, "totp finish", u.ID, err)
+		return store.MFATOTP{}, false
+	}
+	if err := verifier.Verify(r.Context(), u.ID, normalized); err != nil {
+		if errors.Is(err, totp.ErrInvalid) || errors.Is(err, totp.ErrRecord) {
+			mfaCodeInvalid(w, codeStatus, "totp", u.ID)
+		} else {
+			mfaError(w, "totp finish", u.ID, err)
+		}
 		return store.MFATOTP{}, false
 	}
 	sealed, err := s.box.Seal(totpSecretPurpose+u.ID, setup.Secret)
@@ -350,7 +457,76 @@ func (s *Server) confirmTOTPSetup(w http.ResponseWriter, u store.User, setupToke
 		mfaError(w, "totp finish", u.ID, err)
 		return store.MFATOTP{}, false
 	}
-	return store.MFATOTP{UserID: u.ID, SecretSealed: sealed, LastStep: step, CreatedAt: now.Unix()}, true
+	id, err := auth.Random()
+	if err != nil {
+		mfaError(w, "totp finish", u.ID, err)
+		return store.MFATOTP{}, false
+	}
+	return store.MFATOTP{ID: id, UserID: u.ID, SecretSealed: sealed, LastStep: pending.step, CreatedAt: now.Unix()}, true
+}
+
+// pendingTOTP is the totp.Store of a secret that is being confirmed: it
+// holds the secret alone and records the step that was accepted.
+type pendingTOTP struct {
+	secret []byte
+	step   int64
+}
+
+func (p *pendingTOTP) Load(context.Context, string) (totp.Credential, error) {
+	return totp.Credential{ID: "pending", Secret: p.secret}, nil
+}
+
+func (p *pendingTOTP) Consume(_ context.Context, _, _ string, step int64) error {
+	p.step = step
+	return nil
+}
+
+// totpStore is the totp.Store of the enrolled authenticator apps. The
+// secret is stored sealed for the user and in base32. A missing app, an app
+// stored before this version (no ID) and a secret shorter than 20 bytes are
+// totp.ErrInvalid; so is a secret that does not open or decode, which is
+// logged: it means that ASTOVIA_JWT_SECRET changed.
+type totpStore struct {
+	st  *store.Store
+	box *secretbox.Box
+}
+
+func (t totpStore) Load(ctx context.Context, subject string) (totp.Credential, error) {
+	row, err := t.st.TOTPRecord(ctx, subject)
+	if errors.Is(err, sql.ErrNoRows) {
+		return totp.Credential{}, totp.ErrInvalid
+	}
+	if err != nil {
+		return totp.Credential{}, err
+	}
+	if row.ID == "" {
+		return totp.Credential{}, totp.ErrInvalid
+	}
+	secret, err := t.box.Open(totpSecretPurpose+subject, row.SecretSealed)
+	if err != nil {
+		log.Printf("auth: mfa: totp secret of user %s cannot be decrypted", subject)
+		return totp.Credential{}, totp.ErrInvalid
+	}
+	key, err := mfa.TOTPSecretBytes(secret)
+	if err != nil {
+		log.Printf("auth: mfa: totp secret of user %s is malformed", subject)
+		return totp.Credential{}, totp.ErrInvalid
+	}
+	if len(key) < 20 {
+		return totp.Credential{}, totp.ErrInvalid
+	}
+	return totp.Credential{ID: row.ID, Secret: key}, nil
+}
+
+func (t totpStore) Consume(ctx context.Context, subject, id string, step int64) error {
+	ok, err := t.st.ConsumeTOTPStep(ctx, subject, id, step)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return totp.ErrInvalid
+	}
+	return nil
 }
 
 // newRecoveryCodes returns new recovery codes as shown to the user and as
@@ -375,7 +551,8 @@ func newRecoveryCodes() ([]string, []store.RecoveryCode, error) {
 	return codes, rows, nil
 }
 
-// handleMFATOTP signs in with the code of the authenticator app.
+// handleMFATOTP signs in with the code of the authenticator app. The step
+// is spent by the store; of two requests with the same code, one wins.
 func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Token string `json:"mfa_token"`
@@ -384,43 +561,26 @@ func (s *Server) handleMFATOTP(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in, mfaBodyLimit) {
 		return
 	}
-	u, ok := s.mfaUser(w, r, in.Token)
+	u, digest, ok := s.mfaUser(w, r, in.Token)
 	if !ok || !s.allowMFAAttempt(w, u.ID) {
 		return
 	}
-	status, err := s.auth.Store.MFAStatus(r.Context(), u.ID)
-	if err != nil {
-		mfaError(w, "totp", u.ID, err)
-		return
-	}
 	code, ok := mfa.NormalizeTOTPCode(in.Code)
-	if status.TOTP == nil || !ok {
-		mfaCodeInvalid(w, 401, "totp", u.ID)
-		return
-	}
-	secret, err := s.box.Open(totpSecretPurpose+u.ID, status.TOTP.SecretSealed)
-	if err != nil {
-		// ASTOVIA_JWT_SECRET changed: the answer is that of a wrong code.
-		log.Printf("auth: mfa: totp secret of user %s cannot be decrypted", u.ID)
-		mfaCodeInvalid(w, 401, "totp", u.ID)
-		return
-	}
-	step, ok := mfa.MatchTOTP(secret, code, s.auth.Now(), status.TOTP.LastStep)
 	if !ok {
 		mfaCodeInvalid(w, 401, "totp", u.ID)
 		return
 	}
-	// The step is spent here; of two requests with the same code, one wins.
-	used, err := s.auth.Store.UseTOTPStep(r.Context(), u.ID, step)
-	if err != nil {
+	err := s.totp.Verify(r.Context(), u.ID, code)
+	switch {
+	case err == nil:
+	case errors.Is(err, totp.ErrInvalid), errors.Is(err, totp.ErrRecord):
+		mfaCodeInvalid(w, 401, "totp", u.ID)
+		return
+	default:
 		mfaError(w, "totp", u.ID, err)
 		return
 	}
-	if !used {
-		mfaCodeInvalid(w, 401, "totp", u.ID)
-		return
-	}
-	s.completeMFASignIn(w, r, u, nil)
+	s.completeMFASignIn(w, r, u, digest, nil)
 }
 
 // handleMFARecovery signs in with a recovery code, which is spent. A code
@@ -433,7 +593,7 @@ func (s *Server) handleMFARecovery(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in, mfaBodyLimit) {
 		return
 	}
-	u, ok := s.mfaUser(w, r, in.Token)
+	u, digest, ok := s.mfaUser(w, r, in.Token)
 	if !ok || !s.allowMFAAttempt(w, u.ID) {
 		return
 	}
@@ -451,7 +611,7 @@ func (s *Server) handleMFARecovery(w http.ResponseWriter, r *http.Request) {
 		mfaCodeInvalid(w, 401, "recovery", u.ID)
 		return
 	}
-	s.completeMFASignIn(w, r, u, nil)
+	s.completeMFASignIn(w, r, u, digest, nil)
 }
 
 // handleMFAEnrollTOTPBegin starts the enrollment of an authenticator app
@@ -463,7 +623,7 @@ func (s *Server) handleMFAEnrollTOTPBegin(w http.ResponseWriter, r *http.Request
 	if !decode(w, r, &in, mfaBodyLimit) {
 		return
 	}
-	u, ok := s.mfaUser(w, r, in.Token)
+	u, _, ok := s.mfaUser(w, r, in.Token)
 	if !ok || !s.mfaEnrollable(w, r, u) {
 		return
 	}
@@ -482,11 +642,11 @@ func (s *Server) handleMFAEnrollTOTPFinish(w http.ResponseWriter, r *http.Reques
 	if !decode(w, r, &in, mfaBodyLimit) {
 		return
 	}
-	u, ok := s.mfaUser(w, r, in.Token)
+	u, digest, ok := s.mfaUser(w, r, in.Token)
 	if !ok || !s.allowMFAAttempt(w, u.ID) || !s.mfaEnrollable(w, r, u) {
 		return
 	}
-	totp, ok := s.confirmTOTPSetup(w, u, in.SetupToken, in.Code, 401)
+	app, ok := s.confirmTOTPSetup(w, r, u, in.SetupToken, in.Code, 401)
 	if !ok {
 		return
 	}
@@ -497,7 +657,7 @@ func (s *Server) handleMFAEnrollTOTPFinish(w http.ResponseWriter, r *http.Reques
 	}
 	// The store checks again, under the lock of the user row, that the user
 	// has no factor: of two concurrent enrollments, one wins.
-	_, err = s.auth.Store.EnrollTOTP(r.Context(), totp, rows, true)
+	_, err = s.auth.Store.EnrollTOTP(r.Context(), app, rows, store.EnrollOptions{OnlyIfNone: true, PasswordDigest: digest, Now: s.auth.Now().Unix()})
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrMFAEnrolled):
@@ -511,17 +671,17 @@ func (s *Server) handleMFAEnrollTOTPFinish(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	log.Printf("auth: mfa: totp enrolled user=%s", u.ID)
-	s.completeMFASignIn(w, r, u, codes)
+	s.completeMFASignIn(w, r, u, digest, codes)
 }
 
 // confirmPassword checks the current password of the signed-in user, which
 // the account screen asks for before it changes the second factors. The
-// user row is read again. It writes 400 password_invalid for a wrong
-// password; attempts, successful or not, are limited per user before any
-// bcrypt work.
-func (s *Server) confirmPassword(w http.ResponseWriter, r *http.Request, u store.User, password string) bool {
-	if len(password) < 1 || len(password) > 72 {
-		fail(w, 400, "invalid_request", "password must contain 1-72 bytes.")
+// user is looked up again by its email address and must be the same user.
+// It writes 400 password_invalid for a wrong password; attempts, successful
+// or not, are limited per user before the key is derived.
+func (s *Server) confirmPassword(w http.ResponseWriter, r *http.Request, u store.User, secret string) bool {
+	if len(secret) < 1 || len(secret) > auth.MaxPasswordBytes {
+		fail(w, 400, "invalid_request", "password must contain 1-1024 bytes.")
 		return false
 	}
 	if !s.mfaPasswordLimiter.allowKey("mfa-password:" + u.ID) {
@@ -529,26 +689,25 @@ func (s *Server) confirmPassword(w http.ResponseWriter, r *http.Request, u store
 		fail(w, 429, "rate_limited", "Too many attempts. Try again later.")
 		return false
 	}
-	current, err := s.auth.Store.UserByID(r.Context(), u.ID)
-	if errors.Is(err, sql.ErrNoRows) {
-		s.authError(w, r, store.ErrUnauthorized)
-		return false
-	}
+	var found store.User
+	a, err := password.New(s.passwordLookup(&found), func(context.Context, string) (password.Decision, error) {
+		return password.PasswordOnly, nil
+	})
 	if err != nil {
 		mfaError(w, "confirm password", u.ID, err)
 		return false
 	}
-	if current.Disabled != 0 {
-		s.authError(w, r, store.ErrUnauthorized)
-		return false
-	}
-	if bcrypt.CompareHashAndPassword([]byte(current.PasswordHash), []byte(password)) != nil {
+	result, err := a.Authenticate(r.Context(), u.Email, secret)
+	switch {
+	case err == nil && result.Subject == u.ID:
+		return true
+	case err == nil, errors.Is(err, password.ErrCredentials), errors.Is(err, password.ErrRecord):
 		fail(w, 400, "password_invalid", "The password is not correct.")
-		return false
+	default:
+		mfaError(w, "confirm password", u.ID, err)
 	}
-	return true
+	return false
 }
-
 func toMFAStatusResponse(status store.MFAStatus) mfaStatusResponse {
 	out := mfaStatusResponse{WebAuthn: make([]mfaCredentialResponse, 0, len(status.WebAuthn)), RecoveryCodesRemaining: status.RecoveryCodes}
 	if status.TOTP != nil {
@@ -615,7 +774,12 @@ func (s *Server) handleFinishTOTP(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in, mfaBodyLimit) || !s.allowMFAAttempt(w, u.ID) {
 		return
 	}
-	totp, ok := s.confirmTOTPSetup(w, u, in.SetupToken, in.Code, 400)
+	sid, ok := sessionFrom(r.Context())
+	if !ok {
+		s.authError(w, r, store.ErrUnauthorized)
+		return
+	}
+	app, ok := s.confirmTOTPSetup(w, r, u, in.SetupToken, in.Code, 400)
 	if !ok {
 		return
 	}
@@ -624,7 +788,9 @@ func (s *Server) handleFinishTOTP(w http.ResponseWriter, r *http.Request) {
 		mfaError(w, "totp enroll", u.ID, err)
 		return
 	}
-	issued, err := s.auth.Store.EnrollTOTP(r.Context(), totp, rows, false)
+	// The store checks again, under the lock of the user row, that the
+	// session is still active.
+	issued, err := s.auth.Store.EnrollTOTP(r.Context(), app, rows, store.EnrollOptions{SessionID: sid, Now: s.auth.Now().Unix()})
 	if errors.Is(err, store.ErrUnauthorized) {
 		s.authError(w, r, err)
 		return
