@@ -57,23 +57,14 @@ type GitHubConnection struct {
 // that sessionID is still an active session of the user. It is the first
 // step of every write made from a browser session; see CreateAPIToken.
 func lockActiveUser(ctx context.Context, q queries, userID, sessionID string, now int64) error {
-	u, e := q.lockUser(ctx, userID)
-	if errors.Is(e, sql.ErrNoRows) {
+	if sessionID == "" {
 		return ErrUnauthorized
 	}
+	u, e := lockEnabledUser(ctx, q, userID)
 	if e != nil {
 		return e
 	}
-	if u.Disabled != 0 {
-		return ErrUnauthorized
-	}
-	if _, e = q.activeSession(ctx, sessionID, userID, now); e != nil {
-		if errors.Is(e, sql.ErrNoRows) {
-			return ErrUnauthorized
-		}
-		return e
-	}
-	return nil
+	return checkBinding(ctx, q, u, sessionID, "", now)
 }
 
 // GitHubConnection returns the user's connection, or ErrConnectionNotFound.

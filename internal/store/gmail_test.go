@@ -99,8 +99,7 @@ func testGoogleAuthStates(t *testing.T, driver string) {
 	if err := s.ChangeUser(ctx, "alice@example.com", "new", false, tokenTestNow); err != nil {
 		t.Fatal(err)
 	}
-	u, _ := s.UserByEmail(ctx, "alice@example.com")
-	if err := s.Login(ctx, u, store.Session{ID: "alice-session2", UserID: "alice-id", ExpiresAt: tokenTestNow + 3600, CreatedAt: tokenTestNow}, store.Refresh{Hash: "refresh-alice2", SessionID: "alice-session2", CreatedAt: tokenTestNow}); err != nil {
+	if err := s.InsertWebSession(ctx, store.WebSession{ID: "alice-session2", UserID: "alice-id", AuthenticatedAt: tokenTestNow, LastActivity: tokenTestNow, AbsoluteExpiry: tokenTestNow + 3600, IdleSeconds: 3600}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ConsumeAuthState(ctx, "alice-id", "alice-session2", "r1", tokenTestNow+1); !errors.Is(err, store.ErrAuthStateNotFound) {

@@ -1,81 +1,158 @@
 package httpserver
 
 import (
-	"bytes"
 	"context"
-	"crypto/subtle"
 	"database/sql"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
-	"github.com/i2bskn/astovia/internal/oidc"
 	"github.com/i2bskn/astovia/internal/store"
+	"github.com/i2bskn/authlume/oidc"
 )
 
-// relyingParty is the part of *oidc.Client used by the OIDC sign-in. Tests
-// replace it.
-type relyingParty interface {
-	// AuthorizationURL returns the URL that starts the sign-in.
-	// oidc.ErrProviderUnavailable means the provider metadata could not be
-	// read.
-	AuthorizationURL(state, nonce, challenge string) (string, error)
-	// Exchange redeems the authorization code for an ID token.
-	// oidc.ErrProviderUnavailable means the provider could not be reached.
-	Exchange(ctx context.Context, code, verifier string) (string, error)
-	// Verify verifies the ID token and returns its identity.
-	// oidc.ErrKeysUnavailable means the signing keys could not be fetched.
-	Verify(ctx context.Context, idToken, nonce string) (oidc.Identity, error)
-}
-
 const (
-	// oidcCookie holds the state of a sign-in in progress, sealed.
-	oidcCookie = "__Host-astovia_oidc"
-	// oidcCookieMaxAge is the time allowed to finish a sign-in (10 minutes).
-	oidcCookieMaxAge = 600
-	// oidcSealPurpose is the purpose the cookie is sealed with.
-	oidcSealPurpose = "oidc-login"
+	// oidcLoginPath starts the sign-in. It takes a form POST of this origin.
+	oidcLoginPath = "/auth/oidc/login"
+	// oidcFormLimit bounds the sign-in form body in bytes.
+	oidcFormLimit = 16 << 10
 	// maxReturnTo bounds return_to in bytes after decoding, so that the
-	// consent screen of an MCP client with a long request fits.
-	maxReturnTo = 2700
-	// maxOIDCCookieValue bounds the sealed cookie value, so that the name
-	// and the value stay within the 4096 bytes browsers keep.
-	maxOIDCCookieValue = 3800
-	// maxCodeLength bounds the authorization code in bytes.
-	maxCodeLength = 2048
+	// consent screen of an MCP client with a long request fits. It is kept
+	// by authlume on the server (oidc.MaxAppData), not in a cookie.
+	maxReturnTo = 8300
+	// maxScreenReturnTo bounds a return_to to any other screen, whose
+	// address is short: anyone can start a sign-in, so the rows of the
+	// sign-ins in progress are kept small.
+	maxScreenReturnTo = 1024
 	// signinErrorPath is the screen that explains a failed sign-in.
 	signinErrorPath = "/signin-error"
+)
+
+// Timeouts of the OIDC client, as in Kordovia's signin package.
+const (
+	// oidcInitTimeout bounds one discovery. It does not use the request
+	// context, so that a client going away does not count as a failure.
+	oidcInitTimeout = 5 * time.Second
+	// oidcRetryInterval is the minimum time between two failed discoveries,
+	// so that sign-in attempts cannot make many requests to the provider.
+	oidcRetryInterval = 30 * time.Second
+	// oidcRequestTimeout bounds the start and the callback, discovery
+	// included.
+	oidcRequestTimeout = 10 * time.Second
 )
 
 // Reasons of /signin-error. The screen shows a message for each.
 const (
 	reasonFailed        = "failed"
-	reasonDenied        = "denied"
 	reasonUnavailable   = "unavailable"
 	reasonDisabled      = "disabled"
 	reasonReturnTooLong = "return_too_long"
 	reasonNotAllowed    = "not_allowed"
 	reasonNotVerified   = "email_not_verified"
 	reasonUnsupported   = "unsupported_account"
+	reasonRateLimited   = "rate_limited"
 )
 
 // gmailDomain is the only domain whose Google accounts need no hd claim.
 const gmailDomain = "gmail.com"
 
-// oidcState is the content of the sign-in cookie: the state, nonce and
-// PKCE verifier of the sign-in and the path to return to.
-type oidcState struct {
-	State    string `json:"s"`
-	Nonce    string `json:"n"`
-	Verifier string `json:"v"`
-	ReturnTo string `json:"r"`
+// oidcLogin is the OIDC relying party of the server: authlume's client,
+// created on first use instead of at startup, so that the server starts
+// while the provider cannot be reached. Until discovery succeeds, sign-ins
+// fail with oidc.ErrProviderUnavailable.
+type oidcLogin struct {
+	cfg   oidc.Config
+	store oidc.Store
+	now   func() time.Time
+	// create is oidc.New; tests replace it.
+	create func(context.Context, oidc.Config, oidc.Store) (*oidc.Client, error)
+
+	// mu serializes discoveries and guards client and failedAt.
+	mu       sync.Mutex
+	client   *oidc.Client
+	failedAt time.Time
+}
+
+// newOIDCLogin returns the relying party of c, keeping sign-ins in progress
+// in st. now is the clock of the retry interval, the server's. It does not
+// contact the provider.
+func newOIDCLogin(c *config.OIDCClient, st oidc.Store, now func() time.Time) *oidcLogin {
+	return &oidcLogin{
+		cfg: oidc.Config{
+			Issuer:       c.Issuer,
+			ClientID:     c.ClientID,
+			ClientSecret: c.Secret,
+			RedirectURL:  c.RedirectURI,
+			// RS256 only. openid is always requested; only sub, email,
+			// email_verified and hd are read.
+			Scopes: []string{"email"},
+		},
+		store:  st,
+		now:    now,
+		create: oidc.New,
+	}
+}
+
+// begin starts a sign-in that keeps appData and redirects to the
+// authorization endpoint with a 303.
+func (l *oidcLogin) begin(w http.ResponseWriter, r *http.Request, appData []byte) error {
+	ctx, cancel := context.WithTimeout(r.Context(), oidcRequestTimeout)
+	defer cancel()
+	c, err := l.get()
+	if err != nil {
+		return err
+	}
+	return c.BeginWithOptions(w, r.WithContext(ctx), oidc.AuthorizationOptions{AppData: appData})
+}
+
+// complete finishes the sign-in at the callback and returns the verified
+// identity and the app data given to begin.
+func (l *oidcLogin) complete(w http.ResponseWriter, r *http.Request) (oidc.Identity, []byte, error) {
+	ctx, cancel := context.WithTimeout(r.Context(), oidcRequestTimeout)
+	defer cancel()
+	c, err := l.get()
+	if err != nil {
+		return oidc.Identity{}, nil, err
+	}
+	return c.CompleteWithAppData(w, r.WithContext(ctx))
+}
+
+// get returns the authlume client, discovering the provider when there is
+// none yet and the last failure is at least oidcRetryInterval ago.
+func (l *oidcLogin) get() (*oidc.Client, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.client != nil {
+		return l.client, nil
+	}
+	if !l.failedAt.IsZero() && l.now().Sub(l.failedAt) < oidcRetryInterval {
+		return nil, oidc.ErrProviderUnavailable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), oidcInitTimeout)
+	defer cancel()
+	c, err := l.create(ctx, l.cfg, l.store)
+	if err != nil {
+		// Counted from the end of the attempt, so that a slow failure
+		// still waits the whole interval.
+		l.failedAt = l.now()
+		switch {
+		case errors.Is(err, oidc.ErrProviderUnavailable), errors.Is(err, context.DeadlineExceeded):
+			log.Print("auth: oidc: discovery failed: provider unavailable")
+		default:
+			// Invalid configuration or metadata, such as an issuer that
+			// differs from the configured one. The errors carry no secret.
+			log.Printf("auth: oidc: discovery failed: %v", err)
+		}
+		return nil, oidc.ErrProviderUnavailable
+	}
+	l.client = c
+	return c, nil
 }
 
 // authConfigResponse tells the web UI how to sign in.
@@ -105,133 +182,106 @@ func (s *Server) passwordAuth(next http.Handler) http.Handler {
 	})
 }
 
-// handleOIDCLogin starts the sign-in: it seals a new state, nonce and PKCE
-// verifier with return_to in the sign-in cookie and redirects to the
-// authorization endpoint of the provider. The cookie is set only once the
-// authorization URL is known, so that a provider that cannot be reached
-// leaves no cookie.
+// handleOIDCLogin starts the sign-in from the form of the sign-in screen:
+// after the rate limit per peer and the Origin check it asks authlume to
+// start a sign-in that keeps return_to on the server, and redirects to the
+// authorization endpoint of the provider with a 303.
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
-	if s.rp == nil {
-		log.Printf("auth: oidc login: no OIDC client")
-		redirectSigninError(w, http.StatusFound, reasonUnavailable)
+	if !s.oidcLimiter.allow(s.clientAddr(r)) {
+		redirectSigninError(w, http.StatusSeeOther, reasonRateLimited)
+		return
+	}
+	if !s.sameOrigin(r) {
+		fail(w, 403, "origin_rejected", "Request origin is not allowed.")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, oidcFormLimit)
+	if err := r.ParseForm(); err != nil {
+		fail(w, 400, "invalid_request", "The sign-in form is malformed.")
 		return
 	}
 	returnTo := "/"
 	// Several return_to values are ignored.
-	if values := r.URL.Query()["return_to"]; len(values) == 1 {
+	if values := r.PostForm["return_to"]; len(values) == 1 {
 		// A return_to that cannot be kept is not replaced silently: the
 		// consent screen of an MCP client would be lost.
-		if len(values[0]) > maxReturnTo {
-			redirectSigninError(w, http.StatusFound, reasonReturnTooLong)
+		if len(values[0]) > maxReturnTo || (len(values[0]) > maxScreenReturnTo && !consentReturnTo(values[0])) {
+			redirectSigninError(w, http.StatusSeeOther, reasonReturnTooLong)
 			return
 		}
 		if safeReturnTo(values[0]) {
 			returnTo = values[0]
 		}
 	}
-	st := oidcState{ReturnTo: returnTo}
-	for _, p := range []*string{&st.State, &st.Nonce, &st.Verifier} {
-		v, err := auth.Random()
-		if err != nil {
-			log.Printf("auth: oidc login: %v", err)
-			redirectSigninError(w, http.StatusFound, reasonUnavailable)
-			return
-		}
-		*p = v
-	}
-	value, err := s.sealOIDCState(st)
-	if err != nil {
-		log.Printf("auth: oidc login: seal state: %v", err)
-		redirectSigninError(w, http.StatusFound, reasonUnavailable)
+	if s.oidc == nil {
+		log.Printf("auth: oidc login: no OIDC client")
+		redirectSigninError(w, http.StatusSeeOther, reasonUnavailable)
 		return
 	}
-	if len(value) > maxOIDCCookieValue {
-		redirectSigninError(w, http.StatusFound, reasonReturnTooLong)
-		return
+	if err := s.oidc.begin(w, r, []byte(returnTo)); err != nil {
+		log.Printf("auth: oidc login: cannot start the sign-in: %s", oidcErrorKind(err))
+		redirectSigninError(w, http.StatusSeeOther, reasonUnavailable)
 	}
-	location, err := s.rp.AuthorizationURL(st.State, st.Nonce, oidc.Challenge(st.Verifier))
-	if err != nil {
-		log.Printf("auth: oidc login: provider unavailable")
-		redirectSigninError(w, http.StatusFound, reasonUnavailable)
-		return
-	}
-	http.SetCookie(w, newOIDCCookie(value, oidcCookieMaxAge))
-	redirect(w, http.StatusFound, location)
 }
 
-// handleOIDCCallback finishes the sign-in: it checks the state, exchanges
-// the code, verifies the ID token, finds the user linked to its iss and sub
-// (oidcUser links or creates it on the first sign-in) and starts a session
-// with the refresh cookie. Every failure redirects to /signin-error with a
-// reason. Only the reasons are logged, never the code, the state, the
-// tokens, the cookies, the email address or the sub.
+// consentReturnTo reports whether v returns to the consent screen of the
+// MCP authorization server, whose query may be long.
+func consentReturnTo(v string) bool {
+	p, _, _ := strings.Cut(v, "?")
+	return strings.TrimSuffix(p, "/") == authorizePath
+}
+
+// oidcErrorKind names the category of an error of authlume's oidc for the
+// log, without its text.
+func oidcErrorKind(err error) string {
+	switch {
+	case errors.Is(err, oidc.ErrInvalid):
+		return "invalid"
+	case errors.Is(err, oidc.ErrProviderUnavailable):
+		return "provider unavailable"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	}
+	return "server error"
+}
+
+// handleOIDCCallback finishes the sign-in: authlume checks the state, the
+// browser binding and the ID token; the user is the one linked to its iss
+// and sub (oidcUser links or creates it on the first sign-in). The session
+// is issued only while the user is still linked to that identity. Every
+// failure redirects to /signin-error with a reason. Only the reasons are
+// logged, never the code, the state, the tokens, the cookies, the email
+// address, the sub or the claims.
 func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
-	// The sign-in cookie is single use: it is cleared whatever the outcome.
-	http.SetCookie(w, newOIDCCookie("", -1))
 	failed := func(reason, detail string) {
 		log.Printf("auth: oidc sign-in failed: %s", detail)
 		redirectSigninError(w, http.StatusSeeOther, reason)
 	}
-	c, err := r.Cookie(oidcCookie)
-	if err != nil {
-		failed(reasonFailed, "no sign-in in progress")
-		return
-	}
-	st, ok := s.openOIDCState(c.Value)
-	if !ok {
-		failed(reasonFailed, "malformed sign-in state")
-		return
-	}
-	q := r.URL.Query()
-	// The state is checked before the error, so that another site cannot
-	// show an error for a sign-in it did not start.
-	if states := q["state"]; len(states) != 1 || subtle.ConstantTimeCompare([]byte(states[0]), []byte(st.State)) != 1 {
-		failed(reasonFailed, "state mismatch")
-		return
-	}
-	if _, ok := q["error"]; ok {
-		failed(reasonDenied, "denied by the provider")
-		return
-	}
-	codes := q["code"]
-	if len(codes) != 1 || len(codes[0]) == 0 || len(codes[0]) > maxCodeLength {
-		failed(reasonFailed, "missing or malformed code")
-		return
-	}
-	if s.rp == nil || s.cfg.OIDC == nil {
+	if s.oidc == nil || s.cfg.OIDC == nil {
 		failed(reasonUnavailable, "no OIDC client")
 		return
 	}
-	idToken, err := s.rp.Exchange(r.Context(), codes[0], st.Verifier)
-	if errors.Is(err, oidc.ErrProviderUnavailable) {
-		failed(reasonUnavailable, "token endpoint unavailable")
+	identity, appData, err := s.oidc.complete(w, r)
+	switch {
+	case errors.Is(err, oidc.ErrInvalid):
+		failed(reasonFailed, "the sign-in could not be verified")
+		return
+	case err != nil:
+		failed(reasonUnavailable, "the sign-in could not be completed: "+oidcErrorKind(err))
 		return
 	}
-	if err != nil {
-		failed(reasonFailed, "code exchange failed")
-		return
-	}
-	identity, err := s.rp.Verify(r.Context(), idToken, st.Nonce)
-	if errors.Is(err, oidc.ErrKeysUnavailable) {
-		failed(reasonUnavailable, "signing keys unavailable")
-		return
-	}
-	if err != nil {
-		failed(reasonFailed, "invalid ID token")
-		return
+	returnTo := string(appData)
+	if !safeReturnTo(returnTo) {
+		returnTo = "/"
 	}
 	u, reason, detail := s.oidcUser(r.Context(), identity)
 	if reason != "" {
 		failed(reason, detail)
 		return
 	}
-	// The refresh cookie of a session the browser may already hold is not
-	// sent here: it is SameSite=Strict and this is a cross-site navigation
-	// from the provider. It is replaced by the new cookie, and its session
-	// stays on the server until it expires.
-	result, err := s.auth.LoginUser(r.Context(), u)
+	err = s.issueSession(w, r, u.ID, store.IssueGuard{OIDCIssuer: identity.ID.Issuer, OIDCSubject: identity.ID.Subject})
 	if errors.Is(err, store.ErrUnauthorized) {
-		// Disabled, or the password hash changed, since the lookup.
+		// Disabled or unlinked since the lookup.
 		failed(reasonFailed, "user "+u.ID+" changed during the sign-in")
 		return
 	}
@@ -240,8 +290,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		failed(reasonUnavailable, "cannot start the session")
 		return
 	}
-	s.setRefreshCookie(w, result)
-	redirect(w, http.StatusSeeOther, st.ReturnTo)
+	redirect(w, http.StatusSeeOther, returnTo)
 }
 
 // emailVerified reports whether the email_verified claim (nil when absent)
@@ -262,8 +311,8 @@ func emailVerified(claim *bool, require bool) bool {
 // and the stored address is not updated. Without one this is the first
 // sign-in of the identity (firstOIDCUser).
 func (s *Server) oidcUser(ctx context.Context, identity oidc.Identity) (store.User, string, string) {
-	issuer := s.cfg.OIDC.Issuer
-	u, err := s.auth.Store.UserByOIDC(ctx, issuer, identity.Subject)
+	issuer := identity.ID.Issuer
+	u, err := s.auth.Store.UserByOIDC(ctx, issuer, identity.ID.Subject)
 	switch {
 	case err == nil && u.Disabled != 0:
 		return store.User{}, reasonDisabled, "user " + u.ID + " is disabled"
@@ -279,16 +328,22 @@ func (s *Server) oidcUser(ctx context.Context, identity oidc.Identity) (store.Us
 }
 
 // firstOIDCUser handles the first sign-in of an identity: the verified
-// email address must belong to a user that is not linked yet or have an
-// active invitation, and the identity is linked to that user or to the one
-// created from the invitation. Nothing is created, linked or accepted when
-// a check fails.
+// email address must belong to a user that is not linked yet and that an
+// administrator approved for linking, or have an active invitation, and the
+// identity is linked to that user or to the one created from the
+// invitation. Nothing is created, linked or accepted when a check fails.
 func (s *Server) firstOIDCUser(ctx context.Context, issuer string, identity oidc.Identity) (store.User, string, string) {
-	email, err := auth.Email(identity.Email)
+	claim, _ := identity.Claims.Text("email")
+	email, err := auth.Email(claim)
 	if err != nil {
 		return store.User{}, reasonFailed, "malformed email claim"
 	}
-	if !emailVerified(identity.EmailVerified, s.cfg.OIDC.RequireEmailVerified) {
+	var verified *bool
+	if v, ok := identity.Claims.Bool("email_verified"); ok {
+		verified = &v
+	}
+	hd, _ := identity.Claims.Text("hd")
+	if !emailVerified(verified, s.cfg.OIDC.RequireEmailVerified) {
 		return store.User{}, reasonNotVerified, "email not verified"
 	}
 	// Google lets anyone make a personal account with an address of a domain
@@ -296,7 +351,7 @@ func (s *Server) firstOIDCUser(ctx context.Context, issuer string, identity oidc
 	// accounts (hd) are taken as verified by Google. This is checked when
 	// Google is the issuer, or when the configuration asks for it because
 	// Google accounts sign in through another provider.
-	if (issuer == config.GoogleIssuer || s.cfg.OIDC.RequireGoogleHD) && email[strings.LastIndexByte(email, '@')+1:] != gmailDomain && identity.HostedDomain == "" {
+	if (issuer == config.GoogleIssuer || s.cfg.OIDC.RequireGoogleHD) && email[strings.LastIndexByte(email, '@')+1:] != gmailDomain && hd == "" {
 		return store.User{}, reasonUnsupported, "google account without hd"
 	}
 	id, err := auth.Random()
@@ -304,7 +359,7 @@ func (s *Server) firstOIDCUser(ctx context.Context, issuer string, identity oidc
 		return store.User{}, reasonUnavailable, "cannot create a user ID"
 	}
 	newUser := store.User{ID: id, PasswordHash: store.NoPasswordHash, CreatedAt: s.auth.Now().Unix()}
-	u, created, err := s.auth.Store.LinkOIDCUser(ctx, issuer, identity.Subject, email, newUser, s.auth.Now().Unix())
+	u, created, err := s.auth.Store.LinkOIDCUser(ctx, issuer, identity.ID.Subject, email, newUser, s.auth.Now().Unix())
 	// The errors of LinkOIDCUser are not logged: they may name the address.
 	switch {
 	case err == nil && created:
@@ -317,6 +372,8 @@ func (s *Server) firstOIDCUser(ctx context.Context, issuer string, identity oidc
 		return store.User{}, reasonNotAllowed, "not invited"
 	case errors.Is(err, store.ErrOIDCLinked):
 		return store.User{}, reasonNotAllowed, "email belongs to a user linked to another identity"
+	case errors.Is(err, store.ErrOIDCNotApproved):
+		return store.User{}, reasonNotAllowed, "email belongs to a user not approved for linking"
 	case errors.Is(err, store.ErrUserDisabled):
 		return store.User{}, reasonDisabled, "user is disabled"
 	case errors.Is(err, store.ErrInvalidOIDCIdentity):
@@ -324,7 +381,7 @@ func (s *Server) firstOIDCUser(ctx context.Context, issuer string, identity oidc
 	case !errors.Is(err, store.ErrConflict):
 		return store.User{}, reasonUnavailable, "cannot link or create the user"
 	}
-	return s.oidcUserAfterConflict(ctx, issuer, identity.Subject)
+	return s.oidcUserAfterConflict(ctx, issuer, identity.ID.Subject)
 }
 
 // oidcUserAfterConflict reads the identity once after a concurrent sign-in
@@ -362,64 +419,6 @@ func safeReturnTo(v string) bool {
 		return false
 	}
 	return screenPath(u.Path) && strings.TrimSuffix(u.Path, "/") != signinErrorPath
-}
-
-// validRandomValue reports whether v has the form produced by auth.Random:
-// 32 bytes in unpadded base64url (43 characters).
-func validRandomValue(v string) bool {
-	if len(v) != 43 {
-		return false
-	}
-	b, err := base64.RawURLEncoding.Strict().DecodeString(v)
-	return err == nil && len(b) == 32
-}
-
-// sealOIDCState returns the sign-in cookie value: the JSON of st sealed
-// for oidcSealPurpose. HTML characters in the return path are not
-// escaped, so that the size check counts the real length.
-func (s *Server) sealOIDCState(st oidcState) (string, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(st); err != nil {
-		return "", err
-	}
-	return s.box.Seal(oidcSealPurpose, string(bytes.TrimSuffix(buf.Bytes(), []byte("\n"))))
-}
-
-// openOIDCState reads the sign-in cookie value. A value that was not
-// sealed by this server for the sign-in, unknown keys, trailing data and
-// values not in the form written by handleOIDCLogin are rejected.
-func (s *Server) openOIDCState(v string) (oidcState, bool) {
-	if len(v) > maxOIDCCookieValue {
-		return oidcState{}, false
-	}
-	plain, err := s.box.Open(oidcSealPurpose, v)
-	if err != nil {
-		return oidcState{}, false
-	}
-	d := json.NewDecoder(strings.NewReader(plain))
-	d.DisallowUnknownFields()
-	var st oidcState
-	if err = d.Decode(&st); err != nil {
-		return oidcState{}, false
-	}
-	var extra any
-	if err = d.Decode(&extra); err != io.EOF {
-		return oidcState{}, false
-	}
-	if !validRandomValue(st.State) || !validRandomValue(st.Nonce) || !validRandomValue(st.Verifier) || !safeReturnTo(st.ReturnTo) {
-		return oidcState{}, false
-	}
-	return st, true
-}
-
-// newOIDCCookie returns the sign-in cookie: host-only, HTTPS-only, for the
-// whole site and unreadable by scripts. It is Lax, not Strict, because the
-// callback is a cross-site navigation from the provider. A negative maxAge
-// deletes it.
-func newOIDCCookie(value string, maxAge int) *http.Cookie {
-	return &http.Cookie{Name: oidcCookie, Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode}
 }
 
 // redirect redirects to location as it is, without a body. http.Redirect is

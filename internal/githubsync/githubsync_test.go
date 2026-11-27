@@ -182,6 +182,7 @@ func (f *fakeGitHub) requested(path string) int {
 }
 
 type syncTest struct {
+	sid    string
 	t      *testing.T
 	s      *store.Store
 	gh     *fakeGitHub
@@ -198,12 +199,10 @@ func newSyncTest(t *testing.T, driver string, immediate bool) *syncTest {
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Login(ctx, u, store.Session{ID: "sid", UserID: u.ID, ExpiresAt: st.now.Unix() + 86400*30, CreatedAt: st.now.Unix()}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: st.now.Unix()}); err != nil {
-		t.Fatal(err)
-	}
+	_, st.sid = testutil.Session(t, s, u.ID, st.now)
 	// Detection notifications are stored only for users who can receive
 	// them.
-	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", "sid", st.now.Unix()); err != nil {
+	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", st.sid, st.now.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	st.gh = &fakeGitHub{pulls: map[string]pullState{}, issues: map[string]issueState{}, reviews: map[string][]reviewState{}, comments: map[string][]commentState{}, search: map[string][]searchItem{}, forced: map[string]int{}, headers: map[string]map[string]string{}, threads: []map[string]any{}}
@@ -224,7 +223,7 @@ func (st *syncTest) connect(login string, immediate bool) store.GitHubConnection
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	c, err := st.s.SaveGitHubConnection(context.Background(), store.GitHubConnection{UserID: "alice-id", TokenSealed: sealed, TokenLast4: "test", Login: login, Scopes: "repo"}, &immediate, "sid", st.now.Unix())
+	c, err := st.s.SaveGitHubConnection(context.Background(), store.GitHubConnection{UserID: "alice-id", TokenSealed: sealed, TokenLast4: "test", Login: login, Scopes: "repo"}, &immediate, st.sid, st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}
@@ -408,10 +407,10 @@ func TestNotificationDetectionChannels(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		st := newSyncTest(t, driver, true)
 		ctx := context.Background()
-		if err := st.s.SaveNotificationRoutes(ctx, "alice-id", "sid", store.RoutableKinds, []string{store.NotificationDetected}, []string{store.NotificationDetected}, st.now.Unix()); err != nil {
+		if err := st.s.SaveNotificationRoutes(ctx, "alice-id", st.sid, store.RoutableKinds, []string{store.NotificationDetected}, []string{store.NotificationDetected}, st.now.Unix()); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.s.SetSlackWebhook(ctx, "alice-id", "sid", "sealed", st.now.Unix()); err != nil {
+		if err := st.s.SetSlackWebhook(ctx, "alice-id", st.sid, "sealed", st.now.Unix()); err != nil {
 			t.Fatal(err)
 		}
 		st.sync() // initial import with no results

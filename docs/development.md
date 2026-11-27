@@ -14,9 +14,9 @@ Docker ComposeとGNU Make、OpenSSLが必要です。この開発方法ではホ
 make env
 ```
 
-`.env.example`から`.env`を作成し、`ASTOVIA_JWT_SECRET`に`openssl rand -base64 32`で生成した署名鍵を、`LOCAL_UID`と`LOCAL_GID`にホストの`id -u`／`id -g`を設定します。ファイルのパーミッションは600です。`.env`が既にある場合は「.env already exists; nothing changed」と表示し、内容を一切変更しません。既存の`.env`を更新する場合は、`.env.example`を参考に手で追記・変更してください。
+`.env.example`から`.env`を作成し、`ASTOVIA_JWT_SECRET`に`openssl rand -base64 32`で生成した鍵を、`LOCAL_UID`と`LOCAL_GID`にホストの`id -u`／`id -g`を設定します。ファイルのパーミッションは600です。`.env`が既にある場合は「.env already exists; nothing changed」と表示し、内容を一切変更しません。既存の`.env`を更新する場合は、`.env.example`を参考に手で追記・変更してください。
 
-署名鍵は32バイト以上の乱数を標準のパディング付きBase64で表したものです。再起動時も同じ値を使用し、Gitへ追加しないでください。Docker Composeはシェルの環境変数またはリポジトリルートの`.env`から`ASTOVIA_JWT_SECRET`、`LOCAL_UID`、`LOCAL_GID`を展開します。`LOCAL_UID`と`LOCAL_GID`をホストのユーザーに合わせることで、コンテナから`data/`配下のDBを更新できます。省略時は`1000:1000`です。
+名前に`JWT`が残っていますが、この鍵はもうトークンの署名には使いません。DBに保存する秘密（連携のトークン、AIの資格情報、Slackの通知用Webhook、Web Pushの鍵、認証アプリの秘密）と、二段階認証の途中の状態を暗号化するための鍵です。32バイト以上の乱数を標準のパディング付きBase64で表したものです。値を変えると保存済みの秘密を復号できなくなるため、再起動時も同じ値を使用し、Gitへ追加しないでください。Docker Composeはシェルの環境変数またはリポジトリルートの`.env`から`ASTOVIA_JWT_SECRET`、`LOCAL_UID`、`LOCAL_GID`を展開します。`LOCAL_UID`と`LOCAL_GID`をホストのユーザーに合わせることで、コンテナから`data/`配下のDBを更新できます。省略時は`1000:1000`です。
 
 ### 2. スキーマを適用する
 
@@ -26,7 +26,9 @@ make migrate
 
 `data/`を作成し、Atlasコンテナで`db/sqlite/schema.hcl`を`data/astovia.db`へ適用します。Atlasが表示する変更計画を確認してから承認してください（自動承認はしません）。アプリの起動時にスキーマは自動更新しません。対象はSQLiteだけです。PostgreSQLへの適用は[「PostgreSQLを使用する」](https://astovia.dev/guides/native/#postgresqlを使用する)の手順で行ってください。
 
-既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加、Chatwork連携の`chatwork_connections`テーブルの追加、メール連携の`gmail_accounts`・`google_auth_states`テーブルの追加、`action_items`の`importance`列の追加、AIの追加の指示の`ai_instructions`テーブルの追加、通知の送り先の`notification_channels`テーブルと`notifications`の`channel`列の追加、`users`の`oidc_issuer`・`oidc_subject`列の追加、二段階認証の`mfa_totp`・`mfa_webauthn_credentials`・`mfa_recovery_codes`・`mfa_used_challenges`テーブルの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、OAuthのテーブルを追加する前のDBでは、migrateするまで起動しません。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
+既存のDBを使っている場合も、ソースを更新してスキーマが変わったとき（例: 対応事項の`action_items`テーブル、APIトークンの`api_tokens`テーブル、MCPのOAuthの`oauth_clients`・`oauth_grants`・`oauth_tokens`テーブルの追加、GitHub連携と通知の`github_connections`・`web_push_subscriptions`・`notification_settings`・`notifications`・`instance_secrets`テーブルと`action_items`の列の追加、AIの設定の`ai_settings`テーブルの追加、Slack連携の`slack_connections`テーブルの追加、Chatwork連携の`chatwork_connections`テーブルの追加、メール連携の`gmail_accounts`・`google_auth_states`テーブルの追加、`action_items`の`importance`列の追加、AIの追加の指示の`ai_instructions`テーブルの追加、通知の送り先の`notification_channels`テーブルと`notifications`の`channel`列の追加、`users`の`oidc_issuer`・`oidc_subject`列の追加、二段階認証の`mfa_totp`・`mfa_webauthn_credentials`・`mfa_recovery_codes`テーブルの追加、authlumeへの認証の置き換えによる`web_sessions`・`oidc_logins`・`webauthn_ceremonies`・`mcp_oauth_codes`・`mcp_oauth_connections`・`mcp_oauth_registrations`・`mcp_oauth_client_labels`テーブルと`users`の`oidc_link_approved_until`列などの追加）は、起動前にもう一度`make migrate`を実行してください。起動時のスキーマ確認はこれらのテーブルも対象にするため、テーブルを追加する前のDBでは、migrateするまで起動しません。
+
+認証の置き換えでは、Atlasが以前の認証のテーブル（`sessions`・`refresh_tokens`・`oauth_clients`・`oauth_grants`・`oauth_tokens`・`mfa_used_challenges`）の削除を計画します。承認して構いません。適用後は全員がログインし直し、MCPのクライアントは接続し直します。パスワードのハッシュはArgon2idだけを受け付けるため、以前のパスワードではログインできません。開発用のユーザーは`make user-reset-password USER_EMAIL=...`でパスワードを設定し直してください。以前の版で登録した認証アプリとパスキー・セキュリティキーは使えず、`astovia users reset-mfa`で解除して登録し直します（詳しくは[リリースノート](release-notes.md)）。テーブルが不足していると、アプリは「database schema is not initialized or incompatible」と表示して起動しません。
 
 生のコマンドは次のとおりです。
 
@@ -45,38 +47,39 @@ make user-create USER_EMAIL=alice@example.com
 
 ログインIDをメールアドレスに変更する前に作成したSQLiteのDBは、`users`表の列が異なるため起動時のスキーマ確認で失敗します。開発中のデータしか無い場合は、DBファイルを削除して`make migrate`で作り直し、`make user-create USER_EMAIL=...`でユーザーを作り直してください。自動移行は用意していません。旧DBに対して`make migrate`を実行すると、`username`列の削除と`email`列の追加の計画が表示されます。データが残らないため承認せず、DBファイルを作り直してください。
 
-OIDCでログインする構成（`ASTOVIA_AUTH_MODE=oidc`）では、最初のオーナーを`--no-password`でパスワードなしに作成します。初回のOIDCログインで、確認済みのメールアドレスが一致するユーザーにIDトークンの`iss`と`sub`が紐付きます。2回目以降は`iss`と`sub`だけで本人を特定します。makeのターゲットはないため、生のコマンドで実行します。
+OIDCでログインする構成（`ASTOVIA_AUTH_MODE=oidc`）は`ASTOVIA_PUBLIC_URL`が`https`のときだけ使えます。このローカル開発構成（`http://localhost:5173`）では起動時のエラーになります。https で動かす場合は、最初のオーナーを`--no-password`でパスワードなしに作成します。作成と同時に、OIDCでの紐付けを7日間承認します。その間の初回のOIDCログインで、確認済みのメールアドレスが一致するユーザーにIDトークンの`iss`と`sub`が紐付き、承認は消えます。2回目以降は`iss`と`sub`だけで本人を特定します。承認のないユーザーには、メールアドレスが一致するだけでは紐付きません（`not_allowed`）。期限が切れた場合や、パスワードでログインしていたユーザーは、`users approve-oidc --email ADDRESS`で7日間承認し直します。OIDCの構成ではAstoviaの二段階認証は適用しません（IdPの多要素認証を使ってください）。makeのターゲットはないため、生のコマンドで実行します。
 
 ```sh
 docker compose run --rm app go run ./cmd/astovia users create --email alice@example.com --no-password
 ```
 
-IdP側の識別子が変わると、紐付け済みのユーザーはログインできなくなります。該当するのは、`ASTOVIA_OIDC_ISSUER`を変えた場合・クライアントIDごとに`sub`が変わるIdPでクライアントを作り直した場合・IdPでアカウントを作り直した場合です。Cloudflare Access for SaaSのissuerはクライアントIDを含むため、Accessのアプリケーションを作り直すと変わります。その場合は紐付けを解除し、次のログインで紐付け直します。
+IdP側の識別子が変わると、紐付け済みのユーザーはログインできなくなります。該当するのは、`ASTOVIA_OIDC_ISSUER`を変えた場合・クライアントIDごとに`sub`が変わるIdPでクライアントを作り直した場合・IdPでアカウントを作り直した場合です。Cloudflare Access for SaaSのissuerはクライアントIDを含むため、Accessのアプリケーションを作り直すと変わります。その場合は紐付けを解除し、`approve-oidc`で承認してから、次のログインで紐付け直します。
 
 ```sh
 docker compose run --rm app go run ./cmd/astovia users unlink --email alice@example.com
 docker compose run --rm app go run ./cmd/astovia users unlink --all
+docker compose run --rm app go run ./cmd/astovia users approve-oidc --email alice@example.com
 ```
 
-解除したユーザーには、その時点の確認済みメールアドレスが一致する人が紐付きます。IdP側でメールアドレスが変わった人は紐付け直せません（Astoviaにメールアドレスを変える機能はありません）。以前のメールアドレスをIdPで別の人が使っている場合は、その人がそのユーザーに紐付きます。該当するユーザーは解除の前に無効化してください。`unlink`はセッション・APIトークン・MCPの接続を残すため、人を止める手段にはなりません。止めるときは`users disable`を使います。
+`unlink`は紐付けを外し、そのユーザーのセッション・APIトークン・MCPの接続をすべて失効させます。紐付け直す承認は付けません。`approve-oidc`で承認したユーザーには、7日以内に確認済みメールアドレスが一致してログインした人が紐付きます。IdP側でメールアドレスが変わった人は紐付け直せません（Astoviaにメールアドレスを変える機能はありません）。以前のメールアドレスをIdPで別の人が使っている場合は、その人がそのユーザーに紐付くため、承認する前に確かめてください。ユーザーの無効化（`users disable`と画面）は承認も消します。
 
 ### v0.1.0から更新する場合（OIDC）
 
 `ASTOVIA_ALLOWED_EMAILS`は廃止しました。値が残っていると`serve`は起動せず、手順を表示して止まります（`users`のCLIは値が残っていても動きます）。ログインできる人はユーザー管理画面の招待で決まり、招待のない人は初回ログインで追加されません。
 
-v0.1.0では、許可リストから外した既存ユーザーもログインを止められていました。更新後は、無効化していない既存ユーザーは確認済みのメールアドレスの一致で紐付いてログインできます。元オーナーはオーナーとして戻ります。次の順に進めてください。
+v0.1.0では、許可リストから外した既存ユーザーもログインを止められていました。更新後、紐付けのない既存ユーザーは`users approve-oidc`で承認するまでOIDCでログインできません。承認したユーザーは確認済みのメールアドレスの一致で紐付き、元オーナーはオーナーとして戻ります。次の順に進めてください。
 
 1. スキーマを適用します（起動前に必要です。配布構成では`docker compose run --rm migrate`、PostgreSQLでは既存の手順のまま）。
 2. 許可リストから外して止めていた人を無効化します: `astovia users disable --email <address>`
 3. `ASTOVIA_ALLOWED_EMAILS`を消します。
-4. 最初のオーナーがいなければ、`astovia users create --email <address> --no-password`で作成します。
+4. 最初のオーナーがいなければ、`astovia users create --email <address> --no-password`で作成します。既存のユーザーは`astovia users approve-oidc --email <address>`で承認します（7日間）。
 5. 他の人をユーザー管理画面から招待します。
 
-CLIを実行しにくい構成では、更新する前（v0.1.0のうち）にユーザー管理画面で無効化しておいてください。v0.1.0で`ASTOVIA_ALLOWED_EMAILS`を空にして全員を止めていた構成では、起動エラーが出ないまま既存ユーザーがログインできるようになります。止めたい人を無効化してください。
+CLIを実行しにくい構成では、更新する前（v0.1.0のうち）にユーザー管理画面で無効化しておいてください。
 
 issuerがGoogle（`https://accounts.google.com`）の場合、`@gmail.com`以外のアドレスの初回ログインにはGoogle Workspaceの`hd`クレームが必要です。v0.1.0でログインしていた「独自ドメインのアドレスで作った個人のGoogleアカウント」は、更新後は紐付けられません。回避する設定はありません。Google以外のissuerでは`ASTOVIA_OIDC_REQUIRE_GOOGLE_HD=true`で同じ確認をします。issuerがGoogleのときに`false`を設定すると起動エラーになります。
 
-ユーザー操作は`docker compose run --rm app go run ./cmd/astovia users ...`で、イメージ内の古いバイナリではなく現在のソースから実行します。そのため、CLIのコードを変更してもイメージの再ビルドは不要です。ユーザー操作CLIには署名鍵は不要ですが、Airから起動する`serve`では必須です。
+ユーザー操作は`docker compose run --rm app go run ./cmd/astovia users ...`で、イメージ内の古いバイナリではなく現在のソースから実行します。そのため、CLIのコードを変更してもイメージの再ビルドは不要です。ユーザー操作CLIにはこの鍵は不要ですが、Airから起動する`serve`では必須です。
 
 ### 4. 起動・確認・停止する
 
@@ -85,7 +88,9 @@ make up
 make logs
 ```
 
-[http://localhost:5173/](http://localhost:5173/)を開いてログインしてください。ホストへ公開するのはViteの`127.0.0.1:5173`だけです。Goはコンテナ内の`0.0.0.0:8080`で待ち受け、Viteが`/auth`・`/api`・`/healthz`・`/mcp`・`/oauth`・`/.well-known`を転送します。`/consent`（OAuthの同意ページ）はWeb画面として表示します。ブラウザからのOriginは変更せず、Go側の公開URLも`http://localhost:5173`にそろえます。`localhost`と`127.0.0.1`は異なるOriginのため、ブラウザでは`localhost`を使用してください。
+[http://localhost:5173/](http://localhost:5173/)を開いてログインしてください。ホストへ公開するのはViteの`127.0.0.1:5173`だけです。Goはコンテナ内の`0.0.0.0:8080`で待ち受け、Viteが`/auth`・`/api`・`/healthz`・`/mcp`・`/oauth`・`/.well-known`を転送します。ブラウザからのOriginは変更せず、Go側の公開URLも`http://localhost:5173`にそろえます。`localhost`と`127.0.0.1`は異なるOriginのため、ブラウザでは`localhost`を使用してください。
+
+ログインのCookie`__Host-astovia_session`には`Secure`属性が付きます。ブラウザは`http://localhost`を安全な文脈として扱うため、ChromeとFirefoxではhttpのままでも保存します。Safariでは確認していません。ログインしてもすぐログイン画面に戻る場合は、Cookieが保存されていません。公開URLが`http`のこの構成では、パスキー・セキュリティキー、MCPのOAuth（`/oauth/*`と同意画面`/oauth/authorize`はJSONの404で、`/mcp`はAPIトークンだけ）、OIDCのログインは使えません。パスワードのログイン、認証アプリ、リカバリーコード、APIトークンは使えます。
 
 停止する場合は次を実行します。コンテナは削除せずに停止します（`docker compose stop`）。
 
@@ -93,7 +98,7 @@ make logs
 make stop
 ```
 
-データはホストの`./data`に保存され、コンテナの再ビルドや削除では消えません。通常のGo・TypeScript／TSX・CSSの変更は、ソースの読み取り専用マウントを通じて自動反映されます。Goの再起動中はAPIが一時的に応答できない場合があります。画面側はReact Fast Refreshで更新し、ページ全体を再読み込みした場合は既存のRefresh処理でログイン状態を復元します。
+データはホストの`./data`に保存され、コンテナの再ビルドや削除では消えません。通常のGo・TypeScript／TSX・CSSの変更は、ソースの読み取り専用マウントを通じて自動反映されます。Goの再起動中はAPIが一時的に応答できない場合があります。画面側はReact Fast Refreshで更新し、ページ全体を再読み込みした場合は`GET /api/v1/me`でログイン状態を確かめます（セッションはCookieにあるため、再読み込みでログアウトしません）。
 
 Dockerのファイル通知差異を避けるため、AirとViteのファイル監視にはポーリングを使用します。Goのビルドキャッシュ（`GOCACHE=/tmp/go-build`）は、`app`の`/tmp`にマウントしたDockerの名前付きボリューム`go-build-cache`に保存し、`docker compose run --rm`を繰り返しても再利用します。Viteのキャッシュは開発イメージ内の`node_modules`に保存します。ホスト側で事前に生成した`web/dist`や`node_modules`は不要です。
 
@@ -120,7 +125,7 @@ make check
 
 `ASTOVIA_SCHEMA_DEV_URL`でPostgreSQLの開発用URLを変更する場合も、**使い捨てDBだけ**を指定してください。Atlasはスキーマの正規化中にそのDBを変更する場合があります。このURLはAtlasコンテナ内で解決するため、`compose.test.yaml`のネットワークから到達できるURL（サービス名など）だけを指定できます。`docker://`形式や`localhost`は使用できません。指定した場合、`atlas-dev-postgres`は起動しません。
 
-`make check`はUIのビルド・型チェック・認証フローテスト、SQLite／PostgreSQLのGo競合検出付き契約テスト、`go vet`を実行します。個別に実行する場合、`make test-web`はUIの認証フローテストとビルド、`make test-go`はGoのテストだけを実行します。`make test-go`は`web/dist`が存在しないかソースより古い場合だけUIをビルドします。PostgreSQLテストは個別の一時スキーマを作成し、テスト終了後に削除します。Compose外で`ASTOVIA_TEST_POSTGRES`を指定する場合も、専用テストDBだけを使用してください。未指定の場合、PostgreSQLテストはスキップします。
+`make check`はUIのビルド・型チェック・認証フローテスト、SQLite／PostgreSQLのGo競合検出付き契約テスト、authlume導入前のスキーマのSQLite／PostgreSQLのDBへ今のスキーマを適用できるかの確認（`make test-schema`）、`go vet`を実行します。個別に実行する場合、`make test-web`はUIの認証フローテストとビルド、`make test-go`はGoのテストだけを実行します。`make test-go`は`web/dist`が存在しないかソースより古い場合だけUIをビルドします。PostgreSQLテストは個別の一時スキーマを作成し、テスト終了後に削除します。Compose外で`ASTOVIA_TEST_POSTGRES`を指定する場合も、専用テストDBだけを使用してください。未指定の場合、PostgreSQLテストはスキップします。
 
 検証用`compose.test.yaml`のPostgreSQLはtmpfsを使用し、ホストのループバックアドレスの55439番ポートに公開します。本番データや既存のDBは使用しません。ローカルアプリ用の永続SQLiteとは別です。検証後は次で停止できます。
 
@@ -133,8 +138,12 @@ docker compose -f compose.test.yaml stop postgres
 メンテナー向けの手順です。
 
 1. `make check`が通ることを確認します。
-2. タグを作成します: `git tag vX.Y.Z`
-3. タグをpushします: `git push origin vX.Y.Z`
+2. OIDCの構成を、実際のIdPで確認します。テストは偽のIdPを使うため、ここだけは手で確かめます。
+   - 実際のIdP（Googleなど）で、サインインのボタンからログインし、コールバックで画面に戻ることを確認します。
+   - Cloudflare Access for SaaSを使う構成では、Accessから上流のIdPへ転送される経路でもログインできることを確認します。
+   - どちらでも、ブラウザーの開発者ツールのコンソールにCSPの`form-action`の違反が出ず、フォームの送信の後のリダイレクトがすべて通ることを確認します。違反が出たら、転送先のオリジンを`ASTOVIA_OIDC_FORM_ACTION_ORIGINS`に並べます。
+3. タグを作成します: `git tag vX.Y.Z`
+4. タグをpushします: `git push origin vX.Y.Z`
 
 タグのpushで`release`ワークフローが動き、`ghcr.io/i2bskn/astovia-migrate`、`ghcr.io/i2bskn/astovia`の順に2つのイメージ（linux/amd64・linux/arm64）を公開します。公開の前にワークフローでも`make check`を実行し、失敗したら何も公開しません。
 

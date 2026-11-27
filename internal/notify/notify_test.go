@@ -24,10 +24,11 @@ import (
 )
 
 type fixture struct {
-	t   *testing.T
-	s   *store.Store
-	now time.Time
-	box *secretbox.Box
+	sessions map[string]string
+	t        *testing.T
+	s        *store.Store
+	now      time.Time
+	box      *secretbox.Box
 	// driver and dsn open the database directly (raw).
 	driver, dsn string
 }
@@ -35,15 +36,13 @@ type fixture struct {
 func newFixture(t *testing.T, driver string, users ...string) *fixture {
 	t.Helper()
 	s, dsn := testutil.Database(t, driver)
-	f := &fixture{t: t, s: s, now: time.Date(2026, 10, 24, 0, 30, 0, 0, time.UTC), box: secretbox.New([]byte(strings.Repeat("s", 32))), driver: driver, dsn: dsn}
+	f := &fixture{t: t, s: s, now: time.Date(2026, 10, 24, 0, 30, 0, 0, time.UTC), box: secretbox.New([]byte(strings.Repeat("s", 32))), driver: driver, dsn: dsn, sessions: map[string]string{}}
 	for _, name := range users {
 		u := store.User{ID: name + "-id", Email: name + "@example.com", PasswordHash: "x", Role: store.RoleOwner}
 		if err := s.CreateUser(context.Background(), u); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.Login(context.Background(), u, store.Session{ID: name + "-session", UserID: u.ID, ExpiresAt: f.now.Unix() + 86400*60, CreatedAt: f.now.Unix()}, store.Refresh{Hash: "r-" + name, SessionID: name + "-session", CreatedAt: f.now.Unix()}); err != nil {
-			t.Fatal(err)
-		}
+		_, f.sessions[name] = testutil.Session(t, s, u.ID, f.now)
 	}
 	return f
 }
@@ -63,7 +62,7 @@ func (f *fixture) subscribe(user, id, endpoint string) {
 		f.t.Fatal(err)
 	}
 	p := store.PushSubscription{ID: id, UserID: user + "-id", Endpoint: endpoint, P256dh: base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()), Auth: base64.RawURLEncoding.EncodeToString(secret), Label: id}
-	if _, _, err = f.s.SavePushSubscription(context.Background(), p, "", user+"-session", f.now.Unix()); err != nil {
+	if _, _, err = f.s.SavePushSubscription(context.Background(), p, "", f.sessions[user], f.now.Unix()); err != nil {
 		f.t.Fatal(err)
 	}
 }
@@ -289,7 +288,7 @@ func TestEngineDigest(t *testing.T) {
 		// previous digest and lead to the automatic list.
 		f.now = f.now.Add(24 * time.Hour)
 		autoAt := f.now.Unix() - 3600
-		c, err := f.s.SaveGitHubConnection(ctx, store.GitHubConnection{UserID: "tokyo-id", TokenSealed: "x", TokenLast4: "x", Login: "x", Scopes: "repo"}, nil, "tokyo-session", f.now.Unix())
+		c, err := f.s.SaveGitHubConnection(ctx, store.GitHubConnection{UserID: "tokyo-id", TokenSealed: "x", TokenLast4: "x", Login: "x", Scopes: "repo"}, nil, f.sessions["tokyo"], f.now.Unix())
 		if err != nil {
 			t.Fatal(err)
 		}

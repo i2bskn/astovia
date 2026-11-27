@@ -3,9 +3,10 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/i2bskn/astovia/internal/ai"
 	"github.com/i2bskn/astovia/internal/aicred"
 	"github.com/i2bskn/astovia/internal/auth"
@@ -14,12 +15,14 @@ import (
 	"github.com/i2bskn/astovia/internal/github"
 	"github.com/i2bskn/astovia/internal/google"
 	"github.com/i2bskn/astovia/internal/notify"
-	"github.com/i2bskn/astovia/internal/oauth"
-	"github.com/i2bskn/astovia/internal/oidc"
 	"github.com/i2bskn/astovia/internal/openai"
 	"github.com/i2bskn/astovia/internal/secretbox"
 	"github.com/i2bskn/astovia/internal/slack"
 	"github.com/i2bskn/astovia/internal/store"
+	"github.com/i2bskn/authlume/mcpoauth"
+	"github.com/i2bskn/authlume/session"
+	"github.com/i2bskn/authlume/totp"
+	"github.com/i2bskn/authlume/webauthn"
 	"io"
 	"io/fs"
 	"log"
@@ -35,7 +38,19 @@ import (
 	"time"
 )
 
-const CookieName = "astovia_refresh"
+// SessionCookieName is the cookie of the browser session.
+const SessionCookieName = "__Host-astovia_session"
+
+// legacyRefreshCookie is the refresh cookie of earlier releases, cleared
+// from the browsers that still send it.
+const legacyRefreshCookie = "astovia_refresh"
+
+// Lifetimes of a browser session: the idle limit, extended by the user's
+// actions, and the absolute limit from the sign-in.
+const (
+	sessionIdle     = 7 * 24 * time.Hour
+	sessionAbsolute = 30 * 24 * time.Hour
+)
 
 type Server struct {
 	cfg     config.Config
@@ -45,12 +60,26 @@ type Server struct {
 	// accountLimiter limits the public invitation and password reset
 	// endpoints together, per peer like limiter.
 	accountLimiter *loginLimiter
-	// registerLimiter limits OAuth client registrations and cimdLimiter
-	// metadata document fetches, per peer like limiter.
+	// emailLimiter limits the failed password sign-ins per email address.
+	emailLimiter *emailLimiter
+	// passwordSlots bounds the password derivations running at once.
+	passwordSlots *passwordSlots
+	// patterns are the patterns of the routes handler registered last.
+	patterns []string
+	// registerLimiter limits OAuth client registrations per peer like
+	// limiter, and clientLimiter the authorization requests that can make
+	// the server fetch a client metadata document, per user.
 	registerLimiter *loginLimiter
-	cimdLimiter     *loginLimiter
-	// fetchCIMD fetches a Client ID Metadata Document. Tests replace it.
-	fetchCIMD func(ctx context.Context, clientID string) (oauth.Document, error)
+	clientLimiter   *loginLimiter
+	// oidcLimiter limits the starts of an OIDC sign-in per peer.
+	oidcLimiter *loginLimiter
+	// sessions manages the browser sessions.
+	sessions *session.Manager
+	// mcp is the MCP authorization server, or nil when the public URL is
+	// not https.
+	mcp *mcpoauth.Server
+	// csp is the Content-Security-Policy of every response.
+	csp string
 	// github verifies GitHub tokens, slack Slack tokens, chatwork Chatwork
 	// API tokens and ai API keys; google connects and revokes Google
 	// accounts with the OAuth client of cfg.Google. Tests replace their
@@ -97,9 +126,9 @@ type Server struct {
 	// from the synchronization's.
 	gmailMCPLimiter *loginLimiter
 	gmailTokens     *gmailTokenCache
-	// rp is the OIDC relying party of cfg.OIDC; it is set exactly when
-	// cfg.OIDC is. Tests replace it.
-	rp relyingParty
+	// oidc is the OIDC client of cfg.OIDC; it is set exactly when cfg.OIDC
+	// is.
+	oidc *oidcLogin
 	// mfaPeerLimiter limits the /auth/mfa/* endpoints together, per peer
 	// like limiter. mfaLimiter limits the attempts to give a second factor
 	// code per user (5 in 15 minutes), and mfaPasswordLimiter the password
@@ -108,9 +137,11 @@ type Server struct {
 	mfaPeerLimiter     *loginLimiter
 	mfaLimiter         *loginLimiter
 	mfaPasswordLimiter *loginLimiter
+	// totp verifies the codes of authenticator apps.
+	totp *totp.Verifier
 	// webauthn is the WebAuthn relying party of cfg.PublicURL. It is nil
 	// when passkeys and security keys cannot be used at that address.
-	webauthn *webauthn.WebAuthn
+	webauthn *webauthn.Verifier
 }
 
 // userResponse is the public representation of the signed-in user.
@@ -128,17 +159,15 @@ type passwordResetResponse struct {
 	ByEmail string `json:"by_email"`
 }
 
-// authResponse is returned by login and refresh.
+// authResponse is returned by a sign-in that started a session.
 type authResponse struct {
-	AccessToken string       `json:"access_token"`
-	ExpiresIn   int          `json:"expires_in"`
-	User        userResponse `json:"user"`
+	User userResponse `json:"user"`
 }
 
 // toUserResponse builds the user of /api/v1/me and the login responses. The
 // password reset notice is read with a separate query; a failure is logged
-// and reported as null so that a login or refresh, whose refresh token has
-// already been rotated, still returns its new cookie.
+// and reported as null so that a sign-in, whose session has already been
+// issued, still returns it.
 func (s *Server) toUserResponse(ctx context.Context, u store.User) userResponse {
 	out := userResponse{ID: u.ID, Email: u.Email, Role: u.Role}
 	notice, err := s.auth.Store.LatestResetNotice(ctx, u.ID, s.auth.Now().Unix())
@@ -159,10 +188,9 @@ func New(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.Tokens) 
 }
 
 // newServer builds a Server without wrapping it, so tests in this package can
-// adjust the limiters and the CIMD fetcher before calling handler. A nil
-// tokens is made from the server's store, box and clock.
+// adjust the limiters before calling handler. A nil tokens is made from the
+// server's store, box and clock.
 func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.Tokens) *Server {
-	cimd := oauth.NewCIMDClient()
 	// The clock is read through a so that tests can replace a.Now later.
 	now := time.Now
 	var st *store.Store
@@ -174,25 +202,38 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 	if tokens == nil {
 		tokens = &aicred.Tokens{Store: st, Box: box, OpenAI: openai.New(openai.HostID(c.Secret)), Now: now}
 	}
-	var rp relyingParty
+	if st == nil {
+		// Tests that need no database pass no service; the stores are
+		// never used then.
+		st = &store.Store{}
+	}
+	sessions, err := session.New(st.Sessions(), session.Config{CookieName: SessionCookieName, Idle: sessionIdle, Absolute: sessionAbsolute, Now: now})
+	if err != nil {
+		// The configuration is static.
+		panic("httpserver: session: " + err.Error())
+	}
+	totpVerifier, err := totp.New(totpStore{st: st, box: box}, now)
+	if err != nil {
+		panic("httpserver: totp: " + err.Error())
+	}
+	var login *oidcLogin
 	if c.OIDC != nil {
-		rp = oidc.New(oidc.ClientConfig{Issuer: c.OIDC.Issuer, ClientID: c.OIDC.ClientID, ClientSecret: c.OIDC.Secret, RedirectURI: c.OIDC.RedirectURI})
+		login = newOIDCLogin(c.OIDC, st.OIDCLogins(now), now)
 	}
 	aiClient := ai.New()
 	if c.AIAllowPrivateEndpoints {
 		aiClient.AllowPrivateEndpoints = true
 		aiClient.Endpoints = ai.NewEndpointClient(true)
 	}
-	return &Server{cfg: c, auth: a, assets: assets, rp: rp, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(), cimdLimiter: newLoginLimiter(),
-		fetchCIMD: func(ctx context.Context, clientID string) (oauth.Document, error) {
-			return oauth.FetchCIMD(ctx, cimd, clientID)
-		},
+	return &Server{cfg: c, auth: a, assets: assets, oidc: login, limiter: newLoginLimiter(), accountLimiter: newLoginLimiter(), registerLimiter: newLoginLimiter(),
+		emailLimiter: newEmailLimiter(now), passwordSlots: newPasswordSlots(), clientLimiter: newKeyLimiter(10, time.Minute), oidcLimiter: newLoginLimiter(),
+		sessions: sessions, mcp: newMCPOAuth(c, st, now), csp: contentSecurityPolicy(c), totp: totpVerifier,
 		github: github.New(now), slack: slack.New(now), chatwork: chatwork.New(now), google: google.New(now), ai: aiClient, box: box, vapid: &notify.VAPID{Store: st, Box: box, Now: now}, tokens: tokens, pushTestLimiter: newKeyLimiter(3, time.Minute), aiTryLimiter: newKeyLimiter(5, time.Minute), aiEndpointLimiter: newKeyLimiter(10, time.Minute),
 		chatworkMCPLimiter: newKeyLimiter(100, 5*time.Minute), slackSearchLimiter: newKeyLimiter(5, time.Minute), slackConversationsLimiter: newKeyLimiter(10, time.Minute),
 		slackHistoryLimiter: newKeyLimiter(4, time.Minute), slackUsersLimiter: newKeyLimiter(30, time.Minute),
 		gmailMCPLimiter: newKeyLimiter(gmailMCPUnits, time.Minute), gmailTokens: &gmailTokenCache{},
 		mfaPeerLimiter: newLoginLimiter(), mfaLimiter: newKeyLimiter(5, 15*time.Minute), mfaPasswordLimiter: newKeyLimiter(10, 5*time.Minute),
-		webauthn: newWebAuthn(c.PublicURL)}
+		webauthn: newWebAuthn(c.PublicURL, st, now)}
 }
 
 // handler returns the routes wrapped with the common response headers.
@@ -201,7 +242,8 @@ func newServer(c config.Config, a *auth.Service, assets fs.FS, tokens *aicred.To
 // produce the JSON 405 response, and the "/" catch-all produces a JSON 404
 // instead of the ServeMux text responses.
 func (s *Server) handler() http.Handler {
-	mux := http.NewServeMux()
+	mux := &patternMux{ServeMux: http.NewServeMux()}
+	defer func() { s.patterns = mux.patterns }()
 	mux.Handle("/healthz", allow(http.MethodGet, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})))
@@ -210,8 +252,9 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/auth/config", allow(http.MethodGet, http.HandlerFunc(s.handleAuthConfig)))
 	mux.Handle("/auth/login", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleLogin)))))
 	if s.cfg.OIDC != nil {
-		// No rate limit: the sign-in itself happens at the provider.
-		mux.Handle("/auth/oidc/login", allow(http.MethodGet, http.HandlerFunc(s.handleOIDCLogin)))
+		// A form POST of the sign-in screen; it checks the origin itself,
+		// after its rate limit (see checkOrigin).
+		mux.Handle(oidcLoginPath, allow(http.MethodPost, http.HandlerFunc(s.handleOIDCLogin)))
 		mux.Handle(config.OIDCCallbackPath, allow(http.MethodGet, http.HandlerFunc(s.handleOIDCCallback)))
 	}
 	// The second factor of a password sign-in, given or enrolled before the
@@ -222,10 +265,9 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/auth/mfa/enroll/totp/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollTOTPBegin)))))
 	mux.Handle("/auth/mfa/enroll/totp/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollTOTPFinish)))))
 	mux.Handle("/auth/mfa/webauthn/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAWebAuthnBegin)))))
-	mux.Handle("/auth/mfa/webauthn/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAWebAuthnFinish)))))
+	mux.Handle("/auth/mfa/webauthn/finish", allow(http.MethodPost, s.passwordAuth(takeWebAuthnHandle(s.browserJSON(s.mfaPeerLimit(s.handleMFAWebAuthnFinish))))))
 	mux.Handle("/auth/mfa/enroll/webauthn/begin", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollWebAuthnBegin)))))
-	mux.Handle("/auth/mfa/enroll/webauthn/finish", allow(http.MethodPost, s.passwordAuth(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollWebAuthnFinish)))))
-	mux.Handle("/auth/refresh", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleRefresh))))
+	mux.Handle("/auth/mfa/enroll/webauthn/finish", allow(http.MethodPost, s.passwordAuth(takeWebAuthnHandle(s.browserJSON(s.mfaPeerLimit(s.handleMFAEnrollWebAuthnFinish))))))
 	mux.Handle("/auth/logout", allow(http.MethodPost, s.browserJSON(http.HandlerFunc(s.handleLogout))))
 	// The invitation and password reset links are used before signing in.
 	// They share accountLimiter.
@@ -233,10 +275,11 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/auth/invitations/accept", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleAcceptInvitation)))))
 	mux.Handle("/auth/password-resets/inspect", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleInspectPasswordReset)))))
 	mux.Handle("/auth/password-resets/complete", allow(http.MethodPost, s.passwordAuth(s.browserJSON(http.HandlerFunc(s.handleCompletePasswordReset)))))
-	// Every /api/v1/* route must be wrapped with either requireUser (access
-	// JWT only) or requireUserOrAPIToken (access JWT or API token). Routes that
-	// manage credentials or the account use requireUser. The user management
-	// routes use requireOwner, which is requireUser plus the owner role.
+	// Every /api/v1/* route must be wrapped with either requireUser (browser
+	// session only) or requireUserOrAPIToken (browser session or API token).
+	// Routes that manage credentials or the account use requireUser. The user
+	// management routes use requireOwner, which is requireUser plus the owner
+	// role. checkOrigin guards every state change of /api/ and /auth/.
 	mux.Handle("/api/v1/me", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleMe))))
 	// Two-step verification of the signed-in user, password sign-in only.
 	// The removals are POSTs because they carry the current password.
@@ -245,7 +288,7 @@ func (s *Server) handler() http.Handler {
 	mux.Handle("/api/v1/mfa/totp/finish", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleFinishTOTP))))))
 	mux.Handle("/api/v1/mfa/totp/delete", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleDeleteTOTP))))))
 	mux.Handle("/api/v1/mfa/webauthn/begin", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleBeginWebAuthn))))))
-	mux.Handle("/api/v1/mfa/webauthn/finish", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleFinishWebAuthn))))))
+	mux.Handle("/api/v1/mfa/webauthn/finish", allow(http.MethodPost, takeWebAuthnHandle(s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleFinishWebAuthn)))))))
 	mux.Handle("/api/v1/mfa/webauthn/{id}/delete", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleDeleteWebAuthn))))))
 	mux.Handle("/api/v1/mfa/recovery-codes", allow(http.MethodPost, s.requireUser(s.passwordAuth(requireJSON(http.HandlerFunc(s.handleRecoveryCodes))))))
 	mux.Handle("/api/v1/users", allow(http.MethodGet, s.requireOwner(http.HandlerFunc(s.handleListUsers))))
@@ -273,9 +316,9 @@ func (s *Server) handler() http.Handler {
 		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handleCreateAPIToken))),
 	}))
 	mux.Handle("/api/v1/api-tokens/{id}", allow(http.MethodDelete, s.requireUser(http.HandlerFunc(s.handleDeleteAPIToken))))
-	mux.Handle("/api/v1/oauth/consent", allowMethods(map[string]http.Handler{
-		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleGetConsent)),
-		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handlePostConsent))),
+	mux.Handle("/api/v1/oauth/authorize", allowMethods(map[string]http.Handler{
+		http.MethodGet:  s.requireUser(http.HandlerFunc(s.handleGetAuthorize)),
+		http.MethodPost: s.requireUser(requireJSON(http.HandlerFunc(s.handlePostAuthorize))),
 	}))
 	mux.Handle("/api/v1/integrations/github", allowMethods(map[string]http.Handler{
 		http.MethodGet:    s.requireUser(http.HandlerFunc(s.handleGetGitHub)),
@@ -338,20 +381,110 @@ func (s *Server) handler() http.Handler {
 	}))
 	mux.Handle("/api/v1/oauth/connections", allow(http.MethodGet, s.requireUser(http.HandlerFunc(s.handleListConnections))))
 	mux.Handle("/api/v1/oauth/connections/{id}", allow(http.MethodDelete, s.requireUser(http.HandlerFunc(s.handleDeleteConnection))))
-	// OAuth authorization server and protected resource metadata. Errors
-	// raised inside the /oauth/* handlers use the RFC 6749 format.
-	mux.Handle("/.well-known/oauth-protected-resource", allow(http.MethodGet, http.HandlerFunc(s.handleProtectedResourceMetadata)))
-	mux.Handle("/.well-known/oauth-protected-resource/mcp", allow(http.MethodGet, http.HandlerFunc(s.handleProtectedResourceMetadata)))
-	mux.Handle("/.well-known/oauth-authorization-server", allow(http.MethodGet, http.HandlerFunc(s.handleAuthorizationServerMetadata)))
-	mux.Handle("/oauth/register", allow(http.MethodPost, http.HandlerFunc(s.handleRegister)))
-	mux.Handle("/oauth/authorize", allow(http.MethodGet, http.HandlerFunc(s.handleAuthorize)))
-	mux.Handle("/oauth/token", allow(http.MethodPost, http.HandlerFunc(s.handleToken)))
+	// The MCP authorization server and its metadata; JSON 404s without it.
+	s.routeOAuth(mux)
 	// /mcp authenticates with API tokens and OAuth access tokens; see mcpAuth.
 	mux.Handle("/mcp", allow(http.MethodPost, s.mcpAuth(s.mcpHandler())))
 	// The screens, the static files and the legacy /admin URLs are routed
 	// inside the catch-all so that unknown paths stay JSON 404s.
 	mux.HandleFunc("/", s.web)
-	return secureHeaders(useHSTS(s.cfg), mux)
+	return secureHeaders(useHSTS(s.cfg), s.csp, clearLegacyCookie(s.checkOrigin(mux)))
+}
+
+// patternMux is a ServeMux that keeps the patterns it was given, so that a
+// test can check every route against the lists of the checks they need.
+type patternMux struct {
+	*http.ServeMux
+	patterns []string
+}
+
+func (m *patternMux) Handle(pattern string, h http.Handler) {
+	m.patterns = append(m.patterns, pattern)
+	m.ServeMux.Handle(pattern, h)
+}
+
+func (m *patternMux) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+	m.Handle(pattern, http.HandlerFunc(h))
+}
+
+// contentSecurityPolicy returns the Content-Security-Policy of c. With
+// OIDC, the sign-in form is sent to this server and redirected to the
+// provider, so form-action allows the provider's origins as well.
+func contentSecurityPolicy(c config.Config) string {
+	formAction := "'self'"
+	if c.OIDC != nil && len(c.OIDC.FormActionOrigins) > 0 {
+		formAction += " " + strings.Join(c.OIDC.FormActionOrigins, " ")
+	}
+	return "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action " + formAction
+}
+
+// clearLegacyCookie clears the refresh cookie of earlier releases from the
+// responses under /auth/, its path, when the request carries it.
+func clearLegacyCookie(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/auth/") {
+			if _, err := r.Cookie(legacyRefreshCookie); err == nil {
+				http.SetCookie(w, &http.Cookie{Name: legacyRefreshCookie, Value: "", Path: "/auth", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: time.Unix(1, 0), MaxAge: -1})
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hasAPITokenPrefix reports whether r presents what looks like an API token
+// ("Authorization: Bearer ast_..."), well-formed or not. requireUser
+// refuses such a request.
+func hasAPITokenPrefix(r *http.Request) bool {
+	return strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ast_")
+}
+
+// presentsAPIToken reports whether r presents a well-formed API token: one
+// Authorization header whose Bearer value has the form of auth.NewAPIToken.
+// Such a request carries its credential in the header, not in a cookie.
+func presentsAPIToken(r *http.Request) bool {
+	if len(r.Header.Values("Authorization")) != 1 {
+		return false
+	}
+	token, ok := bearerToken(r)
+	return ok && auth.IsAPIToken(token)
+}
+
+// stateChanging reports whether the method of r may change state.
+func stateChanging(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
+}
+
+// sameOrigin reports whether r carries exactly one Origin header equal to
+// the public URL.
+func (s *Server) sameOrigin(r *http.Request) bool {
+	origin := r.Header.Values("Origin")
+	return len(origin) == 1 && origin[0] == s.cfg.PublicURL
+}
+
+// checkOrigin requires the Origin of the public URL on every state-changing
+// request under /api/ and /auth/, which the browser session cookie
+// authenticates. A request without Origin is rejected as well. Only a
+// request under /api/ that presents a well-formed API token is not checked:
+// requireUserOrAPIToken authenticates it by the token alone, and every other
+// /api/ route refuses it. The /auth/ routes take cookies only, so a token
+// there is checked like any request. The OIDC sign-in form checks its origin
+// itself, after its rate limit.
+func (s *Server) checkOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		api := strings.HasPrefix(p, "/api/")
+		browser := api || strings.HasPrefix(p, "/auth/")
+		tokenOnly := api && presentsAPIToken(r)
+		if browser && stateChanging(r) && !tokenOnly && p != oidcLoginPath && !s.sameOrigin(r) {
+			fail(w, 403, "origin_rejected", "Request origin is not allowed.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // useHSTS reports whether responses carry Strict-Transport-Security: the
@@ -379,14 +512,14 @@ func useHSTS(cfg config.Config) bool {
 // secureHeaders sets the common security headers. hsts adds
 // Strict-Transport-Security without includeSubDomains or preload, since
 // other services may run on subdomains of the operator's domain.
-func secureHeaders(hsts bool, next http.Handler) http.Handler {
+func secureHeaders(hsts bool, csp string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hsts {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", csp)
 		if strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/oauth/") || r.URL.Path == "/mcp" {
 			w.Header().Set("Cache-Control", "no-store")
 		}
@@ -463,8 +596,8 @@ func bearerToken(r *http.Request) (string, bool) {
 	return token, true
 }
 
-// withSession stores the authenticated user and, for access JWTs, the
-// verified session ID in the request context.
+// withSession stores the authenticated user and, for browser sessions, the
+// session ID in the request context.
 func withSession(r *http.Request, u store.User, sid string) *http.Request {
 	ctx := context.WithValue(r.Context(), userKey{}, u)
 	if sid != "" {
@@ -473,48 +606,88 @@ func withSession(r *http.Request, u store.User, sid string) *http.Request {
 	return r.WithContext(ctx)
 }
 
-// requireUser authenticates the Bearer access token and stores the user and
-// session ID in the request context for userFrom and sessionFrom. API tokens
-// are rejected.
+// touches reports whether a request extends the idle limit of its session:
+// every state-changing request and GET /api/v1/me, which the screen calls
+// once when it loads. Other reads, such as the periodic reloads of the
+// screen, do not keep a session alive.
+func touches(r *http.Request) bool {
+	return stateChanging(r) || r.URL.Path == "/api/v1/me"
+}
+
+// sessionUser authenticates the browser session cookie of r and reads its
+// user again. It writes 401 for a missing, malformed, expired or revoked
+// session and for a missing or disabled user, and 503 when the store fails.
+// It returns the user and the session ID (the hex of the session key).
+func (s *Server) sessionUser(w http.ResponseWriter, r *http.Request) (store.User, string, bool) {
+	var st session.State
+	var err error
+	if touches(r) {
+		st, err = s.sessions.Touch(r)
+	} else {
+		st, err = s.sessions.Read(r)
+	}
+	if errors.Is(err, session.ErrInvalid) {
+		err = store.ErrUnauthorized
+	}
+	if err != nil {
+		s.authError(w, r, err)
+		return store.User{}, "", false
+	}
+	u, err := s.auth.Store.UserByID(r.Context(), st.Subject)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && u.Disabled != 0) {
+		err = store.ErrUnauthorized
+	}
+	if err != nil {
+		s.authError(w, r, err)
+		return store.User{}, "", false
+	}
+	return u, hex.EncodeToString(st.Key[:]), true
+}
+
+// requireUser authenticates the browser session and stores the user and
+// session ID in the request context for userFrom and sessionFrom. A request
+// that presents an API token, well-formed or not, is rejected with 401:
+// these routes take the session only, and checkOrigin does not check a
+// request with a well-formed token.
 func (s *Server) requireUser(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := bearerToken(r)
-		if !ok {
+		if hasAPITokenPrefix(r) {
 			s.authError(w, r, store.ErrUnauthorized)
 			return
 		}
-		u, sid, err := s.auth.AuthenticateSession(r.Context(), token)
-		if err != nil {
-			s.authError(w, r, err)
+		u, sid, ok := s.sessionUser(w, r)
+		if !ok {
 			return
 		}
 		next.ServeHTTP(w, withSession(r, u, sid))
 	})
 }
 
-// requireUserOrAPIToken accepts an API token (a Bearer value starting with
-// "ast_") as well as an access JWT. Only the access JWT path stores a session
-// ID.
+// requireUserOrAPIToken accepts an API token ("Authorization: Bearer ast_")
+// as well as the browser session. A request with an API token is
+// authenticated by the token alone; any other Bearer value is rejected.
+// Only the session path stores a session ID.
 func (s *Server) requireUserOrAPIToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, present := r.Header["Authorization"]; !present {
+			u, sid, ok := s.sessionUser(w, r)
+			if !ok {
+				return
+			}
+			next.ServeHTTP(w, withSession(r, u, sid))
+			return
+		}
 		token, ok := bearerToken(r)
-		if !ok {
+		if !ok || !strings.HasPrefix(token, "ast_") {
 			s.authError(w, r, store.ErrUnauthorized)
 			return
 		}
-		var u store.User
-		var sid string
-		var err error
-		if strings.HasPrefix(token, "ast_") {
-			u, err = s.auth.AuthenticateAPIToken(r.Context(), token)
-		} else {
-			u, sid, err = s.auth.AuthenticateSession(r.Context(), token)
-		}
+		u, err := s.auth.AuthenticateAPIToken(r.Context(), token)
 		if err != nil {
 			s.authError(w, r, err)
 			return
 		}
-		next.ServeHTTP(w, withSession(r, u, sid))
+		next.ServeHTTP(w, withSession(r, u, ""))
 	})
 }
 
@@ -523,7 +696,7 @@ func userFrom(ctx context.Context) (store.User, bool) {
 	return u, ok
 }
 
-// sessionFrom returns the session ID of the access JWT that authenticated the
+// sessionFrom returns the ID of the browser session that authenticated the
 // request. It is absent for API tokens.
 func sessionFrom(ctx context.Context) (string, bool) {
 	sid, ok := ctx.Value(sessionKey{}).(string)
@@ -569,6 +742,11 @@ func decode(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
 	}
 	return true
 }
+
+// loginBodyLimit bounds the body of /auth/login: an email address and a
+// password of up to 1024 bytes, escaped.
+const loginBodyLimit = 8192
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.limiter.allow(s.clientAddr(r)) {
 		w.Header().Set("Retry-After", "60")
@@ -579,62 +757,114 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if !decode(w, r, &in, 4096) {
+	if !decode(w, r, &in, loginBodyLimit) {
 		return
 	}
-	if len(in.Email) > 256 || len(in.Password) > 72 {
+	if len(in.Email) > 256 || len(in.Password) > auth.MaxPasswordBytes {
 		fail(w, 400, "invalid_request", "Credentials exceed the supported length.")
 		return
 	}
-	u, err := s.auth.Verify(r.Context(), in.Email, in.Password)
+	// A request refused for want of a derivation slot is not counted
+	// against the email limit; the per-peer limit above has counted it.
+	release, ok := s.passwordSlot(w, r)
+	if !ok {
+		return
+	}
+	defer release()
+	// Counted before the password is derived, so that concurrent attempts
+	// cannot all pass the check while the derivations run.
+	key := emailLimitKey(in.Email)
+	if !s.emailLimiter.attempt(key) {
+		release()
+		w.Header().Set("Retry-After", "900")
+		fail(w, 429, "rate_limited", "Too many attempts. Try again later.")
+		return
+	}
+	v, err := s.verifyPassword(r.Context(), in.Email, in.Password)
+	release()
 	if err != nil {
 		s.authError(w, r, err)
 		return
 	}
-	s.passwordSignIn(w, r, u, func(err error) { s.authError(w, r, err) })
+	s.emailLimiter.reset(key)
+	s.passwordSignIn(w, r, v, func(err error) { s.authError(w, r, err) })
 }
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	var empty struct{}
-	if !decode(w, r, &empty, 4096) {
-		return
-	}
-	result, err := s.auth.Refresh(r.Context(), refreshCookie(r))
-	if err != nil {
-		s.authError(w, r, err)
-		return
-	}
-	s.writeAuthResult(w, r, result)
-}
+
+// handleLogout ends the browser session and clears its cookie. A malformed
+// cookie is cleared without a store access.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	var empty struct{}
 	if !decode(w, r, &empty, 4096) {
 		return
 	}
-	if err := s.auth.Logout(r.Context(), refreshCookie(r)); err != nil {
+	err := s.sessions.Logout(w, r)
+	if errors.Is(err, session.ErrInvalid) {
+		err = s.sessions.ResetInvalidCookie(w, r)
+	}
+	if err != nil {
 		s.authError(w, r, err)
 		return
 	}
-	s.clearCookie(w)
 	w.WriteHeader(204)
 }
-func refreshCookie(r *http.Request) string {
-	if c, err := r.Cookie(CookieName); err == nil {
-		return c.Value
+
+// issueSession starts a browser session for userID, replacing the session
+// of the cookie r carries. guard is checked by the store in the transaction
+// that locks the user row. A malformed session cookie is cleared and the
+// session is issued once more without it, so that a broken cookie never
+// keeps the user from signing in.
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID string, guard store.IssueGuard) error {
+	r = r.WithContext(store.WithIssueGuard(r.Context(), guard))
+	err := s.sessions.Issue(w, r, userID)
+	if errors.Is(err, session.ErrInvalid) {
+		if err = s.sessions.ResetInvalidCookie(w, r); err == nil {
+			err = s.sessions.Issue(w, withoutCookie(r, SessionCookieName), userID)
+		}
 	}
-	return ""
-}
-func (s *Server) writeAuthResult(w http.ResponseWriter, r *http.Request, result auth.Result) {
-	user := s.toUserResponse(r.Context(), result.User)
-	s.setRefreshCookie(w, result)
-	writeJSON(w, 200, authResponse{AccessToken: result.AccessToken, ExpiresIn: result.ExpiresIn, User: user})
+	if err == nil {
+		keepLastCookie(w.Header(), SessionCookieName)
+	}
+	return err
 }
 
-// setRefreshCookie sets the refresh cookie of a login or refresh result.
-func (s *Server) setRefreshCookie(w http.ResponseWriter, result auth.Result) {
-	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: result.Refresh, Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(result.ExpiresAt, 0), MaxAge: result.MaxAge})
+// keepLastCookie leaves only the last Set-Cookie line of the cookie name in
+// h: a session cleared earlier in the response and then issued is sent as
+// the issued cookie alone (RFC 6265 section 3 asks for one line per name).
+func keepLastCookie(h http.Header, name string) {
+	lines := h.Values("Set-Cookie")
+	last := -1
+	for i, line := range lines {
+		if n, _, _ := strings.Cut(line, "="); n == name {
+			last = i
+		}
+	}
+	kept := make([]string, 0, len(lines))
+	for i, line := range lines {
+		if n, _, _ := strings.Cut(line, "="); n != name || i == last {
+			kept = append(kept, line)
+		}
+	}
+	h["Set-Cookie"] = kept
 }
-func (s *Server) clearCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/auth", HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteStrictMode, Expires: time.Unix(0, 0), MaxAge: -1})
+
+// withoutCookie returns a copy of r whose Cookie headers leave out every
+// cookie named name.
+func withoutCookie(r *http.Request, name string) *http.Request {
+	out := r.Clone(r.Context())
+	out.Header.Del("Cookie")
+	for _, line := range r.Header.Values("Cookie") {
+		var kept []string
+		for _, part := range strings.Split(line, ";") {
+			n, _, _ := strings.Cut(strings.Trim(part, " \t"), "=")
+			if strings.TrimSpace(n) != name {
+				kept = append(kept, strings.Trim(part, " \t"))
+			}
+		}
+		if len(kept) > 0 {
+			out.Header.Add("Cookie", strings.Join(kept, "; "))
+		}
+	}
+	return out
 }
 
 // authError writes the authentication failure response. Errors other than
@@ -656,6 +886,11 @@ var pageName = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 // else is a JSON 404.
 func (s *Server) web(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
+	if strings.TrimSuffix(p, "/") == authorizePath && s.mcp == nil {
+		// No authorization server at an http public URL.
+		fail(w, 404, "not_found", "Not found.")
+		return
+	}
 	if screenPath(p) {
 		if readOnly(w, r) {
 			s.serveAsset(w, "index.html")
@@ -695,7 +930,8 @@ func readOnly(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // screenPath reports whether p is a screen of the web UI: /, /candidates,
-// /auto, /settings, /settings/<page>, /tasks/<id>, /consent, /invite,
+// /auto, /settings, /settings/<page>, /tasks/<id>, /oauth/authorize (the
+// consent screen of the MCP authorization server), /invite,
 // /reset-password, /signin-error or the Google callback, optionally with a trailing
 // slash. The tokens of /invite and /reset-password are in the URL fragment,
 // which never reaches here. The query of the Google callback (the code and
@@ -707,7 +943,7 @@ func screenPath(p string) bool {
 	}
 	p = strings.TrimSuffix(p, "/")
 	switch p {
-	case "/candidates", "/auto", "/settings", "/account", "/consent", "/invite", "/reset-password", signinErrorPath, config.GoogleCallbackPath:
+	case "/candidates", "/auto", "/settings", "/account", authorizePath, "/invite", "/reset-password", signinErrorPath, config.GoogleCallbackPath:
 		return true
 	}
 	if id, ok := strings.CutPrefix(p, "/tasks/"); ok {
@@ -759,11 +995,6 @@ func (s *Server) legacyLocation(r *http.Request) string {
 		return "/auto"
 	case "/settings":
 		return "/settings"
-	case "/oauth/authorize":
-		if v := r.URL.Query().Get("request"); v != "" {
-			return "/consent?request=" + url.QueryEscape(v)
-		}
-		return "/consent"
 	}
 	if page, ok := strings.CutPrefix(strings.TrimSuffix(rest, "/"), "/settings/"); ok && pageName.MatchString(page) {
 		return "/settings/" + page

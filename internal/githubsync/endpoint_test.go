@@ -66,7 +66,7 @@ func (st *syncTest) useEndpoint(answers ...string) *fakeEndpoint {
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	if _, err = st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderOpenAICompatible, Model: "llama3", APIKeySealed: sealed}, cur.Generation, true, "sid", st.now.Unix()); err != nil {
+	if _, err = st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderOpenAICompatible, Model: "llama3", APIKeySealed: sealed}, cur.Generation, true, st.sid, st.now.Unix()); err != nil {
 		st.t.Fatal(err)
 	}
 	return f

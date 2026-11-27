@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 const user = { id: 'test-user', email: 'test-user@example.com', role: 'owner', password_reset: null };
-const session = { access_token: 'test-access-token', expires_in: 600, user };
+const session = { user };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
 function deferred() {
   let resolve;
@@ -39,58 +39,143 @@ async function harness(fetcher) {
   return { ...module, locks, messages, receive: (data) => receiver({ data }) };
 }
 
-test('startup performs one refresh and treats 401 as logged out', async () => {
+test('startup reads the profile once and treats 401 as signed out', async () => {
   const calls = [];
-  const { auth, locks } = await harness(async (path) => { calls.push(path); return json({}, 401); });
+  const { auth, locks } = await harness(async (path, init) => { calls.push([path, init.credentials]); return json({}, 401); });
   auth.initialize();
   auth.initialize();
   await until(() => auth.getSnapshot().status === 'anonymous');
-  assert.deepEqual(calls, ['/auth/refresh']);
+  assert.deepEqual(calls, [['/api/v1/me', 'same-origin']]);
   assert.deepEqual(locks, ['astovia-auth']);
   assert.equal(auth.getSnapshot().error, null);
 });
 
-test('concurrent private requests share one refresh and each retry only once', async () => {
-  let privateCalls = 0;
-  let refreshCalls = 0;
-  const rotation = deferred();
-  const { auth, request } = await harness(async (path) => {
-    if (path === '/auth/login') return json(session);
-    if (path === '/api/v1/me') return json(user);
-    if (path === '/auth/refresh') { refreshCalls += 1; return rotation.promise; }
-    privateCalls += 1;
-    return privateCalls <= 2 ? json({}, 401) : json({ ok: true });
-  });
-  await auth.login('test-user@example.com', 'test-password');
-  const first = request('/api/v1/test');
-  const second = request('/api/v1/test');
-  await until(() => refreshCalls === 1);
-  rotation.resolve(json(session));
-  assert.deepEqual(await Promise.all([first, second]), [{ ok: true }, { ok: true }]);
-  assert.equal(refreshCalls, 1);
-  assert.equal(privateCalls, 4);
+test('startup signs in with the session cookie the browser holds', async () => {
+  const calls = [];
+  const { auth, messages } = await harness(async (path) => { calls.push(path); return json(user); });
+  auth.initialize();
+  await until(() => auth.getSnapshot().status === 'authenticated');
+  assert.deepEqual(auth.getSnapshot().user, user);
+  assert.deepEqual(calls, ['/api/v1/me']);
+  assert.deepEqual(messages, []);
 });
 
-test('a delayed refresh cannot undo logout and auth endpoints share the lock', async () => {
-  const rotation = deferred();
-  let refreshing = false;
-  const { auth, request, locks, messages } = await harness(async (path) => {
+test('startup failures other than 401 offer a retry', async () => {
+  let fail = true;
+  const { auth } = await harness(async () => (fail ? json({}, 503) : json(user)));
+  auth.initialize();
+  await until(() => auth.getSnapshot().status === 'unavailable');
+  assert.ok(auth.getSnapshot().error?.startsWith('サーバーに接続できませんでした'), auth.getSnapshot().error);
+  fail = false;
+  auth.retry();
+  await until(() => auth.getSnapshot().status === 'authenticated');
+  // A malformed profile is not a session either.
+  const malformed = await harness(async () => json({ id: user.id, username: 'x' }));
+  malformed.auth.initialize();
+  await until(() => malformed.auth.getSnapshot().status === 'unavailable');
+});
+
+test('request sends the cookie of the same origin and no Authorization header', async () => {
+  const sent = [];
+  const { auth, request } = await harness(async (path, init) => {
+    if (path === '/auth/login') return json(session);
+    sent.push([path, init]);
+    if (path === '/api/v1/me') return json(user);
+    return json({ ok: true });
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  assert.deepEqual(await request('/api/v1/test', { headers: { 'X-Test': '1' } }), { ok: true });
+  assert.deepEqual(sent.map(([path]) => path), ['/api/v1/me', '/api/v1/test']);
+  for (const [, init] of sent) {
+    assert.equal(init.credentials, 'same-origin');
+    assert.equal(init.cache, 'no-store');
+    assert.equal(new Headers(init.headers).has('authorization'), false);
+  }
+  assert.equal(new Headers(sent[1][1].headers).get('x-test'), '1');
+});
+
+test('a 401 signs the tab out at once, without a retry', async () => {
+  let privateCalls = 0;
+  const { auth, request, APIError } = await harness(async (path) => {
     if (path === '/auth/login') return json(session);
     if (path === '/api/v1/me') return json(user);
-    if (path === '/auth/refresh') { refreshing = true; return rotation.promise; }
-    if (path === '/auth/logout') return new Response(null, { status: 204 });
+    privateCalls += 1;
+    return json({ error: { code: 'unauthorized', message: 'x' } }, 401);
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  await assert.rejects(request('/api/v1/test'), (error) => error instanceof APIError && error.status === 401 && error.code === 'unauthorized');
+  assert.equal(privateCalls, 1);
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.equal(auth.getSnapshot().user, null);
+  assert.equal(auth.getSnapshot().error, null);
+});
+
+test('a late 401 of an earlier sign-in does not sign out the current one', async () => {
+  const late = deferred();
+  let logins = 0;
+  const { auth, request, isSuperseded } = await harness(async (path) => {
+    if (path === '/auth/login') { logins += 1; return json(session); }
+    if (path === '/api/v1/me') return json(user);
+    return late.promise;
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  const pending = request('/api/v1/test');
+  await auth.login('test-user@example.com', 'test-password');
+  late.resolve(json({}, 401));
+  await assert.rejects(pending, (error) => isSuperseded(error));
+  assert.equal(logins, 2);
+  assert.equal(auth.getSnapshot().status, 'authenticated');
+});
+
+test('a sign-in whose cookie the browser dropped goes back to the login form', async () => {
+  const { auth, messages } = await harness(async (path) => {
+    if (path === '/auth/login') return json(session);
     return json({}, 401);
   });
   await auth.login('test-user@example.com', 'test-password');
-  const pending = request('/api/v1/test').catch(() => null);
-  await until(() => refreshing);
-  const logout = auth.logout();
-  rotation.resolve(json(session));
-  await Promise.all([pending, logout]);
   assert.equal(auth.getSnapshot().status, 'anonymous');
   assert.equal(auth.getSnapshot().user, null);
-  assert.deepEqual(locks, ['astovia-auth', 'astovia-auth', 'astovia-auth']);
-  assert.equal(messages.at(-1), 'logout');
+  assert.match(auth.getSnapshot().error, /ログインを保持できませんでした.*Cookie/);
+  // The other tabs were told; they read /api/v1/me and stay signed out.
+  assert.deepEqual(messages, ['session-changed']);
+});
+
+test('logout posts to /auth/logout and tells the other tabs', async () => {
+  const sent = [];
+  const { auth, messages, locks } = await harness(async (path, init) => {
+    sent.push([path, init?.method, init?.body ?? null]);
+    if (path === '/auth/login') return json(session);
+    if (path === '/api/v1/me') return json(user);
+    if (path === '/auth/logout') return new Response(null, { status: 204 });
+    return json({}, 404);
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  await auth.logout();
+  assert.deepEqual(sent.at(-1), ['/auth/logout', 'POST', '{}']);
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.equal(auth.getSnapshot().user, null);
+  assert.deepEqual(messages, ['session-changed', 'logout']);
+  assert.deepEqual(locks, ['astovia-auth', 'astovia-auth']);
+});
+
+test('a request answered after logout cannot undo it', async () => {
+  const late = deferred();
+  let pendingCall = false;
+  const { auth, request } = await harness(async (path) => {
+    if (path === '/auth/login') return json(session);
+    if (path === '/api/v1/me') return json(user);
+    if (path === '/auth/logout') return new Response(null, { status: 204 });
+    pendingCall = true;
+    return late.promise;
+  });
+  await auth.login('test-user@example.com', 'test-password');
+  const pending = request('/api/v1/test').catch(() => null);
+  await until(() => pendingCall);
+  await auth.logout();
+  late.resolve(json({ ok: true }));
+  await pending;
+  assert.equal(auth.getSnapshot().status, 'anonymous');
+  assert.equal(auth.getSnapshot().user, null);
 });
 
 test('failed logout keeps identity and gives a retry error', async () => {
@@ -107,34 +192,17 @@ test('failed logout keeps identity and gives a retry error', async () => {
   assert.equal(messages.includes('logout'), false);
 });
 
-test('cross-tab logout invalidates an in-flight startup refresh', async () => {
-  const rotation = deferred();
-  let refreshing = false;
-  const { auth, receive } = await harness(async () => { refreshing = true; return rotation.promise; });
+test('cross-tab logout invalidates an in-flight startup', async () => {
+  const profile = deferred();
+  let reading = false;
+  const { auth, receive } = await harness(async () => { reading = true; return profile.promise; });
   auth.initialize();
-  await until(() => refreshing);
+  await until(() => reading);
   receive('logout');
-  rotation.resolve(json(session));
+  profile.resolve(json(user));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(auth.getSnapshot().status, 'anonymous');
   assert.equal(auth.getSnapshot().user, null);
-});
-
-test('a second 401 does not create a refresh loop', async () => {
-  let refreshCalls = 0;
-  let privateCalls = 0;
-  const { auth, request } = await harness(async (path) => {
-    if (path === '/auth/login') return json(session);
-    if (path === '/api/v1/me') return json(user);
-    if (path === '/auth/refresh') { refreshCalls += 1; return json(session); }
-    privateCalls += 1;
-    return json({}, 401);
-  });
-  await auth.login('test-user@example.com', 'test-password');
-  await assert.rejects(request('/api/v1/test'));
-  assert.equal(refreshCalls, 1);
-  assert.equal(privateCalls, 2);
-  assert.equal(auth.getSnapshot().status, 'anonymous');
 });
 
 test('login failures map status codes to messages', async () => {
@@ -153,9 +221,8 @@ test('login failures map status codes to messages', async () => {
 });
 
 test('malformed login responses do not authenticate', async () => {
-  const { user: _omitted, ...withoutUser } = session;
-  const usernameOnly = { ...session, user: { id: user.id, username: 'test-user' } };
-  for (const body of [{ ...session, expires_in: 0 }, withoutUser, usernameOnly]) {
+  const usernameOnly = { user: { id: user.id, username: 'test-user' } };
+  for (const body of [{}, { user: null }, usernameOnly, []]) {
     const calls = [];
     const { auth } = await harness(async (path) => {
       calls.push(path);
@@ -169,9 +236,11 @@ test('malformed login responses do not authenticate', async () => {
   }
 });
 
-test('login sends the email and password only', async () => {
+test('login sends the email and password only and reads the profile', async () => {
   const bodies = [];
+  const calls = [];
   const { auth } = await harness(async (path, init) => {
+    calls.push(path);
     if (path === '/auth/login') {
       bodies.push(JSON.parse(init.body));
       return json(session);
@@ -183,6 +252,7 @@ test('login sends the email and password only', async () => {
   assert.deepEqual(bodies, [{ email: 'test-user@example.com', password: 'test-password' }]);
   assert.equal('username' in bodies[0], false);
   assert.equal(auth.getSnapshot().status, 'authenticated');
+  assert.deepEqual(calls, ['/auth/login', '/api/v1/me']);
 });
 
 test('a profile response without email is rejected', async () => {
@@ -196,34 +266,17 @@ test('a profile response without email is rejected', async () => {
   assert.ok(auth.getSnapshot().error?.startsWith('アカウント情報を確認できませんでした'), auth.getSnapshot().error);
 });
 
-test('session-changed from another tab triggers a refresh', async () => {
+test('session-changed from another tab reads the profile again', async () => {
   const calls = [];
   const { auth, receive } = await harness(async (path) => {
     calls.push(path);
-    if (path === '/auth/refresh') return json(session);
     if (path === '/api/v1/me') return json(user);
     return json({}, 404);
   });
   receive('session-changed');
   await until(() => auth.getSnapshot().status === 'authenticated');
-  assert.equal(calls[0], '/auth/refresh');
+  assert.deepEqual(calls, ['/api/v1/me']);
   assert.deepEqual(auth.getSnapshot().user, user);
-});
-
-test('request sends the access token as a Bearer header', async () => {
-  const headers = [];
-  const { auth, request } = await harness(async (path, init) => {
-    if (path === '/auth/login') return json(session);
-    headers.push([path, init.headers.Authorization]);
-    if (path === '/api/v1/me') return json(user);
-    return json({ ok: true });
-  });
-  await auth.login('test-user@example.com', 'test-password');
-  assert.deepEqual(await request('/api/v1/test'), { ok: true });
-  assert.deepEqual(headers, [
-    ['/api/v1/me', 'Bearer test-access-token'],
-    ['/api/v1/test', 'Bearer test-access-token'],
-  ]);
 });
 
 test('request keeps the method, body and content type of a POST', async () => {
@@ -243,8 +296,9 @@ test('request keeps the method, body and content type of a POST', async () => {
   assert.equal(path, '/api/v1/action-items');
   assert.equal(init.method, 'POST');
   assert.equal(init.body, body);
+  assert.equal(init.credentials, 'same-origin');
   assert.equal(headers.get('content-type'), 'application/json');
-  assert.equal(headers.get('authorization'), 'Bearer test-access-token');
+  assert.equal(headers.has('authorization'), false);
 });
 
 test('request failures carry the error code of the JSON body', async () => {
@@ -252,11 +306,15 @@ test('request failures carry the error code of the JSON body', async () => {
     if (path === '/auth/login') return json(session);
     if (path === '/api/v1/me') return json(user);
     if (path === '/api/v1/coded') return json({ error: { code: 'github_token_invalid', message: 'x' } }, 400);
+    if (path === '/api/v1/origin') return json({ error: { code: 'origin_rejected', message: 'x' } }, 403);
     return new Response('not json', { status: 503 });
   });
   await auth.login('test-user@example.com', 'test-password');
   await assert.rejects(request('/api/v1/coded'), (error) => error instanceof APIError && error.status === 400 && error.code === 'github_token_invalid');
   await assert.rejects(request('/api/v1/plain'), (error) => error instanceof APIError && error.status === 503 && error.code === null);
+  // A refused origin is not a lost session.
+  await assert.rejects(request('/api/v1/origin'), (error) => error instanceof APIError && error.status === 403 && error.code === 'origin_rejected');
+  assert.equal(auth.getSnapshot().status, 'authenticated');
 });
 
 test('the user must carry a valid role and password reset notice', async () => {
@@ -283,7 +341,7 @@ test('the user must carry a valid role and password reset notice', async () => {
 });
 
 test('a login response without a valid role does not authenticate', async () => {
-  for (const body of [{ ...session, user: { ...user, role: 'admin' } }, { ...session, user: { id: user.id, email: user.email, password_reset: null } }]) {
+  for (const body of [{ user: { ...user, role: 'admin' } }, { user: { id: user.id, email: user.email, password_reset: null } }]) {
     const calls = [];
     const { auth } = await harness(async (path) => {
       calls.push(path);
@@ -312,7 +370,7 @@ test('completeLink signs in like login under the same lock and tells other tabs'
   const member = { ...user, role: 'member', password_reset: { at: '2026-10-23T01:02:03Z', by_email: 'owner@example.com' } };
   const { auth, locks, messages } = await harness(async (path, init) => {
     sent.push([path, init?.body ? JSON.parse(init.body) : null]);
-    if (path === '/auth/password-resets/complete') return json({ ...session, user: member });
+    if (path === '/auth/password-resets/complete') return json({ user: member });
     if (path === '/api/v1/me') return json(member);
     return json({}, 404);
   });
@@ -347,10 +405,9 @@ test('inspectLink returns the body and throws coded errors without touching the 
   assert.equal(auth.getSnapshot().status, 'loading');
 });
 
-// browser installs sessionStorage and location for the Access sign-in.
+// browser installs sessionStorage for the single sign-on mark.
 function browser({ storage = true } = {}) {
   const items = new Map();
-  const assigned = [];
   Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, get() {
     if (!storage) throw new Error('SecurityError');
     return {
@@ -359,34 +416,31 @@ function browser({ storage = true } = {}) {
       removeItem: (key) => { items.delete(key); },
     };
   } });
-  Object.defineProperty(globalThis, 'location', { configurable: true, value: { assign: (url) => { assigned.push(url); } } });
-  return { items, assigned };
+  return { items };
 }
 
-test('the OIDC sign-in returns to the encoded path and query', async () => {
-  const { oidcLoginURL } = await harness(async () => json({}, 401));
-  assert.equal(oidcLoginURL('/', ''), '/auth/oidc/login?return_to=%2F');
-  assert.equal(oidcLoginURL('/consent', '?request=a%2Fb&x=1'), '/auth/oidc/login?return_to=%2Fconsent%3Frequest%3Da%252Fb%26x%3D1');
-  assert.equal(oidcLoginURL('/tasks/abc', ''), '/auth/oidc/login?return_to=%2Ftasks%2Fabc');
+test('the OIDC sign-in form posts to the server and returns to the screen', async () => {
+  const { oidcLoginPath, oidcReturnTo } = await harness(async () => json({}, 401));
+  assert.equal(oidcLoginPath, '/auth/oidc/login');
+  assert.equal(oidcReturnTo('/', ''), '/');
+  // The consent screen keeps its query as the client sent it.
+  assert.equal(oidcReturnTo('/oauth/authorize', '?client_id=https%3A%2F%2Fclaude.ai%2Fm&state=a%2Fb'), '/oauth/authorize?client_id=https%3A%2F%2Fclaude.ai%2Fm&state=a%2Fb');
+  assert.equal(oidcReturnTo('/tasks/abc', ''), '/tasks/abc');
 });
 
-test('startOIDCLogin marks the tab and leaves with location.assign', async () => {
-  const { items, assigned } = browser();
-  const { startOIDCLogin } = await harness(async () => json({}, 401));
-  startOIDCLogin('/settings', '?x=1');
-  assert.deepEqual(assigned, ['/auth/oidc/login?return_to=%2Fsettings%3Fx%3D1']);
+test('markOIDCLogin marks the tab, with or without storage', async () => {
+  const { items } = browser();
+  const { markOIDCLogin } = await harness(async () => json({}, 401));
+  markOIDCLogin();
   assert.equal(items.get('astovia-oidc-login'), '1');
-  // Without storage the sign-in still starts.
-  const blocked = browser({ storage: false });
-  startOIDCLogin('/', '');
-  assert.deepEqual(blocked.assigned, ['/auth/oidc/login?return_to=%2F']);
+  browser({ storage: false });
+  assert.doesNotThrow(() => markOIDCLogin());
 });
 
 test('the page after an OIDC sign-in tells the other tabs once', async () => {
   const { items } = browser();
   items.set('astovia-oidc-login', '1');
   const { auth, messages } = await harness(async (path) => {
-    if (path === '/auth/refresh') return json(session);
     if (path === '/api/v1/me') return json(user);
     return json({}, 404);
   });
@@ -410,7 +464,6 @@ test('a failed restore after an OIDC sign-in clears the mark without telling', a
 test('a page load without the mark tells nothing', async () => {
   const { items } = browser();
   const { auth, messages } = await harness(async (path) => {
-    if (path === '/auth/refresh') return json(session);
     if (path === '/api/v1/me') return json(user);
     return json({}, 404);
   });
@@ -421,10 +474,9 @@ test('a page load without the mark tells nothing', async () => {
   assert.equal(items.size, 0);
 });
 
-test('no Access logout is exported', async () => {
+test('no token handling or navigation-based sign-in is exported', async () => {
   const module = await harness(async () => json({}, 401));
-  assert.equal('logoutAccess' in module, false);
-  assert.equal('startAccessLogin' in module, false);
+  for (const name of ['logoutAccess', 'startAccessLogin', 'startOIDCLogin', 'oidcLoginURL', 'refresh']) assert.equal(name in module, false, name);
 });
 
 // ---------- Two-step verification ----------
@@ -573,7 +625,7 @@ test('a session that could not be started leads back to the login form', async (
   assert.equal(verify.auth.getSnapshot().error, 'ログインできませんでした。もう一度ログインしてください。');
 
   const enroll = await pendingHarness({ '/auth/mfa/enroll/webauthn/finish': failed }, mustEnroll);
-  await assert.rejects(enroll.auth.enrollMFA('/auth/mfa/enroll/webauthn/finish', { state: 's', credential: {}, name: 'Key' }), (error) => enroll.isSuperseded(error));
+  await assert.rejects(enroll.auth.enrollMFA('/auth/mfa/enroll/webauthn/finish', { credential: {}, name: 'Key' }), (error) => enroll.isSuperseded(error));
   assert.equal(enroll.auth.getSnapshot().mfa, null);
   assert.equal(enroll.auth.getSnapshot().error, '登録は完了しました。もう一度ログインしてください。リカバリーコードは、ログイン後に二段階認証の画面で再発行してください。');
 
@@ -633,7 +685,7 @@ test('another tab signing out or in drops the pending second factor and the held
   for (const message of ['logout', 'session-changed']) {
     const { auth, receive, messages } = await pendingHarness({
       '/auth/mfa/enroll/totp/finish': () => json({ ...session, recovery_codes: codes }),
-      '/auth/refresh': () => json({}, 401),
+      '/api/v1/me': () => json({}, 401),
     }, mustEnroll);
     await auth.enrollMFA('/auth/mfa/enroll/totp/finish', { setup_token: 'setup', code: '123456' });
     receive(message);

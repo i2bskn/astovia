@@ -172,20 +172,31 @@ func TestMCPHTTP(t *testing.T) {
 	if w := api.do("DELETE", "/api/v1/api-tokens/"+deleted.ID, api.alice, ""); w.Code != 204 {
 		t.Fatal(w.Code)
 	}
-	for name, bearer := range map[string]string{"none": "", "malformed": "ast_x", "unknown": "ast_" + strings.Repeat("A", 43), "access JWT": api.alice, "deleted": deleted.Token, "unknown OAuth": "aso_" + strings.Repeat("A", 43), "OAuth refresh": "asr_" + strings.Repeat("A", 43)} {
+	for name, bearer := range map[string]string{"none": "", "malformed": "ast_x", "unknown": "ast_" + strings.Repeat("A", 43), "JWT": "eyJhbGciOiJIUzI1NiJ9.e30.c2ln", "deleted": deleted.Token, "unknown OAuth": "aso_" + strings.Repeat("A", 43), "OAuth refresh": "asr_" + strings.Repeat("A", 43)} {
 		challenge := mcpInvalidToken
 		if bearer == "" {
 			challenge = mcpNoToken
 		}
 		w := mcpPost(t, api.handler, bearer, "", "")
-		if w.Code != 401 || w.Header().Get("WWW-Authenticate") != challenge || errorCode(t, w) != "unauthorized" || w.Header().Get("Cache-Control") != "no-store" {
+		if w.Code != 401 || w.Header().Get("WWW-Authenticate") != challenge || w.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("%s: %d %v %s", name, w.Code, w.Header(), w.Body.String())
 		}
+		// An API token is answered by Astovia's JSON error; anything else
+		// by mcpoauth's challenge, which has no body.
+		if strings.HasPrefix(bearer, "ast_") && errorCode(t, w) != "unauthorized" {
+			t.Fatalf("%s: %s", name, w.Body.String())
+		}
 	}
+	// A session cookie is not a credential for /mcp.
 	r := httptest.NewRequest("POST", "/mcp", strings.NewReader(toolsListBody))
-	r.Header.Set("Authorization", "Basic YWxpY2U6cHc=")
+	authorize(r, api.alice)
 	if w := serve(t, api.handler, r); w.Code != 401 || w.Header().Get("WWW-Authenticate") != mcpNoToken {
-		t.Fatalf("Basic: %d", w.Code)
+		t.Fatalf("session cookie: %d %v", w.Code, w.Header())
+	}
+	r = httptest.NewRequest("POST", "/mcp", strings.NewReader(toolsListBody))
+	r.Header.Set("Authorization", "Basic YWxpY2U6cHc=")
+	if w := serve(t, api.handler, r); w.Code != 401 || w.Header().Get("WWW-Authenticate") != mcpInvalidToken {
+		t.Fatalf("Basic: %d %v", w.Code, w.Header())
 	}
 
 	// Origin: absent or equal to PublicURL passes, anything else is rejected
@@ -205,7 +216,7 @@ func TestMCPHTTP(t *testing.T) {
 	// Only POST.
 	for _, method := range []string{"GET", "DELETE", "PUT"} {
 		r := httptest.NewRequest(method, "/mcp", nil)
-		r.Header.Set("Authorization", "Bearer "+tok)
+		authorize(r, tok)
 		w := serve(t, api.handler, r)
 		expectStatus(t, w, 405, "method_not_allowed")
 		if w.Header().Get("Allow") != "POST" {
@@ -223,7 +234,7 @@ func TestMCPHTTP(t *testing.T) {
 		req.Host = "astovia.example"
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
-		req.Header.Set("Authorization", "Bearer "+tok)
+		authorize(req, tok)
 		if origin != "" {
 			req.Header.Set("Origin", origin)
 		}

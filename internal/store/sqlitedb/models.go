@@ -156,6 +156,50 @@ type Invitation struct {
 	RevokedAt      sql.NullInt64
 }
 
+type McpOauthClientLabel struct {
+	ClientID  string
+	Name      string
+	Host      string
+	UpdatedAt int64
+}
+
+type McpOauthCode struct {
+	Key         string
+	ClientID    string
+	RedirectUri string
+	Subject     string
+	Scopes      string
+	Challenge   string
+	ExpiresAt   int64
+	Consumed    int64
+	Reused      int64
+}
+
+type McpOauthConnection struct {
+	ID             string
+	Selector       string
+	Subject        string
+	ClientID       string
+	Scopes         string
+	CreatedAt      int64
+	RefreshedAt    int64
+	AbsoluteExpiry sql.NullInt64
+	Access         string
+	AccessExpiry   int64
+	Refresh        string
+	RefreshExpiry  int64
+	Code           sql.NullString
+	LastUsedAt     sql.NullInt64
+}
+
+type McpOauthRegistration struct {
+	ID           string
+	Name         string
+	RedirectUris string
+	CreatedAt    int64
+	ExpiresAt    sql.NullInt64
+}
+
 type MfaRecoveryCode struct {
 	ID        string
 	UserID    string
@@ -165,15 +209,11 @@ type MfaRecoveryCode struct {
 }
 
 type MfaTotp struct {
+	ID           string
 	UserID       string
 	SecretSealed string
 	LastStep     int64
 	CreatedAt    int64
-}
-
-type MfaUsedChallenge struct {
-	ChallengeHash string
-	ExpiresAt     int64
 }
 
 type MfaWebauthnCredential struct {
@@ -184,6 +224,8 @@ type MfaWebauthnCredential struct {
 	Name         string
 	CreatedAt    int64
 	LastUsedAt   sql.NullInt64
+	Version      string
+	Passkey      int64
 }
 
 type Notification struct {
@@ -222,42 +264,14 @@ type NotificationSetting struct {
 	CandidateExpireDays int64
 }
 
-type OauthClient struct {
-	ClientID          string
-	Kind              string
-	Name              string
-	RedirectUris      string
-	AuthMethod        string
-	SecretHash        sql.NullString
-	MetadataExpiresAt sql.NullInt64
-	CreatedAt         int64
-	UpdatedAt         int64
-}
-
-type OauthGrant struct {
-	ID            string
-	UserID        string
-	ClientID      string
-	ClientName    string
-	Scope         string
-	Resource      string
-	RedirectUri   string
-	CodeHash      string
-	CodeChallenge string
-	CodeExpiresAt int64
-	CodeUsedAt    sql.NullInt64
-	CreatedAt     int64
+type OidcLogin struct {
+	Key           string
+	Nonce         string
+	Verifier      string
+	StartedAt     int64
 	ExpiresAt     int64
-	LastUsedAt    sql.NullInt64
-}
-
-type OauthToken struct {
-	TokenHash string
-	Kind      string
-	GrantID   string
-	UserID    string
-	CreatedAt int64
-	ExpiresAt int64
+	MaxAgeSeconds sql.NullInt64
+	AppData       sql.NullString
 }
 
 type PasswordReset struct {
@@ -269,21 +283,6 @@ type PasswordReset struct {
 	ExpiresAt int64
 	UsedAt    sql.NullInt64
 	RevokedAt sql.NullInt64
-}
-
-type RefreshToken struct {
-	Hash       string
-	SessionID  string
-	ConsumedAt sql.NullInt64
-	CreatedAt  int64
-}
-
-type Session struct {
-	ID        string
-	UserID    string
-	ExpiresAt int64
-	RevokedAt sql.NullInt64
-	CreatedAt int64
 }
 
 type SlackConnection struct {
@@ -313,14 +312,15 @@ type SlackConnection struct {
 }
 
 type User struct {
-	ID           string
-	Email        string
-	PasswordHash string
-	Disabled     int64
-	CreatedAt    int64
-	Role         string
-	OidcIssuer   sql.NullString
-	OidcSubject  sql.NullString
+	ID                    string
+	Email                 string
+	PasswordHash          string
+	Disabled              int64
+	CreatedAt             int64
+	Role                  string
+	OidcIssuer            sql.NullString
+	OidcSubject           sql.NullString
+	OidcLinkApprovedUntil sql.NullInt64
 }
 
 type WebPushSubscription struct {
@@ -332,4 +332,20 @@ type WebPushSubscription struct {
 	Label      string
 	CreatedAt  int64
 	LastUsedAt sql.NullInt64
+}
+
+type WebSession struct {
+	ID              string
+	UserID          string
+	AuthenticatedAt int64
+	LastActivity    int64
+	AbsoluteExpiry  int64
+	IdleSeconds     int64
+}
+
+type WebauthnCeremony struct {
+	Key       string
+	Subject   string
+	Record    string
+	ExpiresAt int64
 }

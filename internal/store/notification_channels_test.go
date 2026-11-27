@@ -259,7 +259,7 @@ func TestNotificationUserIDs(t *testing.T) {
 			if err := s.CreateUser(ctx, u); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.Login(ctx, u, store.Session{ID: name + "-session", UserID: u.ID, ExpiresAt: tokenTestNow + 3600, CreatedAt: tokenTestNow}, store.Refresh{Hash: "refresh-" + name, SessionID: name + "-session", CreatedAt: tokenTestNow}); err != nil {
+			if err := s.InsertWebSession(ctx, store.WebSession{ID: name + "-session", UserID: u.ID, AuthenticatedAt: tokenTestNow, LastActivity: tokenTestNow, AbsoluteExpiry: tokenTestNow + 3600, IdleSeconds: 3600}); err != nil {
 				t.Fatal(err)
 			}
 		}

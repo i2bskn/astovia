@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { auth, inspectLink } from './auth';
 import { dateTime } from './format';
-import { linkFailure, linkToken, passwordProblem } from './links';
+import { linkFailure, linkToken, passwordLengthHint, passwordLengthMessage, passwordProblem } from './links';
 import type { LinkFailure, LinkPage } from './links';
 import Phrased from './Phrased';
 import { roleLabels } from './users';
@@ -43,7 +43,7 @@ function failureMessage(failure: LinkFailure, page: LinkPage): string {
     case 'invalid': return texts[page].invalid;
     case 'email_taken': return 'このメールアドレスのアカウントは既にあります。ログイン画面からログインしてください。';
     case 'rate_limited': return '試行回数が上限に達しました。1分ほど待ってから、もう一度お試しください。';
-    case 'password': return 'パスワードは12〜72バイトで入力してください（英数字なら12〜72文字）。';
+    case 'password': return passwordLengthMessage;
     default: return 'サーバーに接続できませんでした。少し待ってから、もう一度お試しください。';
   }
 }
@@ -192,7 +192,7 @@ export default function AccountLinkPage({ page }: { page: LinkPage }) {
         <label htmlFor={passwordID}>新しいパスワード</label>
         <input id={passwordID} name="password" type="password" autoComplete="new-password" required value={password} onChange={(e) => { setPassword(e.target.value); setMessage(null); }} disabled={submitting} aria-describedby={message ? `${hintID} ${errorID}` : hintID} />
       </div>
-      <p className="field-hint" id={hintID}>12〜72バイト（英数字なら12〜72文字）</p>
+      <p className="field-hint" id={hintID}>{passwordLengthHint}</p>
       <div className="field">
         <label htmlFor={confirmationID}>新しいパスワード（確認）</label>
         <input id={confirmationID} name="password-confirmation" type="password" autoComplete="new-password" required value={confirmation} onChange={(e) => { setConfirmation(e.target.value); setMessage(null); }} disabled={submitting} aria-describedby={message ? errorID : undefined} />

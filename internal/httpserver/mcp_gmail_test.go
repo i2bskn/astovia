@@ -216,10 +216,7 @@ func newMCPGmailAPI(t *testing.T, driver string) *mcpGmailAPI {
 			t.Fatal(err)
 		}
 	}
-	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	// The clock is read by the server's goroutines while tests move it.
 	clock := &atomic.Int64{}
 	clock.Store(time.Date(2026, 10, 24, 1, 2, 3, 0, time.UTC).Unix())

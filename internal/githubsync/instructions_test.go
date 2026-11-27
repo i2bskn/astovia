@@ -32,7 +32,7 @@ func TestMentionInstructions(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		st, fa := newMentionTest(t, driver)
 		in := map[string]string{store.InstructionCommon: "共通の指示", store.InstructionGitHubDetect: "GitHub の検出の指示", store.InstructionSlackDetect: "Slack の指示"}
-		if err := st.s.SaveAIInstructions(context.Background(), "alice-id", "sid", in, st.now.Unix()); err != nil {
+		if err := st.s.SaveAIInstructions(context.Background(), "alice-id", st.sid, in, st.now.Unix()); err != nil {
 			t.Fatal(err)
 		}
 		st.issueWithComments(comment(11, "bob", "@octocat can you check this?", st.now.Add(-30*time.Minute)))

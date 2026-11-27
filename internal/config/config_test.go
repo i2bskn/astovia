@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoad(t *testing.T) {
@@ -187,6 +188,7 @@ func TestOIDCClient(t *testing.T) {
 			RedirectURI:          "https://astovia.example.com/auth/oidc/callback",
 			RequireEmailVerified: true,
 			RequireGoogleHD:      false,
+			FormActionOrigins:    []string{issuer},
 		}
 		if e != nil || c.OIDC == nil || !reflect.DeepEqual(*c.OIDC, want) {
 			t.Fatalf("%v: %+v %v", requireSecret, c.OIDC, e)
@@ -325,6 +327,97 @@ func TestOIDCClient(t *testing.T) {
 	setOIDC(t, "oidc", issuer, id, secret)
 	t.Setenv("ASTOVIA_PUBLIC_URL", "http://localhost:8080")
 	if _, e := Load(false); e == nil || e.Error() != "ASTOVIA_PUBLIC_URL must use https with ASTOVIA_AUTH_MODE=oidc" {
+		t.Fatal(e)
+	}
+}
+
+// ASTOVIA_OIDC_FORM_ACTION_ORIGINS adds origins to the issuer's origin in
+// form-action; anything but canonical https origins stops the server.
+func TestOIDCFormActionOrigins(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://astovia.example.com")
+	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("ASTOVIA_ALLOWED_EMAILS", "")
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_EMAIL_VERIFIED", "")
+	t.Setenv("ASTOVIA_OIDC_REQUIRE_GOOGLE_HD", "")
+	setOIDC(t, "oidc", "https://Team.Example.com:8443/cdn-cgi/access/sso/oidc/x", "id", "secret")
+	for _, tc := range []struct {
+		value string
+		want  []string
+	}{
+		{"", []string{"https://team.example.com:8443"}},
+		{"https://accounts.google.com  https://login.example.org:444\thttps://accounts.google.com", []string{"https://team.example.com:8443", "https://accounts.google.com", "https://login.example.org:444"}},
+		{"https://team.example.com:8443 https://IdP.example.com:443", []string{"https://team.example.com:8443", "https://idp.example.com"}},
+	} {
+		t.Setenv("ASTOVIA_OIDC_FORM_ACTION_ORIGINS", strings.ReplaceAll(tc.value, "\\t", "\t"))
+		c, e := Load(false)
+		if e != nil || c.OIDC == nil || !reflect.DeepEqual(c.OIDC.FormActionOrigins, tc.want) {
+			t.Fatalf("%q: %+v %v", tc.value, c.OIDC, e)
+		}
+	}
+	for _, v := range []string{"http://idp.example.com", "https://idp.example.com/", "https://idp.example.com/path", "idp.example.com", "https://user@idp.example.com", "https://idp.example.com?x", "https://idp.example.com#x", "'self'", "*"} {
+		t.Setenv("ASTOVIA_OIDC_FORM_ACTION_ORIGINS", v)
+		if _, e := Load(false); e == nil || !strings.Contains(e.Error(), "ASTOVIA_OIDC_FORM_ACTION_ORIGINS") {
+			t.Fatalf("%q: %v", v, e)
+		}
+	}
+	// Without OIDC the variable is not read.
+	setOIDC(t, "", "", "", "")
+	t.Setenv("ASTOVIA_OIDC_FORM_ACTION_ORIGINS", "http://invalid")
+	if c, e := Load(false); e != nil || c.OIDC != nil {
+		t.Fatal(c.OIDC, e)
+	}
+}
+
+// The lifetimes of the MCP connections default to 1 hour, 30 days and no
+// absolute limit, and values out of range stop the server.
+func TestMCPConfig(t *testing.T) {
+	t.Setenv("ASTOVIA_DB_DRIVER", "sqlite")
+	t.Setenv("ASTOVIA_DB_DSN", "")
+	t.Setenv("ASTOVIA_PUBLIC_URL", "https://astovia.example.com")
+	t.Setenv("ASTOVIA_JWT_SECRET", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	set := func(access, refresh, absolute string) {
+		t.Setenv("ASTOVIA_MCP_ACCESS_TTL", access)
+		t.Setenv("ASTOVIA_MCP_REFRESH_IDLE", refresh)
+		t.Setenv("ASTOVIA_MCP_CONNECTION_ABSOLUTE", absolute)
+	}
+	for _, tc := range []struct {
+		access, refresh, absolute string
+		want                      MCPConfig
+	}{
+		{"", "", "", MCPConfig{AccessTTL: time.Hour, RefreshIdle: 720 * time.Hour}},
+		{" 5m ", "1h", "0", MCPConfig{AccessTTL: 5 * time.Minute, RefreshIdle: time.Hour}},
+		{"24h", "8760h", "87600h", MCPConfig{AccessTTL: 24 * time.Hour, RefreshIdle: 8760 * time.Hour, ConnectionAbsolute: 87600 * time.Hour}},
+		{"1h", "24h", "24h", MCPConfig{AccessTTL: time.Hour, RefreshIdle: 24 * time.Hour, ConnectionAbsolute: 24 * time.Hour}},
+	} {
+		set(tc.access, tc.refresh, tc.absolute)
+		c, e := Load(false)
+		if e != nil || c.MCP != tc.want {
+			t.Fatalf("%+v: %+v %v", tc, c.MCP, e)
+		}
+	}
+	for _, tc := range []struct{ access, refresh, absolute, variable string }{
+		{"4m59s", "", "", "ASTOVIA_MCP_ACCESS_TTL"},
+		{"24h1s", "", "", "ASTOVIA_MCP_ACCESS_TTL"},
+		{"0", "", "", "ASTOVIA_MCP_ACCESS_TTL"},
+		{"1d", "", "", "ASTOVIA_MCP_ACCESS_TTL"},
+		{"", "59m", "", "ASTOVIA_MCP_REFRESH_IDLE"},
+		{"", "8761h", "", "ASTOVIA_MCP_REFRESH_IDLE"},
+		{"", "30d", "", "ASTOVIA_MCP_REFRESH_IDLE"},
+		{"", "", "23h", "ASTOVIA_MCP_CONNECTION_ABSOLUTE"},
+		{"", "", "87601h", "ASTOVIA_MCP_CONNECTION_ABSOLUTE"},
+		{"", "", "-1h", "ASTOVIA_MCP_CONNECTION_ABSOLUTE"},
+		{"2h", "1h", "", "ASTOVIA_MCP_REFRESH_IDLE"},
+	} {
+		set(tc.access, tc.refresh, tc.absolute)
+		if _, e := Load(false); e == nil || !strings.Contains(e.Error(), tc.variable) {
+			t.Fatalf("%+v: %v", tc, e)
+		}
+	}
+	// The access token cannot outlive an absolute limit.
+	set("24h", "48h", "24h")
+	if _, e := Load(false); e != nil {
 		t.Fatal(e)
 	}
 }

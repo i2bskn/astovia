@@ -2,7 +2,7 @@
 COMPOSE_TEST := docker compose -f compose.test.yaml
 WEB_SOURCES := $(shell find web/src web/public -type f) web/index.html web/package.json web/pnpm-lock.yaml web/tsconfig.json web/vite.config.ts
 
-.PHONY: help env migrate up stop logs user-create user-reset-password user-disable user-enable user-role test-web frontend test-go test check generate postgres build check-user-email check-user-role
+.PHONY: help env migrate up stop logs user-create user-reset-password user-disable user-enable user-role test-web frontend test-go test-schema test check generate postgres build check-user-email check-user-role
 
 help: ## Show this list
 	@awk 'BEGIN { FS = ":.*## " } /^[A-Za-z0-9_.\/-]+:.*## / { printf "  %-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -99,8 +99,11 @@ postgres: ## Start the test PostgreSQL
 test-go: web/dist/index.html postgres ## Run the Go tests against SQLite and PostgreSQL (-race -v)
 	$(COMPOSE_TEST) run --rm go go test -race -count=1 -v ./...
 
-test: ## Run test-web, then test-go
-	$(MAKE) test-web && $(MAKE) test-go
+test-schema: postgres ## Apply the schema with Atlas to SQLite and PostgreSQL databases of the schema before authlume
+	sh scripts/check-schema-upgrade.sh
+
+test: ## Run test-web, then test-go, then test-schema
+	$(MAKE) test-web && $(MAKE) test-go && $(MAKE) test-schema
 
 check: test ## Run all tests and go vet
 	$(COMPOSE_TEST) run --rm go go vet ./...

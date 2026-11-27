@@ -34,6 +34,10 @@ table "users" {
     type = text
     null = true
   }
+  column "oidc_link_approved_until" {
+    type = bigint
+    null = true
+  }
   primary_key {
     columns = [column.id]
   }
@@ -44,68 +48,6 @@ table "users" {
   index "users_oidc_identity_key" {
     unique = true
     columns = [column.oidc_issuer, column.oidc_subject]
-  }
-}
-table "sessions" {
-  schema = schema.public
-  column "id" {
-    type = text
-    null = false
-  }
-  column "user_id" {
-    type = text
-    null = false
-  }
-  column "expires_at" {
-    type = bigint
-    null = false
-  }
-  column "revoked_at" {
-    type = bigint
-    null = true
-  }
-  column "created_at" {
-    type = bigint
-    null = false
-  }
-  primary_key {
-    columns = [column.id]
-  }
-  foreign_key "sessions_user_id_fk" {
-    columns = [column.user_id]
-    ref_columns = [table.users.column.id]
-  }
-  index "sessions_user_id_idx" {
-    columns = [column.user_id]
-  }
-}
-table "refresh_tokens" {
-  schema = schema.public
-  column "hash" {
-    type = text
-    null = false
-  }
-  column "session_id" {
-    type = text
-    null = false
-  }
-  column "consumed_at" {
-    type = bigint
-    null = true
-  }
-  column "created_at" {
-    type = bigint
-    null = false
-  }
-  primary_key {
-    columns = [column.hash]
-  }
-  foreign_key "refresh_tokens_session_id_fk" {
-    columns = [column.session_id]
-    ref_columns = [table.sessions.column.id]
-  }
-  index "refresh_tokens_session_id_idx" {
-    columns = [column.session_id]
   }
 }
 table "action_items" {
@@ -275,169 +217,6 @@ table "api_tokens" {
   }
   index "api_tokens_user_created_idx" {
     columns = [column.user_id, column.created_at, column.id]
-  }
-}
-table "oauth_clients" {
-  schema = schema.public
-  column "client_id" {
-    type = text
-    null = false
-  }
-  column "kind" {
-    type = text
-    null = false
-  }
-  column "name" {
-    type = text
-    null = false
-  }
-  column "redirect_uris" {
-    type = text
-    null = false
-  }
-  column "auth_method" {
-    type = text
-    null = false
-  }
-  column "secret_hash" {
-    type = text
-    null = true
-  }
-  column "metadata_expires_at" {
-    type = bigint
-    null = true
-  }
-  column "created_at" {
-    type = bigint
-    null = false
-  }
-  column "updated_at" {
-    type = bigint
-    null = false
-  }
-  primary_key {
-    columns = [column.client_id]
-  }
-}
-table "oauth_grants" {
-  schema = schema.public
-  column "id" {
-    type = text
-    null = false
-  }
-  column "user_id" {
-    type = text
-    null = false
-  }
-  column "client_id" {
-    type = text
-    null = false
-  }
-  column "client_name" {
-    type = text
-    null = false
-  }
-  column "scope" {
-    type = text
-    null = false
-  }
-  column "resource" {
-    type = text
-    null = false
-  }
-  column "redirect_uri" {
-    type = text
-    null = false
-  }
-  column "code_hash" {
-    type = text
-    null = false
-  }
-  column "code_challenge" {
-    type = text
-    null = false
-  }
-  column "code_expires_at" {
-    type = bigint
-    null = false
-  }
-  column "code_used_at" {
-    type = bigint
-    null = true
-  }
-  column "created_at" {
-    type = bigint
-    null = false
-  }
-  column "expires_at" {
-    type = bigint
-    null = false
-  }
-  column "last_used_at" {
-    type = bigint
-    null = true
-  }
-  primary_key {
-    columns = [column.id]
-  }
-  foreign_key "oauth_grants_user_id_fk" {
-    columns = [column.user_id]
-    ref_columns = [table.users.column.id]
-  }
-  foreign_key "oauth_grants_client_id_fk" {
-    columns = [column.client_id]
-    ref_columns = [table.oauth_clients.column.client_id]
-  }
-  index "oauth_grants_code_hash_key" {
-    unique = true
-    columns = [column.code_hash]
-  }
-  index "oauth_grants_user_created_idx" {
-    columns = [column.user_id, column.created_at, column.id]
-  }
-}
-table "oauth_tokens" {
-  schema = schema.public
-  column "token_hash" {
-    type = text
-    null = false
-  }
-  column "kind" {
-    type = text
-    null = false
-  }
-  column "grant_id" {
-    type = text
-    null = false
-  }
-  column "user_id" {
-    type = text
-    null = false
-  }
-  column "created_at" {
-    type = bigint
-    null = false
-  }
-  column "expires_at" {
-    type = bigint
-    null = false
-  }
-  primary_key {
-    columns = [column.token_hash]
-  }
-  foreign_key "oauth_tokens_grant_id_fk" {
-    columns = [column.grant_id]
-    ref_columns = [table.oauth_grants.column.id]
-  }
-  foreign_key "oauth_tokens_user_id_fk" {
-    columns = [column.user_id]
-    ref_columns = [table.users.column.id]
-  }
-  index "oauth_tokens_grant_idx" {
-    columns = [column.grant_id]
-  }
-  index "oauth_tokens_user_expires_idx" {
-    columns = [column.user_id, column.expires_at]
   }
 }
 table "github_connections" {
@@ -1286,6 +1065,11 @@ table "password_resets" {
 }
 table "mfa_totp" {
   schema = schema.public
+  column "id" {
+    type    = text
+    null    = false
+    default = ""
+  }
   column "user_id" {
     type = text
     null = false
@@ -1340,6 +1124,16 @@ table "mfa_webauthn_credentials" {
     type = bigint
     null = true
   }
+  column "version" {
+    type    = text
+    null    = false
+    default = ""
+  }
+  column "passkey" {
+    type    = bigint
+    null    = false
+    default = 0
+  }
   primary_key {
     columns = [column.id]
   }
@@ -1392,9 +1186,94 @@ table "mfa_recovery_codes" {
     columns = [column.user_id]
   }
 }
-table "mfa_used_challenges" {
+table "web_sessions" {
   schema = schema.public
-  column "challenge_hash" {
+  column "id" {
+    type = text
+    null = false
+  }
+  column "user_id" {
+    type = text
+    null = false
+  }
+  column "authenticated_at" {
+    type = bigint
+    null = false
+  }
+  column "last_activity" {
+    type = bigint
+    null = false
+  }
+  column "absolute_expiry" {
+    type = bigint
+    null = false
+  }
+  column "idle_seconds" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "web_sessions_user_id_fk" {
+    columns = [column.user_id]
+    ref_columns = [table.users.column.id]
+  }
+  index "web_sessions_user_id_idx" {
+    columns = [column.user_id]
+  }
+  index "web_sessions_absolute_expiry_idx" {
+    columns = [column.absolute_expiry]
+  }
+}
+table "oidc_logins" {
+  schema = schema.public
+  column "key" {
+    type = text
+    null = false
+  }
+  column "nonce" {
+    type = text
+    null = false
+  }
+  column "verifier" {
+    type = text
+    null = false
+  }
+  column "started_at" {
+    type = bigint
+    null = false
+  }
+  column "expires_at" {
+    type = bigint
+    null = false
+  }
+  column "max_age_seconds" {
+    type = bigint
+    null = true
+  }
+  column "app_data" {
+    type = text
+    null = true
+  }
+  primary_key {
+    columns = [column.key]
+  }
+  index "oidc_logins_expires_at_idx" {
+    columns = [column.expires_at]
+  }
+}
+table "webauthn_ceremonies" {
+  schema = schema.public
+  column "key" {
+    type = text
+    null = false
+  }
+  column "subject" {
+    type = text
+    null = false
+  }
+  column "record" {
     type = text
     null = false
   }
@@ -1403,6 +1282,197 @@ table "mfa_used_challenges" {
     null = false
   }
   primary_key {
-    columns = [column.challenge_hash]
+    columns = [column.key]
+  }
+  index "webauthn_ceremonies_subject_idx" {
+    columns = [column.subject]
+  }
+  index "webauthn_ceremonies_expires_at_idx" {
+    columns = [column.expires_at]
+  }
+}
+table "mcp_oauth_codes" {
+  schema = schema.public
+  column "key" {
+    type = text
+    null = false
+  }
+  column "client_id" {
+    type = text
+    null = false
+  }
+  column "redirect_uri" {
+    type = text
+    null = false
+  }
+  column "subject" {
+    type = text
+    null = false
+  }
+  column "scopes" {
+    type = text
+    null = false
+  }
+  column "challenge" {
+    type = text
+    null = false
+  }
+  column "expires_at" {
+    type = bigint
+    null = false
+  }
+  column "consumed" {
+    type = bigint
+    null = false
+  }
+  column "reused" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.key]
+  }
+  index "mcp_oauth_codes_subject_idx" {
+    columns = [column.subject]
+  }
+  index "mcp_oauth_codes_client_id_idx" {
+    columns = [column.client_id]
+  }
+  index "mcp_oauth_codes_expires_at_idx" {
+    columns = [column.expires_at]
+  }
+}
+table "mcp_oauth_connections" {
+  schema = schema.public
+  column "id" {
+    type = text
+    null = false
+  }
+  column "selector" {
+    type = text
+    null = false
+  }
+  column "subject" {
+    type = text
+    null = false
+  }
+  column "client_id" {
+    type = text
+    null = false
+  }
+  column "scopes" {
+    type = text
+    null = false
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "refreshed_at" {
+    type = bigint
+    null = false
+  }
+  column "absolute_expiry" {
+    type = bigint
+    null = true
+  }
+  column "access" {
+    type = text
+    null = false
+  }
+  column "access_expiry" {
+    type = bigint
+    null = false
+  }
+  column "refresh" {
+    type = text
+    null = false
+  }
+  column "refresh_expiry" {
+    type = bigint
+    null = false
+  }
+  column "code" {
+    type = text
+    null = true
+  }
+  column "last_used_at" {
+    type = bigint
+    null = true
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  index "mcp_oauth_connections_selector_key" {
+    unique  = true
+    columns = [column.selector]
+  }
+  index "mcp_oauth_connections_access_key" {
+    unique  = true
+    columns = [column.access]
+  }
+  index "mcp_oauth_connections_code_key" {
+    unique  = true
+    columns = [column.code]
+  }
+  index "mcp_oauth_connections_subject_idx" {
+    columns = [column.subject]
+  }
+  index "mcp_oauth_connections_client_id_idx" {
+    columns = [column.client_id]
+  }
+  index "mcp_oauth_connections_refresh_expiry_idx" {
+    columns = [column.refresh_expiry]
+  }
+}
+table "mcp_oauth_registrations" {
+  schema = schema.public
+  column "id" {
+    type = text
+    null = false
+  }
+  column "name" {
+    type = text
+    null = false
+  }
+  column "redirect_uris" {
+    type = text
+    null = false
+  }
+  column "created_at" {
+    type = bigint
+    null = false
+  }
+  column "expires_at" {
+    type = bigint
+    null = true
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  index "mcp_oauth_registrations_expires_at_idx" {
+    columns = [column.expires_at]
+  }
+}
+table "mcp_oauth_client_labels" {
+  schema = schema.public
+  column "client_id" {
+    type = text
+    null = false
+  }
+  column "name" {
+    type = text
+    null = false
+  }
+  column "host" {
+    type = text
+    null = false
+  }
+  column "updated_at" {
+    type = bigint
+    null = false
+  }
+  primary_key {
+    columns = [column.client_id]
   }
 }

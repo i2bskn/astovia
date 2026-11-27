@@ -6,12 +6,87 @@ CREATE TABLE "instance_secrets" (
   "updated_at" bigint NOT NULL,
   PRIMARY KEY ("name")
 );
--- Create "mfa_used_challenges" table
-CREATE TABLE "mfa_used_challenges" (
-  "challenge_hash" text NOT NULL,
-  "expires_at" bigint NOT NULL,
-  PRIMARY KEY ("challenge_hash")
+-- Create "mcp_oauth_client_labels" table
+CREATE TABLE "mcp_oauth_client_labels" (
+  "client_id" text NOT NULL,
+  "name" text NOT NULL,
+  "host" text NOT NULL,
+  "updated_at" bigint NOT NULL,
+  PRIMARY KEY ("client_id")
 );
+-- Create "mcp_oauth_codes" table
+CREATE TABLE "mcp_oauth_codes" (
+  "key" text NOT NULL,
+  "client_id" text NOT NULL,
+  "redirect_uri" text NOT NULL,
+  "subject" text NOT NULL,
+  "scopes" text NOT NULL,
+  "challenge" text NOT NULL,
+  "expires_at" bigint NOT NULL,
+  "consumed" bigint NOT NULL,
+  "reused" bigint NOT NULL,
+  PRIMARY KEY ("key")
+);
+-- Create index "mcp_oauth_codes_client_id_idx" to table: "mcp_oauth_codes"
+CREATE INDEX "mcp_oauth_codes_client_id_idx" ON "mcp_oauth_codes" ("client_id");
+-- Create index "mcp_oauth_codes_expires_at_idx" to table: "mcp_oauth_codes"
+CREATE INDEX "mcp_oauth_codes_expires_at_idx" ON "mcp_oauth_codes" ("expires_at");
+-- Create index "mcp_oauth_codes_subject_idx" to table: "mcp_oauth_codes"
+CREATE INDEX "mcp_oauth_codes_subject_idx" ON "mcp_oauth_codes" ("subject");
+-- Create "mcp_oauth_connections" table
+CREATE TABLE "mcp_oauth_connections" (
+  "id" text NOT NULL,
+  "selector" text NOT NULL,
+  "subject" text NOT NULL,
+  "client_id" text NOT NULL,
+  "scopes" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  "refreshed_at" bigint NOT NULL,
+  "absolute_expiry" bigint NULL,
+  "access" text NOT NULL,
+  "access_expiry" bigint NOT NULL,
+  "refresh" text NOT NULL,
+  "refresh_expiry" bigint NOT NULL,
+  "code" text NULL,
+  "last_used_at" bigint NULL,
+  PRIMARY KEY ("id")
+);
+-- Create index "mcp_oauth_connections_access_key" to table: "mcp_oauth_connections"
+CREATE UNIQUE INDEX "mcp_oauth_connections_access_key" ON "mcp_oauth_connections" ("access");
+-- Create index "mcp_oauth_connections_client_id_idx" to table: "mcp_oauth_connections"
+CREATE INDEX "mcp_oauth_connections_client_id_idx" ON "mcp_oauth_connections" ("client_id");
+-- Create index "mcp_oauth_connections_code_key" to table: "mcp_oauth_connections"
+CREATE UNIQUE INDEX "mcp_oauth_connections_code_key" ON "mcp_oauth_connections" ("code");
+-- Create index "mcp_oauth_connections_refresh_expiry_idx" to table: "mcp_oauth_connections"
+CREATE INDEX "mcp_oauth_connections_refresh_expiry_idx" ON "mcp_oauth_connections" ("refresh_expiry");
+-- Create index "mcp_oauth_connections_selector_key" to table: "mcp_oauth_connections"
+CREATE UNIQUE INDEX "mcp_oauth_connections_selector_key" ON "mcp_oauth_connections" ("selector");
+-- Create index "mcp_oauth_connections_subject_idx" to table: "mcp_oauth_connections"
+CREATE INDEX "mcp_oauth_connections_subject_idx" ON "mcp_oauth_connections" ("subject");
+-- Create "mcp_oauth_registrations" table
+CREATE TABLE "mcp_oauth_registrations" (
+  "id" text NOT NULL,
+  "name" text NOT NULL,
+  "redirect_uris" text NOT NULL,
+  "created_at" bigint NOT NULL,
+  "expires_at" bigint NULL,
+  PRIMARY KEY ("id")
+);
+-- Create index "mcp_oauth_registrations_expires_at_idx" to table: "mcp_oauth_registrations"
+CREATE INDEX "mcp_oauth_registrations_expires_at_idx" ON "mcp_oauth_registrations" ("expires_at");
+-- Create "oidc_logins" table
+CREATE TABLE "oidc_logins" (
+  "key" text NOT NULL,
+  "nonce" text NOT NULL,
+  "verifier" text NOT NULL,
+  "started_at" bigint NOT NULL,
+  "expires_at" bigint NOT NULL,
+  "max_age_seconds" bigint NULL,
+  "app_data" text NULL,
+  PRIMARY KEY ("key")
+);
+-- Create index "oidc_logins_expires_at_idx" to table: "oidc_logins"
+CREATE INDEX "oidc_logins_expires_at_idx" ON "oidc_logins" ("expires_at");
 -- Create "users" table
 CREATE TABLE "users" (
   "id" text NOT NULL,
@@ -22,12 +97,25 @@ CREATE TABLE "users" (
   "role" text NOT NULL DEFAULT 'owner',
   "oidc_issuer" text NULL,
   "oidc_subject" text NULL,
+  "oidc_link_approved_until" bigint NULL,
   PRIMARY KEY ("id")
 );
 -- Create index "users_email_key" to table: "users"
 CREATE UNIQUE INDEX "users_email_key" ON "users" ("email");
 -- Create index "users_oidc_identity_key" to table: "users"
 CREATE UNIQUE INDEX "users_oidc_identity_key" ON "users" ("oidc_issuer", "oidc_subject");
+-- Create "webauthn_ceremonies" table
+CREATE TABLE "webauthn_ceremonies" (
+  "key" text NOT NULL,
+  "subject" text NOT NULL,
+  "record" text NOT NULL,
+  "expires_at" bigint NOT NULL,
+  PRIMARY KEY ("key")
+);
+-- Create index "webauthn_ceremonies_expires_at_idx" to table: "webauthn_ceremonies"
+CREATE INDEX "webauthn_ceremonies_expires_at_idx" ON "webauthn_ceremonies" ("expires_at");
+-- Create index "webauthn_ceremonies_subject_idx" to table: "webauthn_ceremonies"
+CREATE INDEX "webauthn_ceremonies_subject_idx" ON "webauthn_ceremonies" ("subject");
 -- Create "action_items" table
 CREATE TABLE "action_items" (
   "id" text NOT NULL,
@@ -238,6 +326,7 @@ CREATE UNIQUE INDEX "mfa_recovery_codes_code_hash_key" ON "mfa_recovery_codes" (
 CREATE INDEX "mfa_recovery_codes_user_id_idx" ON "mfa_recovery_codes" ("user_id");
 -- Create "mfa_totp" table
 CREATE TABLE "mfa_totp" (
+  "id" text NOT NULL DEFAULT '',
   "user_id" text NOT NULL,
   "secret_sealed" text NOT NULL,
   "last_step" bigint NOT NULL,
@@ -254,6 +343,8 @@ CREATE TABLE "mfa_webauthn_credentials" (
   "name" text NOT NULL,
   "created_at" bigint NOT NULL,
   "last_used_at" bigint NULL,
+  "version" text NOT NULL DEFAULT '',
+  "passkey" bigint NOT NULL DEFAULT 0,
   PRIMARY KEY ("id"),
   CONSTRAINT "mfa_webauthn_credentials_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
 );
@@ -312,59 +403,6 @@ CREATE INDEX "notifications_sent_scheduled_idx" ON "notifications" ("sent_at", "
 CREATE UNIQUE INDEX "notifications_user_dedupe_key" ON "notifications" ("user_id", "dedupe_key", "channel");
 -- Create index "notifications_user_kind_created_idx" to table: "notifications"
 CREATE INDEX "notifications_user_kind_created_idx" ON "notifications" ("user_id", "kind", "created_at");
--- Create "oauth_clients" table
-CREATE TABLE "oauth_clients" (
-  "client_id" text NOT NULL,
-  "kind" text NOT NULL,
-  "name" text NOT NULL,
-  "redirect_uris" text NOT NULL,
-  "auth_method" text NOT NULL,
-  "secret_hash" text NULL,
-  "metadata_expires_at" bigint NULL,
-  "created_at" bigint NOT NULL,
-  "updated_at" bigint NOT NULL,
-  PRIMARY KEY ("client_id")
-);
--- Create "oauth_grants" table
-CREATE TABLE "oauth_grants" (
-  "id" text NOT NULL,
-  "user_id" text NOT NULL,
-  "client_id" text NOT NULL,
-  "client_name" text NOT NULL,
-  "scope" text NOT NULL,
-  "resource" text NOT NULL,
-  "redirect_uri" text NOT NULL,
-  "code_hash" text NOT NULL,
-  "code_challenge" text NOT NULL,
-  "code_expires_at" bigint NOT NULL,
-  "code_used_at" bigint NULL,
-  "created_at" bigint NOT NULL,
-  "expires_at" bigint NOT NULL,
-  "last_used_at" bigint NULL,
-  PRIMARY KEY ("id"),
-  CONSTRAINT "oauth_grants_client_id_fk" FOREIGN KEY ("client_id") REFERENCES "oauth_clients" ("client_id") ON UPDATE NO ACTION ON DELETE NO ACTION,
-  CONSTRAINT "oauth_grants_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
-);
--- Create index "oauth_grants_code_hash_key" to table: "oauth_grants"
-CREATE UNIQUE INDEX "oauth_grants_code_hash_key" ON "oauth_grants" ("code_hash");
--- Create index "oauth_grants_user_created_idx" to table: "oauth_grants"
-CREATE INDEX "oauth_grants_user_created_idx" ON "oauth_grants" ("user_id", "created_at", "id");
--- Create "oauth_tokens" table
-CREATE TABLE "oauth_tokens" (
-  "token_hash" text NOT NULL,
-  "kind" text NOT NULL,
-  "grant_id" text NOT NULL,
-  "user_id" text NOT NULL,
-  "created_at" bigint NOT NULL,
-  "expires_at" bigint NOT NULL,
-  PRIMARY KEY ("token_hash"),
-  CONSTRAINT "oauth_tokens_grant_id_fk" FOREIGN KEY ("grant_id") REFERENCES "oauth_grants" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION,
-  CONSTRAINT "oauth_tokens_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
-);
--- Create index "oauth_tokens_grant_idx" to table: "oauth_tokens"
-CREATE INDEX "oauth_tokens_grant_idx" ON "oauth_tokens" ("grant_id");
--- Create index "oauth_tokens_user_expires_idx" to table: "oauth_tokens"
-CREATE INDEX "oauth_tokens_user_expires_idx" ON "oauth_tokens" ("user_id", "expires_at");
 -- Create "password_resets" table
 CREATE TABLE "password_resets" (
   "id" text NOT NULL,
@@ -383,29 +421,6 @@ CREATE TABLE "password_resets" (
 CREATE UNIQUE INDEX "password_resets_token_hash_key" ON "password_resets" ("token_hash");
 -- Create index "password_resets_user_id_idx" to table: "password_resets"
 CREATE INDEX "password_resets_user_id_idx" ON "password_resets" ("user_id");
--- Create "sessions" table
-CREATE TABLE "sessions" (
-  "id" text NOT NULL,
-  "user_id" text NOT NULL,
-  "expires_at" bigint NOT NULL,
-  "revoked_at" bigint NULL,
-  "created_at" bigint NOT NULL,
-  PRIMARY KEY ("id"),
-  CONSTRAINT "sessions_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
-);
--- Create index "sessions_user_id_idx" to table: "sessions"
-CREATE INDEX "sessions_user_id_idx" ON "sessions" ("user_id");
--- Create "refresh_tokens" table
-CREATE TABLE "refresh_tokens" (
-  "hash" text NOT NULL,
-  "session_id" text NOT NULL,
-  "consumed_at" bigint NULL,
-  "created_at" bigint NOT NULL,
-  PRIMARY KEY ("hash"),
-  CONSTRAINT "refresh_tokens_session_id_fk" FOREIGN KEY ("session_id") REFERENCES "sessions" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
-);
--- Create index "refresh_tokens_session_id_idx" to table: "refresh_tokens"
-CREATE INDEX "refresh_tokens_session_id_idx" ON "refresh_tokens" ("session_id");
 -- Create "slack_connections" table
 CREATE TABLE "slack_connections" (
   "user_id" text NOT NULL,
@@ -453,3 +468,18 @@ CREATE TABLE "web_push_subscriptions" (
 CREATE UNIQUE INDEX "web_push_subscriptions_endpoint_key" ON "web_push_subscriptions" ("endpoint");
 -- Create index "web_push_subscriptions_user_created_idx" to table: "web_push_subscriptions"
 CREATE INDEX "web_push_subscriptions_user_created_idx" ON "web_push_subscriptions" ("user_id", "created_at");
+-- Create "web_sessions" table
+CREATE TABLE "web_sessions" (
+  "id" text NOT NULL,
+  "user_id" text NOT NULL,
+  "authenticated_at" bigint NOT NULL,
+  "last_activity" bigint NOT NULL,
+  "absolute_expiry" bigint NOT NULL,
+  "idle_seconds" bigint NOT NULL,
+  PRIMARY KEY ("id"),
+  CONSTRAINT "web_sessions_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE NO ACTION
+);
+-- Create index "web_sessions_absolute_expiry_idx" to table: "web_sessions"
+CREATE INDEX "web_sessions_absolute_expiry_idx" ON "web_sessions" ("absolute_expiry");
+-- Create index "web_sessions_user_id_idx" to table: "web_sessions"
+CREATE INDEX "web_sessions_user_id_idx" ON "web_sessions" ("user_id");

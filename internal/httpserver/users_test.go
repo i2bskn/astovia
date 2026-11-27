@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -46,10 +48,7 @@ func newUsersAPI(t *testing.T, driver string) *usersAPI {
 			t.Fatal(err)
 		}
 	}
-	a, err := auth.New(s, make([]byte, 32), usersOrigin)
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	now := time.Date(2026, 10, 23, 1, 2, 3, 0, time.UTC)
 	a.Now = func() time.Time { return now }
 	srv := newServer(config.Config{PublicURL: usersOrigin, Secure: true}, a, fstest.MapFS{}, nil)
@@ -71,19 +70,37 @@ func (a *usersAPI) public(path, body, cookie string) *httptest.ResponseRecorder 
 	return serve(a.t, a.handler, r)
 }
 
-// session returns the access token and the refresh cookie of a login
-// response.
+// session returns the session cookie of a login response twice: the
+// credential of the API requests and the cookie of the /auth requests are
+// the same now.
 func (a *usersAPI) session(w *httptest.ResponseRecorder) (string, string) {
 	a.t.Helper()
 	var result authResponse
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
 		a.t.Fatalf("login response: %d %s", w.Code, w.Body.String())
 	}
-	cookies := w.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != CookieName || cookies[0].Value == "" || !cookies[0].HttpOnly || cookies[0].Path != "/auth" {
-		a.t.Fatalf("cookie: %+v", cookies)
+	var cookies []*http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookieName {
+			cookies = append(cookies, c)
+		}
 	}
-	return result.AccessToken, cookies[0].Name + "=" + cookies[0].Value
+	if len(cookies) != 1 || cookies[0].Value == "" || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteLaxMode || cookies[0].Path != "/" {
+		a.t.Fatalf("cookie: %v", w.Header().Values("Set-Cookie"))
+	}
+	cookie := cookies[0].Name + "=" + cookies[0].Value
+	return cookie, cookie
+}
+
+// passwordDigest returns the enrollment guard of the stored password of
+// userID.
+func (a *usersAPI) passwordDigest(userID string) string {
+	a.t.Helper()
+	u, err := a.store.UserByID(context.Background(), userID)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return store.Digest(u.PasswordHash)
 }
 
 func (a *usersAPI) login(email, password string) (string, string) {
@@ -97,9 +114,7 @@ func (a *usersAPI) do(method, path, bearer, body string) *httptest.ResponseRecor
 	if body != "" {
 		r.Header.Set("Content-Type", "application/json")
 	}
-	if bearer != "" {
-		r.Header.Set("Authorization", "Bearer "+bearer)
-	}
+	authorize(r, bearer)
 	return serve(a.t, a.handler, r)
 }
 
@@ -234,20 +249,18 @@ func testUsersAPI(t *testing.T, driver string) {
 	w = api.public("/auth/invitations/accept", `{"token":"`+daveToken+`","password":"dave-password-123"}`, carolCookie)
 	expect(t, w, 200, "")
 	body, keys := jsonKeys(t, w.Body.Bytes())
-	if !reflect.DeepEqual(keys, []string{"access_token", "expires_in", "user"}) {
+	if !reflect.DeepEqual(keys, []string{"user"}) {
 		t.Fatalf("accept keys: %v", keys)
 	}
 	var daveUser userResponse
 	if err := json.Unmarshal(body["user"], &daveUser); err != nil || daveUser.Email != "dave@example.com" || daveUser.Role != "member" || daveUser.PasswordReset != nil {
 		t.Fatalf("accept user: %+v %v", daveUser, err)
 	}
-	dave, daveCookie := api.session(w)
+	dave, _ := api.session(w)
 	if me := decodeJSON[userResponse](t, api.do("GET", "/api/v1/me", dave, "")); me.Email != "dave@example.com" {
 		t.Fatalf("dave: %+v", me)
 	}
 	expect(t, api.do("GET", "/api/v1/me", carol, ""), 401, "unauthorized")
-	expect(t, api.public("/auth/refresh", `{}`, carolCookie), 401, "unauthorized")
-	expect(t, api.public("/auth/refresh", `{}`, daveCookie), 200, "")
 	api.login("dave@example.com", "dave-password-123")
 	carol, _ = api.login("carol@example.com", "correct-password-123")
 
@@ -309,7 +322,7 @@ func testUsersAPI(t *testing.T, driver string) {
 	expect(t, api.do("PATCH", "/api/v1/users/bad.id", alice, `{"role":"owner"}`), 404, "not_found")
 	w = api.do("PATCH", "/api/v1/users/carol-id", alice, `{"role":"owner"}`)
 	r := httptest.NewRequest("PATCH", "/api/v1/users/carol-id", strings.NewReader(`{"role":"owner"}`))
-	r.Header.Set("Authorization", "Bearer "+alice)
+	authorize(r, alice)
 	expect(t, serve(t, api.handler, r), 415, "unsupported_media_type")
 	expect(t, w, 200, "")
 	if got := decodeJSON[adminUserResponse](t, w); got.Role != "owner" || got.ID != "carol-id" {
@@ -337,7 +350,7 @@ func testUsersAPI(t *testing.T, driver string) {
 
 	// A password reset link; a body is ignored.
 	r = httptest.NewRequest("POST", "/api/v1/users/carol-id/password-resets", strings.NewReader("ignored"))
-	r.Header.Set("Authorization", "Bearer "+alice)
+	authorize(r, alice)
 	r.Header.Set("Content-Type", "text/plain")
 	w = serve(t, api.handler, r)
 	expect(t, w, 201, "")
@@ -372,15 +385,14 @@ func testUsersAPI(t *testing.T, driver string) {
 		t.Fatalf("complete user: %+v", got)
 	}
 	carol, _ = api.session(w)
-	expect(t, api.public("/auth/refresh", `{}`, aliceCookie), 401, "unauthorized")
 	expect(t, api.do("GET", "/api/v1/me", alice, ""), 401, "unauthorized")
 	if me := decodeJSON[userResponse](t, api.do("GET", "/api/v1/me", carol, "")); !reflect.DeepEqual(me.PasswordReset, notice) {
 		t.Fatalf("me after reset: %+v", me)
 	}
 	expect(t, api.public("/auth/login", `{"email":"carol@example.com","password":"correct-password-123"}`, ""), 401, "unauthorized")
 	_, cookie := api.login("carol@example.com", "carol-new-password")
-	if got := decodeJSON[authResponse](t, api.public("/auth/refresh", `{}`, cookie)).User; !reflect.DeepEqual(got.PasswordReset, notice) {
-		t.Fatalf("refresh after reset: %+v", got)
+	if got := decodeJSON[userResponse](t, api.do("GET", "/api/v1/me", cookie, "")); !reflect.DeepEqual(got.PasswordReset, notice) {
+		t.Fatalf("me after sign-in: %+v", got)
 	}
 	for _, path := range []string{"/auth/password-resets/inspect", "/auth/password-resets/complete"} {
 		expect(t, api.public(path, linkBody(path, carolToken), ""), 404, "reset_invalid")
@@ -464,7 +476,7 @@ func TestAccountLinkEndpoints(t *testing.T) {
 			{usersOrigin, "text/plain", `{"token":"x"}`, 415},
 			{usersOrigin, "application/json", `{"token":"x","extra":1}`, 400},
 			{usersOrigin, "application/json", `null`, 400},
-			{usersOrigin, "application/json", `{"token":"` + strings.Repeat("x", 4096) + `"}`, 413},
+			{usersOrigin, "application/json", `{"token":"` + strings.Repeat("x", accountBodyLimit) + `"}`, 413},
 		} {
 			r := httptest.NewRequest("POST", path, strings.NewReader(tc.body))
 			if tc.origin != "" {
@@ -509,8 +521,8 @@ func TestAccountLinkEndpoints(t *testing.T) {
 	api.login("alice@example.com", "correct-password-123")
 }
 
-// A failure to read the password reset notice does not fail login,
-// refresh or /api/v1/me; the notice is null.
+// A failure to read the password reset notice does not fail login or
+// /api/v1/me; the notice is null.
 func TestResetNoticeFailure(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
@@ -528,13 +540,9 @@ func TestResetNoticeFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			w := api.public("/auth/login", `{"email":"alice@example.com","password":"correct-password-123"}`, "")
-			access, cookie := api.session(w)
+			access, _ := api.session(w)
 			if !strings.Contains(w.Body.String(), `"password_reset":null`) {
 				t.Fatalf("login: %s", w.Body.String())
-			}
-			w = api.public("/auth/refresh", `{}`, cookie)
-			if _, next := api.session(w); next == cookie || !strings.Contains(w.Body.String(), `"password_reset":null`) {
-				t.Fatalf("refresh: %s", w.Body.String())
 			}
 			w = api.do("GET", "/api/v1/me", access, "")
 			expect(t, w, 200, "")
@@ -542,5 +550,71 @@ func TestResetNoticeFailure(t *testing.T) {
 				t.Fatalf("me: %s", w.Body.String())
 			}
 		})
+	}
+}
+
+// argon2Bytes is the memory of one Argon2id derivation of authlume's
+// password package (19 MiB), which every derivation allocates anew.
+const argon2Bytes = 19_456 * 1024
+
+// derivations returns how many key derivations f performed, counted by the
+// memory it allocated: authlume exposes no hook to count them, and each
+// derivation allocates argon2Bytes while the rest of a sign-in allocates
+// far less.
+func derivations(f func()) int {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return int((after.TotalAlloc - before.TotalAlloc) / argon2Bytes)
+}
+
+// TestPasswordLookupDerivations checks that a sign-in derives one key
+// whoever it names: a user with a password, an unknown or malformed
+// address, a disabled user and a user without a password. The failures are
+// all the same error.
+func TestPasswordLookupDerivations(t *testing.T) {
+	a := newUsersAPI(t, "sqlite")
+	ctx := context.Background()
+	hash, err := auth.Password("dave-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []store.User{
+		{ID: "dave-id", Email: "dave@example.com", PasswordHash: hash, CreatedAt: 3, Role: store.RoleMember},
+		{ID: "erin-id", Email: "erin@example.com", PasswordHash: store.NoPasswordHash, CreatedAt: 4, Role: store.RoleMember},
+	} {
+		if err := a.store.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.store.ChangeUser(ctx, "dave@example.com", "", true, a.now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	// The count itself: one hash is one derivation, none is none.
+	if n := derivations(func() { _, _ = auth.Password("x-password-123") }); n != 1 {
+		t.Fatalf("a hash counts %d derivations", n)
+	}
+	if n := derivations(func() {}); n != 0 {
+		t.Fatalf("nothing counts %d derivations", n)
+	}
+	for _, tc := range []struct {
+		name, email, password string
+		ok                    bool
+	}{
+		{"correct", "alice@example.com", "correct-password-123", true},
+		{"wrong", "alice@example.com", "wrong-password-123", false},
+		{"unknown", "nobody@example.com", "correct-password-123", false},
+		{"malformed", "not an address", "correct-password-123", false},
+		{"disabled", "dave@example.com", "dave-password-123", false},
+		{"no password", "erin@example.com", "correct-password-123", false},
+	} {
+		var err error
+		if n := derivations(func() { _, err = a.srv.verifyPassword(ctx, tc.email, tc.password) }); n != 1 {
+			t.Errorf("%s: %d derivations", tc.name, n)
+		}
+		if tc.ok != (err == nil) || (!tc.ok && !errors.Is(err, store.ErrUnauthorized)) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
 	}
 }

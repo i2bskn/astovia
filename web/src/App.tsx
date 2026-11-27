@@ -1,7 +1,8 @@
 import { useEffect, useId, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch, useNavigate, useParams } from 'react-router';
-import { auth, startOIDCLogin } from './auth';
+import { auth, oidcReturnTo } from './auth';
+import OIDCLoginForm from './OIDCLoginForm';
 import type { User } from './auth';
 import { authConfig, isSigninErrorPath, signinErrorMessage, signinReason } from './authConfig';
 import type { AuthConfig } from './authConfig';
@@ -14,7 +15,7 @@ import { candidates } from './candidates';
 import ConsentPage from './ConsentPage';
 import { dateTime } from './format';
 import GoogleCallbackPage from './GoogleCallbackPage';
-import { linkPageAt } from './links';
+import { linkPageAt, maxPasswordBytes, passwordTooLong } from './links';
 import MFAStep from './MFAStep';
 import { resetNoticeKey, resetNoticeText, showResetNotice } from './resetNotice';
 import { AutoIcon, SettingsIcon, SidebarIcon, SparkleIcon, TasksIcon } from './icons';
@@ -56,8 +57,8 @@ function LoginForm() {
       setValidation('メールアドレスとパスワードを入力してください。');
       return;
     }
-    if (new TextEncoder().encode(password).length > 72) {
-      setValidation('パスワードは72バイト以内で入力してください。');
+    if (passwordTooLong(password)) {
+      setValidation(`パスワードは${maxPasswordBytes}バイト以内で入力してください。`);
       return;
     }
     setValidation(null);
@@ -84,13 +85,13 @@ function LoginForm() {
 }
 
 // OIDCLoginCard replaces the password form when single sign-on (OIDC) signs
-// users in. It never leaves on its own, so that a failing sign-in cannot
-// loop; it returns to the current screen afterwards.
+// users in. It returns to the current screen after the sign-in.
 function OIDCLoginCard() {
+  const location = useLocation();
   return <section className="gate-card" aria-labelledby="login-heading">
     <h1 id="login-heading">おかえりなさい</h1>
     <p className="gate-lead"><Phrased text="シングルサインオンでログインして、今日のタスクを確認しましょう。" /></p>
-    <button className="button primary block" type="button" onClick={() => startOIDCLogin(window.location.pathname, window.location.search)}>シングルサインオンでログイン</button>
+    <OIDCLoginForm returnTo={oidcReturnTo(location.pathname, location.search)} label="シングルサインオンでログイン" />
     <p className="gate-help"><Phrased text="ログインできる人は、この Astovia の運用者が決めています。" /></p>
   </section>;
 }
@@ -103,16 +104,13 @@ function SigninErrorPage({ config }: { config: AuthConfig }) {
   const navigate = useNavigate();
   const headingID = useId();
 
-  function retry(): void {
-    if (config.mode === 'oidc') startOIDCLogin('/', '');
-    else void navigate('/', { replace: true });
-  }
-
   return <section className="gate-card status-card" aria-labelledby={headingID}>
     <h1 id={headingID}>ログインできませんでした</h1>
     <p className="gate-lead" role="alert"><Phrased text={signinErrorMessage(signinReason(location.search))} /></p>
     {state.error ? <p className="notice error" role="alert">{state.error}</p> : null}
-    <button className="button primary block" type="button" onClick={retry}>もう一度ログイン</button>
+    {config.mode === 'oidc'
+      ? <OIDCLoginForm returnTo="/" label="もう一度ログイン" />
+      : <button className="button primary block" type="button" onClick={() => { void navigate('/', { replace: true }); }}>もう一度ログイン</button>}
   </section>;
 }
 
@@ -346,7 +344,7 @@ export default function App() {
   const configState = useSyncExternalStore(authConfig.subscribe, authConfig.getSnapshot);
   const signedIn = state.status === 'authenticated' && state.user !== null;
   // The OAuth consent page replaces the workspace on this path.
-  const consentPage = useMatch('/consent') !== null;
+  const consentPage = useMatch('/oauth/authorize') !== null;
   const pathname = useLocation().pathname;
   // The invitation and password reset links have their own screens, before
   // the login check: they are used signed out.

@@ -8,11 +8,31 @@ sql:
         package: sqlitedb
         out: internal/store/sqlitedb
         overrides:
-          - column: sessions.revoked_at
+          - column: users.oidc_link_approved_until
             go_type:
               import: database/sql
               type: NullInt64
-          - column: refresh_tokens.consumed_at
+          - column: oidc_logins.max_age_seconds
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: oidc_logins.app_data
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: mcp_oauth_connections.absolute_expiry
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: mcp_oauth_connections.code
+            go_type:
+              import: database/sql
+              type: NullString
+          - column: mcp_oauth_connections.last_used_at
+            go_type:
+              import: database/sql
+              type: NullInt64
+          - column: mcp_oauth_registrations.expires_at
             go_type:
               import: database/sql
               type: NullInt64
@@ -25,22 +45,6 @@ sql:
               import: database/sql
               type: NullInt64
           - column: api_tokens.last_used_at
-            go_type:
-              import: database/sql
-              type: NullInt64
-          - column: oauth_clients.secret_hash
-            go_type:
-              import: database/sql
-              type: NullString
-          - column: oauth_clients.metadata_expires_at
-            go_type:
-              import: database/sql
-              type: NullInt64
-          - column: oauth_grants.code_used_at
-            go_type:
-              import: database/sql
-              type: NullInt64
-          - column: oauth_grants.last_used_at
             go_type:
               import: database/sql
               type: NullInt64

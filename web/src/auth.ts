@@ -1,3 +1,9 @@
+// The import names the .ts file so that the test build, which compiles
+// the modules one by one, can resolve it (--rewriteRelativeImportExtensions).
+import { oidcLoginFlag } from './oidcLogin.ts';
+
+export { markOIDCLogin, oidcLoginPath, oidcReturnTo } from './oidcLogin.ts';
+
 export type Role = 'owner' | 'member';
 
 // PasswordResetNotice reports a password reset link the user completed in
@@ -27,9 +33,10 @@ export function isUser(value: unknown): value is User {
   return notice === null || (isRecord(notice) && typeof notice.at === 'string' && typeof notice.by_email === 'string');
 }
 
+// AuthResponse is the answer to a sign-in that started a session. The
+// session itself is an HttpOnly cookie the browser keeps; the page never
+// sees it.
 interface AuthResponse {
-  access_token: string;
-  expires_in: number;
   user: User;
 }
 
@@ -95,13 +102,12 @@ export function isSuperseded(error: unknown): boolean {
 }
 
 let state: AuthState = { status: 'loading', user: null, busy: null, error: null, mfa: null };
-let accessToken: string | null = null;
 // enrolledSession is the session of an enrollment before the first sign-in.
-// It is held back until the user has saved the recovery codes.
+// The server has set its cookie already; the tab holds it back until the
+// user has saved the recovery codes.
 let enrolledSession: { data: AuthResponse; expected: number } | null = null;
 let generation = 0;
 let initialized = false;
-let refreshPromise: Promise<void> | null = null;
 const listeners = new Set<() => void>();
 const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('astovia-auth') : null;
 
@@ -112,7 +118,6 @@ function publish(next: AuthState): void {
 
 // anonymous signs the tab out. A pending second factor is dropped with it.
 function anonymous(error: string | null = null): void {
-  accessToken = null;
   enrolledSession = null;
   publish({ status: 'anonymous', user: null, busy: null, error, mfa: null });
 }
@@ -121,6 +126,8 @@ function isCurrent(expected: number): void {
   if (expected !== generation) throw new SupersededError();
 }
 
+// withAuthLock serializes the requests that start or end a session across
+// the tabs of this browser, which share the session cookie.
 async function withAuthLock<T>(operation: () => Promise<T>): Promise<T> {
   if (navigator.locks) return navigator.locks.request('astovia-auth', operation);
   return operation();
@@ -139,13 +146,8 @@ async function post(path: string, body: object): Promise<Response> {
 }
 
 function checkAuth(data: unknown): AuthResponse {
-  if (
-    typeof data !== 'object' || data === null ||
-    !('access_token' in data) || typeof data.access_token !== 'string' || !data.access_token ||
-    !('expires_in' in data) || typeof data.expires_in !== 'number' || data.expires_in <= 0 ||
-    !('user' in data) || !isUser(data.user)
-  ) throw new Error('Unexpected authentication response');
-  return data as AuthResponse;
+  if (!isRecord(data) || !isUser(data.user)) throw new Error('Unexpected authentication response');
+  return { user: data.user };
 }
 
 async function readAuth(response: Response): Promise<AuthResponse> {
@@ -170,7 +172,7 @@ type SignIn = { session: AuthResponse; mfa: null } | { session: null; mfa: Pendi
 async function readSignIn(response: Response): Promise<SignIn> {
   const data: unknown = await response.json();
   if (isRecord(data) && 'mfa' in data) {
-    if ('access_token' in data) throw new Error('Unexpected authentication response');
+    if ('user' in data) throw new Error('Unexpected authentication response');
     return { session: null, mfa: readPendingMFA(data.mfa) };
   }
   return { session: checkAuth(data), mfa: null };
@@ -189,7 +191,6 @@ function readEnrolled(data: unknown): { session: AuthResponse; codes: string[] }
 
 function accept(data: AuthResponse, expected: number): void {
   isCurrent(expected);
-  accessToken = data.access_token;
   enrolledSession = null;
   publish({ status: 'authenticated', user: data.user, busy: null, error: null, mfa: null });
 }
@@ -198,7 +199,6 @@ function accept(data: AuthResponse, expected: number): void {
 // signed out: no session exists yet and the other tabs are not told.
 function pend(mfa: PendingMFA, expected: number): void {
   isCurrent(expected);
-  accessToken = null;
   enrolledSession = null;
   publish({ status: 'anonymous', user: null, busy: null, error: null, mfa });
 }
@@ -218,7 +218,6 @@ function mfaEnded(error: unknown, expected: number, enrolling: boolean): boolean
       : 'ログインできませんでした。もう一度ログインしてください。';
   } else return false;
   generation += 1;
-  refreshPromise = null;
   anonymous(message);
   return true;
 }
@@ -240,49 +239,33 @@ async function mfaPost(path: MFABeginPath | MFAVerifyPath | MFAEnrollPath, body:
   }
 }
 
-function refresh(): Promise<void> {
-  if (state.busy === 'logout') return Promise.reject(new SupersededError());
-  if (refreshPromise) return refreshPromise;
-  const expected = generation;
-  const operation = withAuthLock(async () => {
-    isCurrent(expected);
-    const data = await readAuth(await post('/auth/refresh', {}));
-    accept(data, expected);
-  }).catch((error: unknown) => {
-    if (expected === generation && error instanceof APIError && error.status === 401) anonymous();
-    throw error;
-  });
-  refreshPromise = operation;
-  void operation.finally(() => {
-    if (refreshPromise === operation) refreshPromise = null;
-  }).catch(() => { /* The caller handles the original operation's failure. */ });
-  return operation;
-}
-
 function connectionMessage(error: unknown): string {
   if (error instanceof APIError && error.status === 429) return '試行回数が上限に達しました。1分ほど待ってから、もう一度お試しください。';
   if (error instanceof APIError && error.status === 403) return '接続先の設定を確認できませんでした。運用者に連絡してください。';
   return 'サーバーに接続できませんでした。少し待ってから、もう一度お試しください。';
 }
 
+// restore reads GET /api/v1/me to learn whether the session cookie of this
+// browser signs a user in: on a page load, on a retry and when another tab
+// signed in. 401 means signed out.
 async function restore(): Promise<void> {
   const expected = generation;
   enrolledSession = null;
   publish({ ...state, status: 'loading', error: null, mfa: null });
   try {
-    await refresh();
-    await verifyProfile(expected);
+    const user = await withAuthLock(async () => {
+      isCurrent(expected);
+      return await request<unknown>('/api/v1/me');
+    });
+    isCurrent(expected);
+    if (!isUser(user)) throw new Error('Unexpected user response');
+    publish({ status: 'authenticated', user, busy: null, error: null, mfa: null });
   } catch (error) {
     if (expected !== generation || error instanceof SupersededError) return;
     if (error instanceof APIError && error.status === 401) return;
     publish({ status: 'unavailable', user: null, busy: null, error: connectionMessage(error), mfa: null });
   }
 }
-
-// oidcLoginFlag marks, in sessionStorage, a single sign-on (OIDC) sign-in
-// started from this tab. The page loaded after the sign-in tells the other
-// tabs, as a password login does.
-const oidcLoginFlag = 'astovia-oidc-login';
 
 // announceOIDCLogin runs after the first restore of a page load. When the
 // tab started a single sign-on sign-in and is now signed in, the other tabs
@@ -298,30 +281,9 @@ function announceOIDCLogin(): void {
   if (started && state.status === 'authenticated') channel?.postMessage('session-changed');
 }
 
-// oidcLoginURL starts the single sign-on (OIDC) sign-in, returning to the
-// screen at pathname and search afterwards.
-export function oidcLoginURL(pathname: string, search: string): string {
-  return `/auth/oidc/login?return_to=${encodeURIComponent(pathname + search)}`;
-}
-
-// startOIDCLogin leaves for the single sign-on sign-in. It is only called
-// from a button: an automatic redirect could loop on a failure. A
-// navigation is used instead of a form, which form-action 'self' would stop
-// at the redirect to the provider.
-export function startOIDCLogin(pathname: string, search: string): void {
-  try {
-    sessionStorage.setItem(oidcLoginFlag, '1');
-  } catch {
-    // Without storage the other tabs notice the session on their next
-    // refresh.
-  }
-  location.assign(oidcLoginURL(pathname, search));
-}
-
 channel?.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (event.data !== 'logout' && event.data !== 'session-changed') return;
   generation += 1;
-  refreshPromise = null;
   anonymous();
   if (event.data === 'session-changed') void restore();
 });
@@ -340,7 +302,6 @@ export const auth = {
   retry(): void { void restore(); },
   async login(email: string, password: string): Promise<void> {
     const expected = ++generation;
-    refreshPromise = null;
     enrolledSession = null;
     publish({ status: 'anonymous', user: null, busy: 'login', error: null, mfa: null });
     try {
@@ -371,7 +332,6 @@ export const auth = {
   // it resolves with the state's mfa set and the tab signed out.
   async completeLink(path: '/auth/invitations/accept' | '/auth/password-resets/complete', token: string, password: string): Promise<void> {
     const expected = ++generation;
-    refreshPromise = null;
     enrolledSession = null;
     publish({ status: 'anonymous', user: null, busy: 'login', error: null, mfa: null });
     let signedIn: boolean;
@@ -447,16 +407,14 @@ export const auth = {
   cancelMFA(): void {
     if (!state.mfa) return;
     generation += 1;
-    refreshPromise = null;
     anonymous();
   },
   // reloadProfile reads /api/v1/me again, for example after the role changed.
   async reloadProfile(): Promise<void> {
-    await verifyProfile(generation);
+    await verifyProfile(generation, false);
   },
   async logout(): Promise<void> {
     const expected = ++generation;
-    refreshPromise = null;
     publish({ ...state, busy: 'logout', error: null });
     try {
       await withAuthLock(async () => {
@@ -473,24 +431,15 @@ export const auth = {
   },
 };
 
-// Private API requests retry once after a single-flight refresh. Tokens stay in memory.
+// request sends a private API request. The browser adds the session cookie
+// (same origin); nothing else identifies the user. A 401 means the session
+// ended, at its limits, by a logout in another tab or by the operator, and
+// signs the tab out, back to the login screen.
 export async function request<T>(path: `/api/v1/${string}`, init?: RequestInit): Promise<T> {
   if (state.busy === 'logout') throw new SupersededError();
   const expected = generation;
-  const send = () => fetch(path, {
-    ...init,
-    credentials: 'same-origin',
-    cache: 'no-store',
-    headers: { ...Object.fromEntries(new Headers(init?.headers)), Authorization: `Bearer ${accessToken ?? ''}` },
-  });
-  let response = await send();
+  const response = await fetch(path, { ...init, credentials: 'same-origin', cache: 'no-store' });
   isCurrent(expected);
-  if (response.status === 401) {
-    await refresh();
-    isCurrent(expected);
-    response = await send();
-    isCurrent(expected);
-  }
   if (!response.ok) {
     if (response.status === 401) anonymous();
     throw new APIError(response.status, await errorCode(response));
@@ -500,7 +449,14 @@ export async function request<T>(path: `/api/v1/${string}`, init?: RequestInit):
   return await response.json() as T;
 }
 
-async function verifyProfile(expected: number): Promise<void> {
+// cookieMessage explains a sign-in whose session the next request did not
+// carry: the browser did not keep the session cookie.
+const cookieMessage = 'ログインを保持できませんでした。このブラウザーで Cookie を保存できるか確認して、もう一度ログインしてください。';
+
+// verifyProfile reads /api/v1/me again. Right after a sign-in (signedIn), a
+// 401 means that the browser dropped the session cookie the server just
+// set; the tab goes back to the login form with cookieMessage.
+async function verifyProfile(expected: number, signedIn = true): Promise<void> {
   try {
     const user = await request<unknown>('/api/v1/me');
     isCurrent(expected);
@@ -508,7 +464,10 @@ async function verifyProfile(expected: number): Promise<void> {
     publish({ ...state, user });
   } catch (error) {
     if (expected !== generation || error instanceof SupersededError) return;
-    if (error instanceof APIError && error.status === 401) return;
+    if (error instanceof APIError && error.status === 401) {
+      if (signedIn) publish({ ...state, error: cookieMessage });
+      return;
+    }
     publish({ ...state, error: 'アカウント情報を確認できませんでした。接続を確認してページを再読み込みしてください。' });
   }
 }

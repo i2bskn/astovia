@@ -54,19 +54,21 @@ test('the sign-in error screen explains each reason', async () => {
   assert.equal(isSigninErrorPath('/signin-error/'), true);
   for (const p of ['/', '/signin-error//', '/signin-errors', '/signin-error/x']) assert.equal(isSigninErrorPath(p), false, p);
 
-  assert.equal(signinReason('?reason=denied'), 'denied');
+  assert.equal(signinReason('?reason=rate_limited'), 'rate_limited');
   assert.equal(signinReason(''), null);
   assert.equal(signinReason('?reason=a&reason=b'), null);
 
   assert.match(signinErrorMessage('failed'), /ログインできませんでした/);
-  assert.match(signinErrorMessage('denied'), /ログインが許可されませんでした.*ログインサービスからログアウト/);
-  assert.equal(signinErrorMessage('not_allowed'), 'このアカウントではログインできません。招待されていないか、別のアカウントで登録されています。この Astovia のオーナーに確認してください。');
+  // The provider's refusal is reported as failed; denied is gone.
+  assert.equal(signinErrorMessage('denied'), signinErrorMessage('failed'));
+  assert.equal(signinErrorMessage('not_allowed'), 'このアカウントではログインできません。招待されていないか、別のアカウントで登録されているか、運用者の承認がまだです。この Astovia のオーナーに確認してください。');
+  assert.match(signinErrorMessage('rate_limited'), /試行回数が上限に達しました.*1分ほど待って/);
   assert.match(signinErrorMessage('email_not_verified'), /メールアドレスが確認済みでないため/);
   assert.equal(signinErrorMessage('unsupported_account'), 'この Google アカウントではログインできません。@gmail.com のアドレスか Google Workspace のアカウントでログインしてください。');
   assert.match(signinErrorMessage('unavailable'), /ログインサービスに接続できませんでした.*しばらくしてから/);
   assert.match(signinErrorMessage('disabled'), /無効化されています/);
   assert.match(signinErrorMessage('return_too_long'), /元の画面に戻れませんでした/);
-  const messages = new Set(['failed', 'denied', 'not_allowed', 'email_not_verified', 'unsupported_account', 'unavailable', 'disabled', 'return_too_long'].map(signinErrorMessage));
+  const messages = new Set(['failed', 'not_allowed', 'email_not_verified', 'unsupported_account', 'unavailable', 'disabled', 'return_too_long', 'rate_limited'].map(signinErrorMessage));
   assert.equal(messages.size, 8);
   for (const reason of [null, '', 'unknown', 'constructor', '__proto__', 'toString']) assert.equal(signinErrorMessage(reason), signinErrorMessage('failed'), String(reason));
 });

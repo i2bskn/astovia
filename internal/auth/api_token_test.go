@@ -60,24 +60,19 @@ func TestIsAPIToken(t *testing.T) {
 func TestAuthenticateAPIToken(t *testing.T) {
 	ctx := context.Background()
 	s, _ := testutil.Database(t, "sqlite")
-	a, err := New(s, contractSecret, "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := New(s)
 	now := time.Unix(1_800_000_000, 0)
 	a.Now = func() time.Time { return now }
 	u := store.User{ID: "alice-id", Email: "alice@example.com", PasswordHash: "x", Role: store.RoleOwner}
-	if err = s.CreateUser(ctx, u); err != nil {
+	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Login(ctx, u, store.Session{ID: "sid", UserID: u.ID, ExpiresAt: now.Unix() + 60, CreatedAt: now.Unix()}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: now.Unix()}); err != nil {
-		t.Fatal(err)
-	}
+	_, sid := testutil.Session(t, s, u.ID, now)
 	raw, hash, err := NewAPIToken()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.CreateAPIToken(ctx, store.APIToken{ID: "tok", UserID: u.ID, Name: "x", CreatedAt: now.Unix()}, hash, "sid", now.Unix()); err != nil {
+	if err = s.CreateAPIToken(ctx, store.APIToken{ID: "tok", UserID: u.ID, Name: "x", CreatedAt: now.Unix()}, hash, sid, now.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := a.AuthenticateAPIToken(ctx, raw)

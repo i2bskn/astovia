@@ -3,7 +3,6 @@ package httpserver
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,10 +167,7 @@ func newTryAPI(t *testing.T, driver string) *tryAPI {
 			t.Fatal(err)
 		}
 	}
-	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	now := time.Date(2026, 10, 24, 1, 2, 3, 0, time.UTC)
 	a.Now = func() time.Time { return now }
 	api := &tryAPI{t: t, store: s, now: now, ai: &fakeTryAI{}, gh: &fakeTryGitHub{},
@@ -661,26 +657,6 @@ func testAIInstructionTry(t *testing.T, driver string) {
 	expectStatus(t, api.do("GET", "/api/v1/ai/instructions/samples?scope=slack.detect", "", ""), 401, "unauthorized")
 	tok := (&tokenAPI{t: t, handler: api.handler}).issue(api.alice, "x").Token
 	expectStatus(t, api.do("POST", try, tok, tryBody(store.InstructionSlackDetect, "mention", "", "")), 401, "unauthorized")
-}
-
-// sessionID returns the session of an access token, from its sid claim.
-func sessionID(t *testing.T, jwt string) string {
-	t.Helper()
-	parts := strings.Split(jwt, ".")
-	if len(parts) != 3 {
-		t.Fatalf("token: %s", jwt)
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var claims struct {
-		SID string `json:"sid"`
-	}
-	if err = json.Unmarshal(raw, &claims); err != nil || claims.SID == "" {
-		t.Fatalf("claims: %s %v", raw, err)
-	}
-	return claims.SID
 }
 
 func TestAIInstructionTryCoolingDown(t *testing.T) {

@@ -15,8 +15,8 @@ import (
 
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/config"
-	"github.com/i2bskn/astovia/internal/mfa"
 	"github.com/i2bskn/astovia/internal/store"
+	"github.com/i2bskn/astovia/internal/testutil"
 )
 
 const mfaPassword = "correct-password-123"
@@ -76,7 +76,7 @@ func (a *mfaAPI) challenge(w *httptest.ResponseRecorder) mfaChallengeResponse {
 	if _, keys = jsonKeys(a.t, inner["methods"]); !reflect.DeepEqual(keys, []string{"recovery", "totp", "webauthn"}) {
 		a.t.Fatalf("methods keys: %v", keys)
 	}
-	if len(w.Header().Values("Set-Cookie")) != 0 {
+	if issuedCookie(w) {
 		a.t.Fatalf("cookie set without a session: %v", w.Header().Values("Set-Cookie"))
 	}
 	out := decodeJSON[mfaPendingResponse](a.t, w).MFA
@@ -100,7 +100,7 @@ func (a *mfaAPI) pending(email string) mfaChallengeResponse {
 // code returns the code of secret at the current time step plus offset.
 func (a *mfaAPI) code(secret string, offset int64) string {
 	a.t.Helper()
-	code, ok := mfa.TOTPCode(secret, mfa.TOTPStep(*a.now)+offset)
+	code, ok := testutil.TOTPCode(secret, testutil.TOTPStep(*a.now)+offset)
 	if !ok {
 		a.t.Fatal("no code")
 	}
@@ -175,13 +175,36 @@ func (a *mfaAPI) status(access string) mfaStatusResponse {
 	return decodeJSON[mfaStatusResponse](a.t, w)
 }
 
+// issuedCookie tells whether w sets a session cookie with a value; a
+// response may clear the cookie of the browser without starting a session.
+func issuedCookie(w *httptest.ResponseRecorder) bool {
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookieName && c.Value != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // noSession checks that a failed response starts no session.
 func noSession(t *testing.T, w *httptest.ResponseRecorder, status int, code string) {
 	t.Helper()
 	expect(t, w, status, code)
-	if len(w.Header().Values("Set-Cookie")) != 0 || strings.Contains(w.Body.String(), "access_token") {
+	if issuedCookie(w) || strings.Contains(w.Body.String(), `"user"`) {
 		t.Fatalf("a failure started a session: %v %s", w.Header().Values("Set-Cookie"), w.Body.String())
 	}
+}
+
+// setsCookieBesidesHandle reports whether w sets a cookie other than the
+// removal of the cookie of the WebAuthn ceremony handle, which the routes
+// that finish a ceremony send whatever the outcome.
+func setsCookieBesidesHandle(w *httptest.ResponseRecorder) bool {
+	for _, c := range w.Result().Cookies() {
+		if c.Name != webauthnCookie || c.Value != "" || c.MaxAge >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 var recoveryCodePattern = regexp.MustCompile(`^[a-km-np-z2-9]{4}(-[a-km-np-z2-9]{4}){3}$`)
@@ -213,7 +236,7 @@ func TestMFAGate(t *testing.T) {
 
 		// No factor and none required: the login response is unchanged.
 		w := api.public("/auth/login", `{"email":"alice@example.com","password":"`+mfaPassword+`"}`, "")
-		if _, keys := jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"access_token", "expires_in", "user"}) {
+		if _, keys := jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"user"}) {
 			t.Fatalf("login keys: %v", keys)
 		}
 		alice, aliceCookie := api.session(w)
@@ -226,33 +249,34 @@ func TestMFAGate(t *testing.T) {
 		if !ch.Enrolled || ch.Methods != (mfaMethodsResponse{TOTP: true, Recovery: true}) {
 			t.Fatalf("challenge: %+v", ch.Methods)
 		}
-		noSession(t, api.public("/auth/refresh", `{}`, ""), 401, "unauthorized")
 		// A wrong password still fails as before, and tells nothing.
 		noSession(t, api.public("/auth/login", `{"email":"alice@example.com","password":"wrong-password-123"}`, ""), 401, "unauthorized")
-		// The session that enabled the factor is kept, and so is its refresh.
+		// The session that enabled the factor is kept.
 		expect(t, api.do("GET", "/api/v1/me", alice, ""), 200, "")
-		_, aliceCookie = api.session(api.public("/auth/refresh", `{}`, aliceCookie))
+		expect(t, api.do("GET", "/api/v1/me", aliceCookie, ""), 200, "")
 
 		// The code starts the session.
 		w = api.post("/auth/mfa/totp", map[string]string{"mfa_token": ch.Token, "code": api.code(secret, 0)})
-		if _, keys := jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"access_token", "expires_in", "user"}) {
+		if _, keys := jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"user"}) {
 			t.Fatalf("totp keys: %v", keys)
 		}
 		access, cookie := api.session(w)
 		if got := decodeJSON[userResponse](t, api.do("GET", "/api/v1/me", access, "")); got.ID != "alice-id" {
 			t.Fatalf("me: %+v", got)
 		}
-		api.session(api.public("/auth/refresh", `{}`, cookie))
+		expect(t, api.do("GET", "/api/v1/me", cookie, ""), 200, "")
 		// The same code is not accepted again, with the same token or a new
 		// sign-in; neither is the code of an earlier step.
 		noSession(t, api.post("/auth/mfa/totp", map[string]string{"mfa_token": ch.Token, "code": api.code(secret, 0)}), 401, "mfa_code_invalid")
 		again := api.pending("alice@example.com")
 		noSession(t, api.post("/auth/mfa/totp", map[string]string{"mfa_token": again.Token, "code": api.code(secret, 0)}), 401, "mfa_code_invalid")
 		noSession(t, api.post("/auth/mfa/totp", map[string]string{"mfa_token": again.Token, "code": api.code(secret, -1)}), 401, "mfa_code_invalid")
-		// The code of the next step is accepted, and spends the current one.
-		api.session(api.post("/auth/mfa/totp", map[string]string{"mfa_token": again.Token, "code": api.code(secret, 1)}))
-		api.advance(30 * time.Second)
-		noSession(t, api.post("/auth/mfa/totp", map[string]string{"mfa_token": again.Token, "code": api.code(secret, 0)}), 401, "mfa_code_invalid")
+		// The code of the next step is not accepted before its period.
+		noSession(t, api.post("/auth/mfa/totp", map[string]string{"mfa_token": again.Token, "code": api.code(secret, 1)}), 401, "mfa_code_invalid")
+		// The code of the step before is accepted while it is unused, once.
+		api.advance(time.Minute)
+		api.session(api.post("/auth/mfa/totp", map[string]string{"mfa_token": again.Token, "code": api.code(secret, -1)}))
+		noSession(t, api.post("/auth/mfa/totp", map[string]string{"mfa_token": again.Token, "code": api.code(secret, -1)}), 401, "mfa_code_invalid")
 		api.advance(30 * time.Second)
 
 		// A user without an authenticator app has no code that works.
@@ -288,12 +312,14 @@ func TestMFAGate(t *testing.T) {
 		if ch := api.pending("alice@example.com"); ch.Enrolled {
 			t.Fatalf("owners: alice without a factor: %+v", ch)
 		}
+		// The reset revoked alice's sessions.
+		expect(t, api.do("GET", "/api/v1/me", aliceCookie, ""), 401, "unauthorized")
 		api.use(config.MFAOff, false)
-		api.login("alice@example.com", mfaPassword)
+		_, aliceCookie = api.login("alice@example.com", mfaPassword)
 		// Requiring a factor does not end the sessions that exist.
 		api.use(config.MFAAll, false)
-		api.session(api.public("/auth/refresh", `{}`, carolCookie))
-		api.session(api.public("/auth/refresh", `{}`, aliceCookie))
+		expect(t, api.do("GET", "/api/v1/me", carolCookie, ""), 200, "")
+		expect(t, api.do("GET", "/api/v1/me", aliceCookie, ""), 200, "")
 	})
 }
 
@@ -321,7 +347,7 @@ func TestMFAGateAfterLinks(t *testing.T) {
 		if _, err := api.store.UserByEmail(context.Background(), "dave@example.com"); err != nil {
 			t.Fatalf("dave was not created: %v", err)
 		}
-		noSession(t, api.public("/auth/refresh", `{}`, carolCookie), 401, "unauthorized")
+		expect(t, api.do("GET", "/api/v1/me", carolCookie, ""), 401, "unauthorized")
 		// The token of the invitation enrolls dave.
 		setup := decodeJSON[totpSetupResponse](t, api.post("/auth/mfa/enroll/totp/begin", map[string]string{"mfa_token": ch.Token}))
 		w = api.post("/auth/mfa/enroll/totp/finish", map[string]string{"mfa_token": ch.Token, "setup_token": setup.SetupToken, "code": api.code(setup.Secret, 0)})
@@ -402,7 +428,7 @@ func TestMFATokens(t *testing.T) {
 			"garbage":         "v1.AAAA",
 			"not sealed":      content,
 			"tampered":        string(tampered),
-			"other purpose":   seal(oidcSealPurpose, content),
+			"other purpose":   seal("other-purpose", content),
 			"setup purpose":   seal(totpSetupPurpose+"alice-id", content),
 			"setup token":     setup.SetupToken,
 			"access token":    alice,
@@ -541,7 +567,7 @@ func TestMFAEnrollBeforeSession(t *testing.T) {
 		// The code, typed with spaces, enrolls and signs in.
 		code := api.code(setup.Secret, 0)
 		w := finish(ch.Token, setup.SetupToken, " "+code[:3]+" "+code[3:]+" ")
-		if _, keys := jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"access_token", "expires_in", "recovery_codes", "user"}) {
+		if _, keys := jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"recovery_codes", "user"}) {
 			t.Fatalf("finish keys: %v", keys)
 		}
 		alice, _ := api.session(w)
@@ -676,7 +702,7 @@ func TestMFARecoveryCodes(t *testing.T) {
 		}
 		// A code signs in once.
 		w := recovery(ch.Token, aliceCodes[0])
-		if _, keys := jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"access_token", "expires_in", "user"}) {
+		if _, keys := jsonKeys(t, w.Body.Bytes()); !reflect.DeepEqual(keys, []string{"user"}) {
 			t.Fatalf("recovery keys: %v", keys)
 		}
 		access, _ := api.session(w)
@@ -819,8 +845,8 @@ func TestMFARequests(t *testing.T) {
 				r.Header.Set("Content-Type", tc.ct)
 			}
 			w := serve(t, api.handler, r)
-			if w.Code != tc.status || errorCode(t, w) != tc.code || len(w.Header().Values("Set-Cookie")) != 0 {
-				t.Fatalf("%s %s: %d %s", path, tc.name, w.Code, w.Body.String())
+			if w.Code != tc.status || errorCode(t, w) != tc.code || setsCookieBesidesHandle(w) {
+				t.Fatalf("%s %s: %d %s %v", path, tc.name, w.Code, w.Body.String(), w.Header().Values("Set-Cookie"))
 			}
 		}
 	}
@@ -869,11 +895,11 @@ func TestMFAManagement(t *testing.T) {
 		empty := state("alice-id")
 		for _, path := range paths {
 			expect(t, api.call(path, alice, map[string]string{"password": "wrong-password-123"}), 400, "password_invalid")
-			expect(t, api.call(path, alice, map[string]string{"password": strings.Repeat("p", 73)}), 400, "invalid_request")
+			expect(t, api.call(path, alice, map[string]string{"password": strings.Repeat("p", 1025)}), 400, "invalid_request")
 			expect(t, api.call(path, alice, map[string]string{"password": ""}), 400, "invalid_request")
 			expect(t, api.call(path, alice, map[string]string{}), 400, "invalid_request")
 			expect(t, api.do("POST", path, alice, `{"password":"`+mfaPassword+`","extra":1}`), 400, "invalid_request")
-			expect(t, api.do("POST", path, alice, `{"password":"`+strings.Repeat("p", 4097)+`"}`), 413, "body_too_large")
+			expect(t, api.do("POST", path, alice, `{"password":"`+strings.Repeat("p", mfaBodyLimit+1)+`"}`), 413, "body_too_large")
 		}
 		unchanged("alice-id", empty)
 		// Without a factor there is nothing to remove or reissue.
@@ -915,7 +941,7 @@ func TestMFAManagement(t *testing.T) {
 		api.advance(30 * time.Second)
 		// The session, its refresh and the API token are kept.
 		expect(t, api.do("GET", "/api/v1/me", alice, ""), 200, "")
-		_, aliceCookie = api.session(api.public("/auth/refresh", `{}`, aliceCookie))
+		expect(t, api.do("GET", "/api/v1/me", aliceCookie, ""), 200, "")
 		expect(t, api.do("GET", "/api/v1/action-items", apiToken, ""), 200, "")
 		api.signIn("alice@example.com", setup.Secret)
 
@@ -978,7 +1004,7 @@ func TestMFAManagement(t *testing.T) {
 		// JSON only, and the methods.
 		for _, path := range append([]string{"/api/v1/mfa/totp/finish"}, paths...) {
 			r := httptest.NewRequest("POST", path, strings.NewReader(`{"password":"`+mfaPassword+`"}`))
-			r.Header.Set("Authorization", "Bearer "+alice)
+			authorize(r, alice)
 			expect(t, serve(t, api.handler, r), 415, "unsupported_media_type")
 			expect(t, api.do("GET", path, alice, ""), 405, "method_not_allowed")
 			expect(t, api.do("DELETE", path, alice, ""), 405, "method_not_allowed")
@@ -1016,7 +1042,7 @@ func TestMFAManagement(t *testing.T) {
 		}
 		expect(t, api.call("/api/v1/mfa/totp/delete", alice, map[string]string{"password": mfaPassword}), 404, "not_found")
 		expect(t, api.do("GET", "/api/v1/me", alice, ""), 200, "")
-		api.session(api.public("/auth/refresh", `{}`, aliceCookie))
+		expect(t, api.do("GET", "/api/v1/me", aliceCookie, ""), 200, "")
 		expect(t, api.do("GET", "/api/v1/action-items", apiToken, ""), 200, "")
 		api.login("alice@example.com", mfaPassword)
 		// The codes of before the removal do not come back with a new factor.
@@ -1048,9 +1074,7 @@ func TestMFARolesAndReset(t *testing.T) {
 		if err := api.store.CreateUser(ctx, store.User{ID: "dave-id", Email: "dave@example.com", PasswordHash: "x", CreatedAt: 3, Role: store.RoleMember}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := api.store.EnrollWebAuthn(ctx, store.WebAuthnCredential{ID: "dave-key", UserID: "dave-id", CredentialID: "dave-credential", Credential: "{}", Name: "Key", CreatedAt: 3}, nil, false); err != nil {
-			t.Fatal(err)
-		}
+		storeKey(t, api.store, "dave-id", "dave-key")
 		enabled := func() map[string]bool {
 			t.Helper()
 			w := api.do("GET", "/api/v1/users", alice, "")
@@ -1123,14 +1147,13 @@ func TestMFARolesAndReset(t *testing.T) {
 		apiToken = decodeJSON[createdAPITokenResponse](t, w).Token
 
 		// The reset of the CLI: a required user enrolls again, another
-		// signs in with the password; sessions and API tokens are kept.
+		// signs in with the password; sessions and API tokens are revoked.
 		api.use(config.MFAOwners, false)
 		if err := api.store.ResetMFA(ctx, "alice@example.com"); err != nil {
 			t.Fatal(err)
 		}
-		expect(t, api.do("GET", "/api/v1/me", alice, ""), 200, "")
-		api.session(api.public("/auth/refresh", `{}`, aliceCookie))
-		expect(t, api.do("GET", "/api/v1/action-items", apiToken, ""), 200, "")
+		expect(t, api.do("GET", "/api/v1/me", aliceCookie, ""), 401, "unauthorized")
+		expect(t, api.do("GET", "/api/v1/action-items", apiToken, ""), 401, "unauthorized")
 		if ch = api.pending("alice@example.com"); ch.Enrolled {
 			t.Fatalf("required user after the reset: %+v", ch)
 		}
@@ -1248,7 +1271,7 @@ func TestMFARateLimits(t *testing.T) {
 	// A password that is not checked is not counted, and alice is not
 	// affected.
 	for i := 0; i < 20; i++ {
-		expect(t, api.call("/api/v1/mfa/totp/begin", alice, map[string]string{"password": strings.Repeat("p", 73)}), 400, "invalid_request")
+		expect(t, api.call("/api/v1/mfa/totp/begin", alice, map[string]string{"password": strings.Repeat("p", 1025)}), 400, "invalid_request")
 	}
 	api.setup(alice)
 	// carol's codes are not limited by it.
@@ -1269,79 +1292,11 @@ func mustHash(t *testing.T) string {
 	return hash
 }
 
-// TestMFAWithOIDC checks that OIDC sign-in uses no second factor of
-// Astovia: the endpoints answer 409 and the callback signs in a user with
-// MFA rows.
-func TestMFAWithOIDC(t *testing.T) {
-	mfaDrivers(t, func(t *testing.T, driver string) {
-		ctx := context.Background()
-		api, rp := newOIDCAPI(t, driver)
-		cfg := oidcConfig()
-		cfg.MFARequired = config.MFAAll
-		srv := newServer(cfg, api.srv.auth, fstest.MapFS{}, nil)
-		srv.rp = rp
-		api.srv, api.handler = srv, srv.handler()
-		if _, err := api.store.EnrollTOTP(ctx, store.MFATOTP{UserID: "alice-id", SecretSealed: "sealed", LastStep: 1, CreatedAt: 1}, []store.RecoveryCode{{ID: "code", Hash: "hash"}}, true); err != nil {
-			t.Fatal(err)
-		}
-
-		// More requests than the limit of a peer: nothing is counted.
-		for i := 0; i < 15; i++ {
-			for _, path := range []string{"/auth/mfa/totp", "/auth/mfa/recovery", "/auth/mfa/enroll/totp/begin", "/auth/mfa/enroll/totp/finish", "/auth/mfa/webauthn/begin", "/auth/mfa/webauthn/finish", "/auth/mfa/enroll/webauthn/begin", "/auth/mfa/enroll/webauthn/finish"} {
-				expect(t, api.public(path, `{"mfa_token":"x"}`, ""), 409, "password_auth_disabled")
-			}
-		}
-
-		// The callback signs alice in without a second factor.
-		w := oidcLogin(t, api.handler, "")
-		cookie := expectOIDCCookie(t, w, oidcCookieMaxAge)
-		loc, err := url.Parse(w.Header().Get("Location"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		rp.set("alice@example.com", nil, nil)
-		w = serve(t, api.handler, callbackRequest(url.Values{"code": {"code-value"}, "state": {loc.Query().Get("state")}}.Encode(), cookie.Value))
-		if w.Code != 303 || w.Header().Get("Location") != "/" {
-			t.Fatalf("callback: %d %v", w.Code, w.Header())
-		}
-		access, _ := api.session(api.public("/auth/refresh", `{}`, expectRefreshCookie(t, w)))
-		if got := decodeJSON[userResponse](t, api.do("GET", "/api/v1/me", access, "")); got.ID != "alice-id" {
-			t.Fatalf("me: %+v", got)
-		}
-
-		// The settings answer 409 to a signed-in user and 401 to anybody
-		// else; nothing is counted or changed.
-		for i := 0; i < 12; i++ {
-			expect(t, api.do("GET", "/api/v1/mfa", access, ""), 409, "password_auth_disabled")
-			for _, path := range []string{"/api/v1/mfa/totp/begin", "/api/v1/mfa/totp/finish", "/api/v1/mfa/totp/delete", "/api/v1/mfa/recovery-codes", "/api/v1/mfa/webauthn/begin", "/api/v1/mfa/webauthn/finish", "/api/v1/mfa/webauthn/x/delete"} {
-				expect(t, api.do("POST", path, access, `{"password":"`+mfaPassword+`"}`), 409, "password_auth_disabled")
-			}
-		}
-		expect(t, api.do("GET", "/api/v1/mfa", "", ""), 401, "unauthorized")
-		expect(t, api.do("POST", "/api/v1/mfa/totp/delete", "", `{"password":"x"}`), 401, "unauthorized")
-		if status, err := api.store.MFAStatus(ctx, "alice-id"); err != nil || status.TOTP == nil || status.RecoveryCodes != 1 {
-			t.Fatalf("alice: %+v %v", status, err)
-		}
-		// The user list shows the rows that exist in either mode.
-		w = api.do("GET", "/api/v1/users", access, "")
-		expect(t, w, 200, "")
-		if got := decodeJSON[adminUserListResponse](t, w).Users; len(got) != 2 || !got[0].MFAEnabled || got[1].MFAEnabled {
-			t.Fatalf("users: %+v", got)
-		}
-	})
-}
-
-// TestMFAUndecryptableSecret checks a secret sealed with another
-// ASTOVIA_JWT_SECRET: the code is answered as a wrong one, the cause is
-// logged, and the recovery codes still sign in.
 func TestMFAUndecryptableSecret(t *testing.T) {
 	api := newMFAAPI(t, "sqlite", config.MFAOff)
 	alice, _ := api.login("alice@example.com", mfaPassword)
 	secret, codes := api.enroll(alice)
-	other, err := auth.New(api.store, []byte(strings.Repeat("k", 32)), usersOrigin)
-	if err != nil {
-		t.Fatal(err)
-	}
+	other := auth.New(api.store)
 	other.Now = api.srv.auth.Now
 	srv := newServer(config.Config{PublicURL: usersOrigin, Secure: true, Secret: []byte(strings.Repeat("k", 32))}, other, fstest.MapFS{}, nil)
 	api.srv, api.handler = srv, srv.handler()
@@ -1381,7 +1336,7 @@ func TestMFASessionFailure(t *testing.T) {
 	carol := api.pending("carol@example.com")
 	setup := decodeJSON[totpSetupResponse](t, api.post("/auth/mfa/enroll/totp/begin", map[string]string{"mfa_token": carol.Token}))
 	// No session can be stored.
-	exec("ALTER TABLE refresh_tokens RENAME TO refresh_tokens_away")
+	exec("ALTER TABLE web_sessions RENAME TO web_sessions_away")
 
 	noSession(t, api.post("/auth/mfa/totp", map[string]string{"mfa_token": ch.Token, "code": api.code(secret, 0)}), 503, "signin_unavailable")
 	noSession(t, api.post("/auth/mfa/recovery", map[string]string{"mfa_token": ch.Token, "code": codes[0]}), 503, "signin_unavailable")
@@ -1397,7 +1352,7 @@ func TestMFASessionFailure(t *testing.T) {
 	}
 	noSession(t, api.public("/auth/login", `{"email":"dave@example.com","password":"`+mfaPassword+`"}`, ""), 503, "unavailable")
 
-	exec("ALTER TABLE refresh_tokens_away RENAME TO refresh_tokens")
+	exec("ALTER TABLE web_sessions_away RENAME TO web_sessions")
 	// The code and the recovery code were spent, and the enrollment stays.
 	noSession(t, api.post("/auth/mfa/totp", map[string]string{"mfa_token": ch.Token, "code": api.code(secret, 0)}), 401, "mfa_code_invalid")
 	noSession(t, api.post("/auth/mfa/recovery", map[string]string{"mfa_token": ch.Token, "code": codes[0]}), 401, "mfa_code_invalid")
@@ -1500,5 +1455,43 @@ func TestMFAStoreFailure(t *testing.T) {
 	expect(t, api.do("PATCH", "/api/v1/users/carol-id", alice, `{"role":"owner"}`), 503, "unavailable")
 	if role, _ := userState(t, api.store, "carol@example.com"); role != store.RoleMember {
 		t.Fatal("the role changed")
+	}
+}
+
+// TestWebAuthnHandleCleared checks that the routes that finish a ceremony
+// clear the cookie of its handle whatever the outcome, also when the
+// request is refused before the handler (spec §6.4).
+func TestWebAuthnHandleCleared(t *testing.T) {
+	api := newMFAAPI(t, "sqlite", config.MFAOff)
+	alice, _ := api.login("alice@example.com", mfaPassword)
+	for _, tc := range []struct{ path, credential, body string }{
+		{"/auth/mfa/webauthn/finish", "", `{"x":1}`},
+		{"/auth/mfa/webauthn/finish", "", `{"mfa_token":"x","credential":{}}`},
+		{"/auth/mfa/enroll/webauthn/finish", "", `{"mfa_token":"x","credential":{},"name":""}`},
+		{"/auth/mfa/enroll/webauthn/finish", "", `{"mfa_token":"x","credential":{},"name":"Key"}`},
+		{"/api/v1/mfa/webauthn/finish", "", `{"credential":{},"name":"Key"}`},
+		{"/api/v1/mfa/webauthn/finish", alice, `{"credential":{},"name":""}`},
+		{"/api/v1/mfa/webauthn/finish", alice, `[]`},
+		{"/api/v1/mfa/webauthn/finish", alice, `{"credential":{},"name":"Key"}`},
+	} {
+		r := httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body))
+		r.Header.Set("Origin", usersOrigin)
+		r.Header.Set("Content-Type", "application/json")
+		cookie := webauthnCookie + "=handle"
+		if tc.credential != "" {
+			cookie = tc.credential + "; " + cookie
+		}
+		r.Header.Set("Cookie", cookie)
+		w := serve(t, api.handler, r)
+		if w.Code < 400 {
+			t.Fatalf("%s %s: %d", tc.path, tc.body, w.Code)
+		}
+		cleared := false
+		for _, c := range w.Result().Cookies() {
+			cleared = cleared || (c.Name == webauthnCookie && c.Value == "" && c.MaxAge < 0)
+		}
+		if !cleared {
+			t.Fatalf("%s %s (%d): handle kept: %v", tc.path, tc.body, w.Code, w.Header().Values("Set-Cookie"))
+		}
 	}
 }

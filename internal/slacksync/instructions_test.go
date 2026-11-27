@@ -16,7 +16,7 @@ func TestInstructionsInSystem(t *testing.T) {
 	drivers(t, func(t *testing.T, driver string) {
 		st := newSyncTest(t, driver)
 		in := map[string]string{store.InstructionCommon: "共通の指示", store.InstructionSlackDetect: "Slack の検出の指示", store.InstructionSlackReply: "Slack の返信の指示", store.InstructionGitHubDetect: "GitHub の指示"}
-		if err := st.s.SaveAIInstructions(context.Background(), "alice-id", "sid", in, st.now.Unix()); err != nil {
+		if err := st.s.SaveAIInstructions(context.Background(), "alice-id", st.sid, in, st.now.Unix()); err != nil {
 			t.Fatal(err)
 		}
 		key, origin := st.trackedMention()

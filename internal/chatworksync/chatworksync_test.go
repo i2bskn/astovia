@@ -297,6 +297,7 @@ func aiError(code int) func(http.ResponseWriter) {
 }
 
 type syncTest struct {
+	sid    string
 	t      *testing.T
 	s      *store.Store
 	cw     *fakeChatwork
@@ -334,12 +335,10 @@ func newBareSyncTest(t *testing.T, driver string) *syncTest {
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Login(ctx, u, store.Session{ID: "sid", UserID: u.ID, ExpiresAt: st.now.Unix() + 86400*30, CreatedAt: st.now.Unix()}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: st.now.Unix()}); err != nil {
-		t.Fatal(err)
-	}
+	_, st.sid = testutil.Session(t, s, u.ID, st.now)
 	// Detection notifications are stored only for users who can receive
 	// them.
-	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", "sid", st.now.Unix()); err != nil {
+	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", st.sid, st.now.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	st.cw = newFakeChatwork()
@@ -363,7 +362,7 @@ func (st *syncTest) connect(account string, settings store.ChatworkSettings) sto
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	c, err := st.s.SaveChatworkConnection(context.Background(), store.ChatworkConnection{UserID: "alice-id", TokenSealed: sealed, TokenLast4: "0001", AccountID: account, AccountName: "alice", OrganizationName: "Acme"}, settings, "sid", st.now.Unix())
+	c, err := st.s.SaveChatworkConnection(context.Background(), store.ChatworkConnection{UserID: "alice-id", TokenSealed: sealed, TokenLast4: "0001", AccountID: account, AccountName: "alice", OrganizationName: "Acme"}, settings, st.sid, st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}
@@ -372,7 +371,7 @@ func (st *syncTest) connect(account string, settings store.ChatworkSettings) sto
 
 func (st *syncTest) settings(v store.ChatworkSettings) {
 	st.t.Helper()
-	if _, err := st.s.UpdateChatworkSettings(context.Background(), "alice-id", v, "sid", st.now.Unix()); err != nil {
+	if _, err := st.s.UpdateChatworkSettings(context.Background(), "alice-id", v, st.sid, st.now.Unix()); err != nil {
 		st.t.Fatal(err)
 	}
 }
@@ -388,7 +387,7 @@ func (st *syncTest) saveAI() store.AISettings {
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, gen, true, "sid", st.now.Unix())
+	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, gen, true, st.sid, st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}

@@ -3,31 +3,22 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/i2bskn/astovia/internal/store"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/i2bskn/authlume/password"
 	"log"
 	"regexp"
 	"strings"
 	"time"
 )
 
-const AccessLifetime = 10 * time.Minute
-const SessionLifetime = 7 * 24 * time.Hour
-
-// DefaultPasswordCost is the bcrypt cost used in production.
-const DefaultPasswordCost = 12
-
-// PasswordCost is the bcrypt cost used for new hashes. Only a test package's
-// TestMain may lower it; production code must leave it at DefaultPasswordCost.
-var PasswordCost = DefaultPasswordCost
-
-const audience = "astovia-browser"
+// Lengths of a password in UTF-8 bytes. The lower bound is checked only when
+// a password is stored; the upper bound is also the limit of a login.
+const (
+	MinPasswordBytes = 12
+	MaxPasswordBytes = 1024
+)
 
 // emailPattern is the WHATWG HTML "valid e-mail address" grammar restricted
 // to lower-case ASCII. A dot in the domain is not required, so addresses such
@@ -59,13 +50,16 @@ func Email(v string) (string, error) {
 	return v, nil
 }
 
+// Password validates a new password and returns its stored record. A
+// password must contain 12–1024 UTF-8 bytes; the record is an Argon2id hash
+// from authlume's password package.
 func Password(v string) (string, error) {
-	if len(v) < 12 || len(v) > 72 {
-		return "", errors.New("password must contain 12–72 UTF-8 bytes")
+	if len(v) < MinPasswordBytes || len(v) > MaxPasswordBytes {
+		return "", errors.New("password must contain 12–1024 UTF-8 bytes")
 	}
-	h, e := bcrypt.GenerateFromPassword([]byte(v), PasswordCost)
-	return string(h), e
+	return password.Hash(v)
 }
+
 func Random() (string, error) {
 	b := make([]byte, 32)
 	if _, e := rand.Read(b); e != nil {
@@ -73,7 +67,11 @@ func Random() (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
-func Hash(v string) string { h := sha256.Sum256([]byte(v)); return hex.EncodeToString(h[:]) }
+
+// Hash is the lowercase hex SHA-256 of v: the stored form of the API, link
+// and recovery tokens and the digest of a password hash. It is store.Digest,
+// so that the store compares the digests it is given the same way.
+func Hash(v string) string { return store.Digest(v) }
 func validToken(v string) bool {
 	if len(v) > 128 {
 		return false
@@ -82,8 +80,8 @@ func validToken(v string) bool {
 	return e == nil && len(b) == 32
 }
 
-// apiTokenPrefix marks API tokens so that they can be told apart from access
-// JWTs without parsing.
+// apiTokenPrefix marks API tokens so that they can be told apart from other
+// bearer values without a database lookup.
 const apiTokenPrefix = "ast_"
 
 // NewAPIToken returns a new API token and the hash stored for it.
@@ -102,7 +100,7 @@ func IsAPIToken(v string) bool {
 }
 
 // Prefixes of the invitation and password reset tokens. They differ from
-// the "ast_" API tokens and the "aso_" OAuth tokens, so that a link token
+// the "ast_" API tokens, so that a link token
 // presented as a bearer token is never taken for one of them.
 const (
 	invitationTokenPrefix    = "inv_"
@@ -141,155 +139,16 @@ func PasswordResetTokenHash(v string) (string, bool) {
 	return Hash(v), true
 }
 
-type claims struct {
-	Use       string `json:"use"`
-	SessionID string `json:"sid"`
-	jwt.RegisteredClaims
-}
+// Service authenticates API tokens. Browser sessions, passwords and second
+// factors are handled by authlume in the HTTP layer.
 type Service struct {
-	Store  *store.Store
-	secret []byte
-	issuer string
-	dummy  []byte
-	Now    func() time.Time
+	Store *store.Store
+	Now   func() time.Time
 }
 
-// Result is the outcome of a login or refresh. It is an internal type; HTTP
-// handlers copy the public fields into their own response type.
-type Result struct {
-	AccessToken string
-	ExpiresIn   int
-	User        store.User
-	Refresh     string
-	// ExpiresAt is the session expiry (Unix seconds).
-	ExpiresAt int64
-	// MaxAge is the refresh cookie lifetime in seconds, computed from the
-	// same clock reading as ExpiresIn.
-	MaxAge int
-}
-
-func New(s *store.Store, secret []byte, issuer string) (*Service, error) {
-	d, e := bcrypt.GenerateFromPassword([]byte("astovia-dummy-password"), PasswordCost)
-	if e != nil {
-		return nil, e
-	}
-	return &Service{Store: s, secret: secret, issuer: issuer, dummy: d, Now: time.Now}, nil
-}
-
-// Verify checks the password of the user with email and returns the stored
-// user. It starts no session: the caller decides whether a second factor is
-// needed first and then calls LoginUser. A missing user, a wrong password
-// and a disabled user all fail with store.ErrUnauthorized, after the same
-// bcrypt work.
-func (s *Service) Verify(ctx context.Context, email, password string) (store.User, error) {
-	normalized, e := Email(email)
-	if e != nil || len(password) < 1 || len(password) > 72 {
-		return store.User{}, store.ErrUnauthorized
-	}
-	u, e := s.Store.UserByEmail(ctx, normalized)
-	if e != nil && !errors.Is(e, sql.ErrNoRows) {
-		return store.User{}, e
-	}
-	hash := s.dummy
-	if e == nil {
-		hash = []byte(u.PasswordHash)
-	}
-	check := bcrypt.CompareHashAndPassword(hash, []byte(password))
-	if e != nil || check != nil || u.Disabled != 0 {
-		return store.User{}, store.ErrUnauthorized
-	}
-	return u, nil
-}
-
-// LoginUser starts a session for u, after the caller has verified the user:
-// with the password (Verify) and, when one is needed, a second factor, by
-// accepting an invitation or by completing a password reset. u must be the
-// stored user, including its current password hash; the store rejects a
-// disabled user or a changed hash.
-func (s *Service) LoginUser(ctx context.Context, u store.User) (Result, error) {
-	sid, e := Random()
-	if e != nil {
-		return Result{}, e
-	}
-	raw, e := Random()
-	if e != nil {
-		return Result{}, e
-	}
-	now := s.Now()
-	unix := now.Unix()
-	sess := store.Session{ID: sid, UserID: u.ID, CreatedAt: unix, ExpiresAt: unix + int64(SessionLifetime/time.Second)}
-	if e = s.Store.Login(ctx, u, sess, store.Refresh{Hash: Hash(raw), SessionID: sid, CreatedAt: unix}); e != nil {
-		return Result{}, e
-	}
-	return s.result(u, sess, raw, now)
-}
-func (s *Service) Refresh(ctx context.Context, raw string) (Result, error) {
-	if !validToken(raw) {
-		return Result{}, store.ErrUnauthorized
-	}
-	next, e := Random()
-	if e != nil {
-		return Result{}, e
-	}
-	now := s.Now()
-	u, sess, e := s.Store.Rotate(ctx, Hash(raw), Hash(next), now.Unix())
-	if e != nil {
-		return Result{}, e
-	}
-	return s.result(u, sess, next, now)
-}
-func (s *Service) Logout(ctx context.Context, raw string) error {
-	if !validToken(raw) {
-		return nil
-	}
-	return s.Store.Logout(ctx, Hash(raw), s.Now().Unix())
-}
-
-// result issues an access token. now must be the same clock reading that was
-// passed to the store, so that the store's ExpiresAt > now check also holds
-// here.
-func (s *Service) result(u store.User, sess store.Session, raw string, now time.Time) (Result, error) {
-	exp := now.Add(AccessLifetime)
-	if exp.Unix() > sess.ExpiresAt {
-		exp = time.Unix(sess.ExpiresAt, 0)
-	}
-	// Defensive: with the same now, Login and Rotate guarantee
-	// sess.ExpiresAt > now, so this branch is not normally reached.
-	if exp.Unix() <= now.Unix() {
-		return Result{}, store.ErrUnauthorized
-	}
-	id, e := Random()
-	if e != nil {
-		return Result{}, e
-	}
-	c := claims{Use: "access", SessionID: sess.ID, RegisteredClaims: jwt.RegisteredClaims{Issuer: s.issuer, Subject: u.ID, Audience: jwt.ClaimStrings{audience}, ExpiresAt: jwt.NewNumericDate(exp), IssuedAt: jwt.NewNumericDate(now), ID: id}}
-	token, e := jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString(s.secret)
-	if e != nil {
-		return Result{}, e
-	}
-	return Result{AccessToken: token, ExpiresIn: int(exp.Unix() - now.Unix()), User: u, Refresh: raw, ExpiresAt: sess.ExpiresAt, MaxAge: int(sess.ExpiresAt - now.Unix())}, nil
-}
-func (s *Service) Authenticate(ctx context.Context, raw string) (store.User, error) {
-	u, _, err := s.AuthenticateSession(ctx, raw)
-	return u, err
-}
-
-// AuthenticateSession validates an access JWT and returns its user together
-// with the verified session ID (the sid claim).
-func (s *Service) AuthenticateSession(ctx context.Context, raw string) (store.User, string, error) {
-	if len(raw) > 4096 {
-		return store.User{}, "", store.ErrUnauthorized
-	}
-	c := new(claims)
-	t, e := jwt.ParseWithClaims(raw, c, func(_ *jwt.Token) (any, error) { return s.secret, nil }, jwt.WithValidMethods([]string{"HS256"}), jwt.WithIssuer(s.issuer), jwt.WithAudience(audience), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithTimeFunc(s.Now))
-	if e != nil || !t.Valid || c.Use != "access" || c.Subject == "" || c.SessionID == "" || c.ID == "" || c.IssuedAt == nil {
-		return store.User{}, "", store.ErrUnauthorized
-	}
-	u, e := s.Store.Authenticated(ctx, c.Subject, c.SessionID, s.Now().Unix())
-	if e != nil {
-		return store.User{}, "", e
-	}
-	return u, c.SessionID, nil
+// New returns a Service for s with the system clock.
+func New(s *store.Store) *Service {
+	return &Service{Store: s, Now: time.Now}
 }
 
 // AuthenticateAPIToken returns the user of an API token. A failure to record

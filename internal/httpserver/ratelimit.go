@@ -1,12 +1,20 @@
 package httpserver
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"net"
 	"net/http"
 	"net/netip"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/i2bskn/astovia/internal/auth"
 )
 
 // loginLimiter limits login attempts per peer in a bounded in-process table.
@@ -195,4 +203,149 @@ func (l *loginLimiter) evict() {
 	} else if oldestFound {
 		delete(l.entries, oldest)
 	}
+}
+
+// Limits of the failed password sign-ins per email address.
+const (
+	emailLimit     = 10
+	emailWindow    = 15 * time.Minute
+	emailSlotCount = 4096
+)
+
+// emailLimiter counts the password sign-ins per email address: an address
+// that had emailLimit attempts in emailWindow without a success is refused
+// until the window ends. Unknown addresses are counted the same way, so the
+// answer does not tell whether an address exists.
+//
+// The table is a fixed array of emailSlotCount slots chosen by an HMAC of
+// the address under a key made at startup, and nothing is ever evicted:
+// many unrelated addresses cannot push the record of one address out, and
+// two addresses that share a slot only make the limit stricter. Like the
+// other limiters it lives in the process.
+type emailLimiter struct {
+	mu    sync.Mutex
+	key   [32]byte
+	now   func() time.Time
+	slots [emailSlotCount]emailSlot
+}
+
+// emailSlot is the window of a slot: when it started and the attempts in it.
+type emailSlot struct {
+	start time.Time
+	count int
+}
+
+func newEmailLimiter(now func() time.Time) *emailLimiter {
+	l := &emailLimiter{now: now}
+	if _, err := rand.Read(l.key[:]); err != nil {
+		panic("httpserver: email limiter key: " + err.Error())
+	}
+	return l
+}
+
+// emailLimitKey is the key of an email address as typed: the normalized
+// address, or the input itself when it is not a valid address.
+func emailLimitKey(email string) string {
+	if normalized, err := auth.Email(email); err == nil {
+		return normalized
+	}
+	return email
+}
+
+func (l *emailLimiter) slot(key string) *emailSlot {
+	mac := hmac.New(sha256.New, l.key[:])
+	mac.Write([]byte(key))
+	sum := mac.Sum(nil)
+	return &l.slots[binary.BigEndian.Uint32(sum)%emailSlotCount]
+}
+
+// attempt counts an attempt for key and reports whether it may proceed.
+// It is called before the password is checked.
+func (l *emailLimiter) attempt(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	s := l.slot(key)
+	if s.count == 0 || !now.Before(s.start.Add(emailWindow)) || now.Before(s.start) {
+		*s = emailSlot{start: now}
+	}
+	if s.count >= emailLimit {
+		return false
+	}
+	s.count++
+	return true
+}
+
+// reset forgets the attempts of key after a successful sign-in.
+func (l *emailLimiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	*l.slot(key) = emailSlot{}
+}
+
+// passwordSlots bounds the password derivations running at once in the
+// process. Each Argon2id derivation of authlume's password package takes
+// about 19 MiB, so without a bound many concurrent sign-ins with random
+// addresses (which the limits per peer and per address do not stop) could
+// exhaust the memory. A request waits up to wait for a free slot and is then
+// refused (see passwordSlot for the limits that count such a refusal).
+type passwordSlots struct {
+	slots chan struct{}
+	wait  time.Duration
+}
+
+// passwordSlotWait is how long a password derivation waits for a free slot.
+const passwordSlotWait = 2 * time.Second
+
+// newPasswordSlots returns a bound of 2 × GOMAXPROCS derivations, which keeps
+// the CPU busy while capping the memory at a few hundred MiB.
+func newPasswordSlots() *passwordSlots {
+	return &passwordSlots{slots: make(chan struct{}, 2*runtime.GOMAXPROCS(0)), wait: passwordSlotWait}
+}
+
+// acquire takes a slot, waiting up to p.wait or until ctx ends. It reports
+// whether a slot was taken; the caller then calls release once.
+func (p *passwordSlots) acquire(ctx context.Context) bool {
+	select {
+	case p.slots <- struct{}{}:
+		return true
+	default:
+	}
+	if p.wait <= 0 {
+		return false
+	}
+	timer := time.NewTimer(p.wait)
+	defer timer.Stop()
+	select {
+	case p.slots <- struct{}{}:
+		return true
+	case <-timer.C:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (p *passwordSlots) release() { <-p.slots }
+
+// passwordSlot takes a slot of s.passwordSlots for one password derivation
+// (a sign-in, a password check or a new password). When none is free it
+// writes 503 unavailable with Retry-After and reports false. Such a 503 is
+// not counted against the limits checked after the slot is taken (the
+// limit per email address of /auth/login and the limit per user of the
+// password check of the MFA endpoints). The limits per peer of
+// /auth/login and of the invitation and reset links are checked before
+// the slot and have counted it, so that one peer cannot keep taking the
+// slots. release may be called more than
+// once; callers defer it right away, so that a panic does not keep the
+// slot, and may call it earlier to free the slot once the derivation is
+// done.
+func (s *Server) passwordSlot(w http.ResponseWriter, r *http.Request) (release func(), ok bool) {
+	if !s.passwordSlots.acquire(r.Context()) {
+		w.Header().Set("Retry-After", "1")
+		fail(w, 503, "unavailable", "The server is busy. Try again.")
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(s.passwordSlots.release) }, true
 }

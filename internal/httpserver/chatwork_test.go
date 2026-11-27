@@ -216,10 +216,10 @@ func testChatworkIntegrationAPI(t *testing.T, driver string) {
 
 	// PUT and PATCH need a JSON body.
 	r := httptest.NewRequest("PATCH", path, strings.NewReader(`{"detect_dms":true}`))
-	r.Header.Set("Authorization", "Bearer "+api.bob)
+	authorize(r, api.bob)
 	expectStatus(t, serve(t, api.handler, r), 415, "unsupported_media_type")
 	r = httptest.NewRequest("PUT", path, strings.NewReader(`{"token":"x"}`))
-	r.Header.Set("Authorization", "Bearer "+api.bob)
+	authorize(r, api.bob)
 	expectStatus(t, serve(t, api.handler, r), 415, "unsupported_media_type")
 
 	// API tokens cannot manage the integration.

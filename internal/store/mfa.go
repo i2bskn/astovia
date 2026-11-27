@@ -13,17 +13,18 @@ var ErrMFACredentialExists = errors.New("WebAuthn credential is already register
 var ErrMFALimit = errors.New("too many WebAuthn credentials")
 var ErrMFARequired = errors.New("the last second factor cannot be removed")
 var ErrMFANotEnrolled = errors.New("no second factor is enrolled")
-var ErrMFAChallengeUsed = errors.New("WebAuthn challenge was already used")
 
 // MaxWebAuthnCredentials is the number of WebAuthn credentials a user can
 // hold at once.
 const MaxWebAuthnCredentials = 10
 
-// MFATOTP is the authenticator app of a user. SecretSealed is the secret
-// sealed with the purpose "mfa-totp:" + UserID. LastStep is the last time
-// step whose code was accepted; a code of that step or an earlier one is
-// never accepted again.
+// MFATOTP is the authenticator app of a user. ID is a random value given at
+// each enrollment; a row without one was stored before authlume and cannot
+// be used. SecretSealed is the secret sealed with the purpose "mfa-totp:" +
+// UserID. LastStep is the last time step whose code was accepted; a code of
+// that step or an earlier one is never accepted again.
 type MFATOTP struct {
+	ID           string
 	UserID       string
 	SecretSealed string
 	LastStep     int64
@@ -43,6 +44,10 @@ type WebAuthnCredential struct {
 	Name         string
 	CreatedAt    int64
 	LastUsedAt   sql.NullInt64
+	// Version is the active revision of the credential, replaced at each
+	// use; a row without one was stored before authlume and cannot be used.
+	Version string
+	Passkey int64
 }
 
 // RecoveryCode is a new recovery code to store: the row ID and the SHA-256
@@ -63,7 +68,53 @@ type MFAStatus struct {
 
 // Enrolled reports whether the user has a second factor: an authenticator
 // app or at least one WebAuthn credential. Recovery codes are not a factor.
+// Rows stored before authlume count, so that such a user is still asked for
+// a second factor (and can use a recovery code) rather than let in with the
+// password alone.
 func (m MFAStatus) Enrolled() bool { return m.TOTP != nil || len(m.WebAuthn) > 0 }
+
+// UsableTOTP reports whether the authenticator app can be used: it has an
+// ID, so it was stored by this version.
+func (m MFAStatus) UsableTOTP() bool { return m.TOTP != nil && m.TOTP.ID != "" }
+
+// UsableWebAuthn is the number of WebAuthn credentials that can be used:
+// those with a version, stored by this version.
+func (m MFAStatus) UsableWebAuthn() int {
+	n := 0
+	for _, c := range m.WebAuthn {
+		if c.Version != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// usable reports whether the user has a second factor that can be used.
+func (m MFAStatus) usable() bool {
+	return m.UsableTOTP() || m.UsableWebAuthn() > 0
+}
+
+// EnrollOptions are the conditions of an enrollment, checked under the lock
+// of the user row.
+type EnrollOptions struct {
+	// OnlyIfNone refuses a user that has a usable second factor
+	// (ErrMFAEnrolled); this is the enrollment before the first session,
+	// which must never add a factor to an account that has one.
+	OnlyIfNone bool
+	// SessionID, when set, must be an active session of the user
+	// (ErrUnauthorized). PasswordDigest, when set, must be auth.Hash of the
+	// current password hash (ErrUnauthorized). One of them must be set.
+	SessionID      string
+	PasswordDigest string
+	Now            int64
+}
+
+func checkEnrollment(ctx context.Context, q queries, u User, o EnrollOptions) error {
+	if o.SessionID == "" && o.PasswordDigest == "" {
+		return errNoGuard
+	}
+	return checkBinding(ctx, q, u, o.SessionID, o.PasswordDigest, o.Now)
+}
 
 // UserByID returns the user with id, enabled or not, or sql.ErrNoRows.
 func (s *Store) UserByID(ctx context.Context, id string) (User, error) {
@@ -97,15 +148,9 @@ func mfaStatus(ctx context.Context, q queries, userID string) (MFAStatus, error)
 // are under the lock. A missing or disabled user fails with
 // ErrUnauthorized.
 func lockMFAUser(ctx context.Context, q queries, userID string) (User, MFAStatus, error) {
-	u, err := q.lockUser(ctx, userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return User{}, MFAStatus{}, ErrUnauthorized
-	}
+	u, err := lockEnabledUser(ctx, q, userID)
 	if err != nil {
 		return User{}, MFAStatus{}, err
-	}
-	if u.Disabled != 0 {
-		return User{}, MFAStatus{}, ErrUnauthorized
 	}
 	status, err := mfaStatus(ctx, q, userID)
 	if err != nil {
@@ -123,25 +168,27 @@ func insertRecoveryCodes(ctx context.Context, q queries, userID string, codes []
 	return nil
 }
 
-// EnrollTOTP stores t as the authenticator app of t.UserID. t.LastStep is
-// the time step of the code that confirmed the secret, so that the code
-// cannot be used again.
+// EnrollTOTP stores t as the authenticator app of t.UserID, replacing an
+// existing one. t.ID must be a new random value and t.LastStep the time step
+// of the code that confirmed the secret, so that the code cannot be used
+// again. o is checked under the lock of the user row.
 //
-// With onlyIfNone the user must have no second factor yet
-// (ErrMFAEnrolled); this is the enrollment before the first session, which
-// must never add a factor to an account that has one. Without it, an
-// existing authenticator app is replaced.
-//
-// When the user had no second factor, codes are stored as the recovery
+// When the user had no usable second factor, codes replace the recovery
 // codes and issued is true; otherwise codes are ignored.
-func (s *Store) EnrollTOTP(ctx context.Context, t MFATOTP, codes []RecoveryCode, onlyIfNone bool) (issued bool, err error) {
+func (s *Store) EnrollTOTP(ctx context.Context, t MFATOTP, codes []RecoveryCode, o EnrollOptions) (issued bool, err error) {
+	if t.ID == "" {
+		return false, errors.New("authenticator app ID is required")
+	}
 	err = s.transaction(ctx, func(q queries) error {
-		_, status, e := lockMFAUser(ctx, q, t.UserID)
+		u, status, e := lockMFAUser(ctx, q, t.UserID)
 		if e != nil {
 			return e
 		}
-		first := !status.Enrolled()
-		if onlyIfNone && !first {
+		if e = checkEnrollment(ctx, q, u, o); e != nil {
+			return e
+		}
+		first := !status.usable()
+		if o.OnlyIfNone && !first {
 			return ErrMFAEnrolled
 		}
 		if status.TOTP == nil {
@@ -161,43 +208,10 @@ func (s *Store) EnrollTOTP(ctx context.Context, t MFATOTP, codes []RecoveryCode,
 			return nil
 		}
 		issued = true
+		if e = q.deleteUserRecoveryCodes(ctx, t.UserID); e != nil {
+			return e
+		}
 		return insertRecoveryCodes(ctx, q, t.UserID, codes, t.CreatedAt)
-	})
-	if err != nil {
-		return false, err
-	}
-	return issued, nil
-}
-
-// EnrollWebAuthn stores c as a WebAuthn credential of c.UserID. A user can
-// hold MaxWebAuthnCredentials (ErrMFALimit), and a credential ID registered
-// by any user is rejected (ErrMFACredentialExists). onlyIfNone, codes and
-// issued are as in EnrollTOTP.
-func (s *Store) EnrollWebAuthn(ctx context.Context, c WebAuthnCredential, codes []RecoveryCode, onlyIfNone bool) (issued bool, err error) {
-	err = s.transaction(ctx, func(q queries) error {
-		_, status, e := lockMFAUser(ctx, q, c.UserID)
-		if e != nil {
-			return e
-		}
-		first := !status.Enrolled()
-		if onlyIfNone && !first {
-			return ErrMFAEnrolled
-		}
-		if len(status.WebAuthn) >= MaxWebAuthnCredentials {
-			return ErrMFALimit
-		}
-		n, e := q.createWebAuthnCredential(ctx, c)
-		if e != nil {
-			return e
-		}
-		if n != 1 {
-			return ErrMFACredentialExists
-		}
-		if !first {
-			return nil
-		}
-		issued = true
-		return insertRecoveryCodes(ctx, q, c.UserID, codes, c.CreatedAt)
 	})
 	if err != nil {
 		return false, err
@@ -306,15 +320,6 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, userID string, codes [
 	})
 }
 
-// UseTOTPStep records step as the last accepted time step of userID's
-// authenticator app. It reports false when the app is missing or step is
-// not after the last accepted one, that is, when the code was used before.
-// Of two concurrent calls with the same step, one reports true.
-func (s *Store) UseTOTPStep(ctx context.Context, userID string, step int64) (bool, error) {
-	n, err := s.q.useMFATOTPStep(ctx, userID, step)
-	return n == 1, err
-}
-
 // UseRecoveryCode marks the unused recovery code of userID whose normalized
 // form hashes to hash as used. It reports false when there is no such code:
 // unknown, used before or another user's. Of two concurrent calls with the
@@ -322,45 +327,6 @@ func (s *Store) UseTOTPStep(ctx context.Context, userID string, step int64) (boo
 func (s *Store) UseRecoveryCode(ctx context.Context, userID, hash string, now int64) (bool, error) {
 	n, err := s.q.useRecoveryCode(ctx, userID, hash, now)
 	return n == 1, err
-}
-
-// UpdateWebAuthnCredential stores the credential after a verified sign-in
-// with it (the JSON with the new signature counter) and its time of use,
-// and spends the challenge of that sign-in, in one transaction:
-//
-//  1. The user row is locked; a missing or disabled user fails with
-//     ErrUnauthorized.
-//  2. The credential credentialID of userID is updated, or ErrNotFound is
-//     returned when it does not exist (it was removed meanwhile).
-//  3. The spent challenges that expired (expires_at <= now) are removed.
-//  4. challengeHash is inserted with expiresAt, the expiry of the sign-in
-//     state. A challenge spent before fails with ErrMFAChallengeUsed.
-//
-// Any error rolls everything back, so a replayed sign-in response changes
-// nothing.
-func (s *Store) UpdateWebAuthnCredential(ctx context.Context, userID, credentialID, credential, challengeHash string, expiresAt, now int64) error {
-	return s.transaction(ctx, func(q queries) error {
-		if _, _, e := lockMFAUser(ctx, q, userID); e != nil {
-			return e
-		}
-		n, e := q.updateWebAuthnCredential(ctx, userID, credentialID, credential, now)
-		if e != nil {
-			return e
-		}
-		if n != 1 {
-			return ErrNotFound
-		}
-		if e = q.deleteExpiredUsedChallenges(ctx, now); e != nil {
-			return e
-		}
-		if n, e = q.createUsedChallenge(ctx, challengeHash, expiresAt); e != nil {
-			return e
-		}
-		if n != 1 {
-			return ErrMFAChallengeUsed
-		}
-		return nil
-	})
 }
 
 // MFAEnabledUserIDs returns the IDs of the users that have a second
@@ -384,9 +350,10 @@ func (s *Store) MFAEnabledUserIDs(ctx context.Context) (map[string]bool, error) 
 	return out, nil
 }
 
-// ResetMFA removes the authenticator app, the WebAuthn credentials and the
-// recovery codes of the user with email, enabled or disabled, for the
-// operator's CLI. Sessions and tokens are kept.
+// ResetMFA removes the authenticator app, the WebAuthn credentials, the
+// recovery codes and the pending WebAuthn ceremonies of the user with email,
+// enabled or disabled, for the operator's CLI. The sessions, API tokens and
+// MCP connections are revoked as well, in the same transaction.
 func (s *Store) ResetMFA(ctx context.Context, email string) error {
 	u, err := s.q.userByEmail(ctx, email)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -405,6 +372,9 @@ func (s *Store) ResetMFA(ctx context.Context, email string) error {
 		if e := q.deleteUserWebAuthnCredentials(ctx, u.ID); e != nil {
 			return e
 		}
-		return q.deleteUserRecoveryCodes(ctx, u.ID)
+		if e := q.deleteUserRecoveryCodes(ctx, u.ID); e != nil {
+			return e
+		}
+		return revokeAccess(ctx, q, u.ID)
 	})
 }

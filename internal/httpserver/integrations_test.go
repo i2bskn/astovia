@@ -92,10 +92,7 @@ func newIntegrationAPI(t *testing.T, driver string) *integrationAPI {
 			t.Fatal(err)
 		}
 	}
-	a, err := auth.New(s, make([]byte, 32), "https://astovia.test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := auth.New(s)
 	now := time.Date(2026, 10, 24, 1, 2, 3, 0, time.UTC)
 	a.Now = func() time.Time { return now }
 	gh := &fakeUser{login: "octocat", scopes: scopes("notifications, repo")}

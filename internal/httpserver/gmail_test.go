@@ -386,11 +386,11 @@ func testGmailIntegrationAPI(t *testing.T, driver string) {
 	// refused.
 	for _, p := range []string{"/api/v1/integrations/gmail/authorize", "/api/v1/integrations/gmail/complete"} {
 		r := httptest.NewRequest("POST", p, strings.NewReader(`{}`))
-		r.Header.Set("Authorization", "Bearer "+api.alice)
+		authorize(r, api.alice)
 		expectStatus(t, serve(t, api.handler, r), 415, "unsupported_media_type")
 	}
 	r := httptest.NewRequest("PATCH", path, strings.NewReader(`{"immediate_notify":true}`))
-	r.Header.Set("Authorization", "Bearer "+api.alice)
+	authorize(r, api.alice)
 	expectStatus(t, serve(t, api.handler, r), 415, "unsupported_media_type")
 	tok := (&tokenAPI{t: t, handler: api.handler}).issue(api.alice, "x").Token
 	for _, c := range []struct{ method, path string }{{"GET", "/api/v1/integrations/gmail"}, {"POST", "/api/v1/integrations/gmail/authorize"}, {"POST", "/api/v1/integrations/gmail/complete"}, {"PATCH", path}, {"DELETE", path}} {

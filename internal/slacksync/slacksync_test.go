@@ -363,6 +363,7 @@ func aiError(code int) func(http.ResponseWriter) {
 }
 
 type syncTest struct {
+	sid    string
 	t      *testing.T
 	s      *store.Store
 	sl     *fakeSlack
@@ -399,12 +400,10 @@ func newBareSyncTest(t *testing.T, driver string) *syncTest {
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Login(ctx, u, store.Session{ID: "sid", UserID: u.ID, ExpiresAt: st.now.Unix() + 86400*30, CreatedAt: st.now.Unix()}, store.Refresh{Hash: "r", SessionID: "sid", CreatedAt: st.now.Unix()}); err != nil {
-		t.Fatal(err)
-	}
+	_, st.sid = testutil.Session(t, s, u.ID, st.now)
 	// Detection notifications are stored only for users who can receive
 	// them.
-	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", "sid", st.now.Unix()); err != nil {
+	if _, _, err := s.SavePushSubscription(ctx, store.PushSubscription{ID: "sub", UserID: u.ID, Endpoint: "https://push.example/alice", P256dh: "k", Auth: "a"}, "", st.sid, st.now.Unix()); err != nil {
 		t.Fatal(err)
 	}
 	st.sl = newFakeSlack()
@@ -428,7 +427,7 @@ func (st *syncTest) connect(team, user string, settings store.SlackSettings) sto
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	c, err := st.s.SaveSlackConnection(context.Background(), store.SlackConnection{UserID: "alice-id", TokenSealed: sealed, TokenLast4: "0001", TeamID: team, TeamName: "Acme", TeamURL: "https://acme.slack.com/", SlackUserID: user, SlackUserName: "alice", Scopes: strings.Join(RequiredScopes, ",")}, settings, "sid", st.now.Unix())
+	c, err := st.s.SaveSlackConnection(context.Background(), store.SlackConnection{UserID: "alice-id", TokenSealed: sealed, TokenLast4: "0001", TeamID: team, TeamName: "Acme", TeamURL: "https://acme.slack.com/", SlackUserID: user, SlackUserName: "alice", Scopes: strings.Join(RequiredScopes, ",")}, settings, st.sid, st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}
@@ -437,7 +436,7 @@ func (st *syncTest) connect(team, user string, settings store.SlackSettings) sto
 
 func (st *syncTest) settings(v store.SlackSettings) {
 	st.t.Helper()
-	if _, err := st.s.UpdateSlackSettings(context.Background(), "alice-id", v, "sid", st.now.Unix()); err != nil {
+	if _, err := st.s.UpdateSlackSettings(context.Background(), "alice-id", v, st.sid, st.now.Unix()); err != nil {
 		st.t.Fatal(err)
 	}
 }
@@ -453,7 +452,7 @@ func (st *syncTest) saveAI() store.AISettings {
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, gen, true, "sid", st.now.Unix())
+	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, gen, true, st.sid, st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}

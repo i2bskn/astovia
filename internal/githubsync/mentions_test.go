@@ -135,7 +135,7 @@ func (st *syncTest) saveAI() store.AISettings {
 	if err != nil {
 		st.t.Fatal(err)
 	}
-	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, gen, true, "sid", st.now.Unix())
+	a, err := st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, gen, true, st.sid, st.now.Unix())
 	if err != nil {
 		st.t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestMentionWithoutAI(t *testing.T) {
 		st, fa := newMentionTest(t, driver)
 		st.issueWithComments(comment(11, "bob", "@octocat hi", st.now))
 		// Not configured: GitHub is not asked about the thread.
-		if err := st.s.DeleteAISettings(context.Background(), "alice-id", "sid", st.now.Unix()); err != nil {
+		if err := st.s.DeleteAISettings(context.Background(), "alice-id", st.sid, st.now.Unix()); err != nil {
 			t.Fatal(err)
 		}
 		c := st.sync()
@@ -571,7 +571,7 @@ func replaceAI(t *testing.T, st *syncTest, now int64) {
 		t.Error(err)
 		return
 	}
-	if _, err = st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, cur.Generation, true, "sid", now); err != nil {
+	if _, err = st.s.SaveAISettings(ctx, store.AISettings{UserID: "alice-id", Provider: ai.ProviderAnthropic, Model: "claude-haiku-5-5", APIKeySealed: sealed, KeyLast4: "6789"}, cur.Generation, true, st.sid, now); err != nil {
 		t.Error(err)
 	}
 }
@@ -587,7 +587,7 @@ func TestMentionSettingsChanged(t *testing.T) {
 			f.replies = []func(http.ResponseWriter){aiOK(true, "one", "s"), aiOK(true, "two", "s")}
 			f.hook = func(n int) {
 				if n == 1 {
-					if err := st.s.DeleteAISettings(context.Background(), "alice-id", "sid", now); err != nil {
+					if err := st.s.DeleteAISettings(context.Background(), "alice-id", st.sid, now); err != nil {
 						t.Error(err)
 					}
 				}
@@ -654,7 +654,7 @@ func TestMentionUndecryptableKey(t *testing.T) {
 			t.Fatal(err)
 		}
 		a := st.aiSettings()
-		if _, err = st.s.SaveAISettings(context.Background(), store.AISettings{UserID: "alice-id", Provider: "anthropic", Model: a.Model, APIKeySealed: sealed, KeyLast4: "x"}, a.Generation, true, "sid", st.now.Unix()); err != nil {
+		if _, err = st.s.SaveAISettings(context.Background(), store.AISettings{UserID: "alice-id", Provider: "anthropic", Model: a.Model, APIKeySealed: sealed, KeyLast4: "x"}, a.Generation, true, st.sid, st.now.Unix()); err != nil {
 			t.Fatal(err)
 		}
 		st.sync()
