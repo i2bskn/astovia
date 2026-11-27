@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/i2bskn/authlume/mcpoauth"
 	"github.com/i2bskn/authlume/webauthn"
 
 	"github.com/i2bskn/astovia/internal/mfa"
@@ -824,6 +825,55 @@ func TestCheckSchemaMFA(t *testing.T) {
 			if err := s.CheckSchema(context.Background()); err == nil {
 				t.Fatalf("missing %s accepted", table)
 			}
+		}
+	})
+}
+
+// TestSessionBoundWrites checks that the writes bound to a browser session
+// recheck it: a session past its idle limit and one past its absolute limit
+// each refuse the write, while a live session allows it.
+func TestSessionBoundWrites(t *testing.T) {
+	drivers(t, func(t *testing.T, driver string) {
+		ctx := context.Background()
+		s := userFixture(t, driver)
+		for _, ws := range []store.WebSession{
+			// Idle: the last activity is one idle period ago, the absolute
+			// limit is far.
+			{ID: "idle-session", UserID: "alice-id", AuthenticatedAt: tokenTestNow - 3600, LastActivity: tokenTestNow - 600, AbsoluteExpiry: tokenTestNow + 36000, IdleSeconds: 600},
+			// Absolute: the last activity is now, the absolute limit is now.
+			{ID: "absolute-session", UserID: "alice-id", AuthenticatedAt: tokenTestNow - 3600, LastActivity: tokenTestNow, AbsoluteExpiry: tokenTestNow, IdleSeconds: 600},
+		} {
+			if err := s.InsertWebSession(ctx, ws); err != nil {
+				t.Fatal(err)
+			}
+		}
+		code := func(sid, key string) error {
+			c := mcpoauth.Code{ClientID: "client", RedirectURI: "https://client.example/callback", Subject: "alice-id", Scopes: []string{"mcp"}, Challenge: "challenge", ExpiresAt: time.Now().Add(time.Minute)}
+			return s.MCPOAuth(time.Now).CreateCode(store.WithApprovalSession(ctx, sid, time.Unix(tokenTestNow, 0)), sha256.Sum256([]byte(key)), c)
+		}
+		for _, sid := range []string{"idle-session", "absolute-session"} {
+			if _, err := s.EnrollTOTP(ctx, totpOf("alice-id", 100), nil, store.EnrollOptions{SessionID: sid, Now: tokenTestNow}); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("%s: authenticator app: %v", sid, err)
+			}
+			if err := enrollKey(s, "alice-id", sid, store.WebAuthnEnrollment{SessionID: sid}); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("%s: security key: %v", sid, err)
+			}
+			if err := code(sid, "code-"+sid); !errors.Is(err, store.ErrUnauthorized) {
+				t.Fatalf("%s: authorization code: %v", sid, err)
+			}
+		}
+		if status := mfaStatus(t, s, "alice-id"); status.TOTP != nil || len(status.WebAuthn) != 0 {
+			t.Fatalf("written through an expired session: %+v", status)
+		}
+		// The live session of the fixtures allows each write.
+		if _, err := s.EnrollTOTP(ctx, totpOf("alice-id", 100), nil, signedIn("alice")); err != nil {
+			t.Fatal(err)
+		}
+		if err := enrollKey(s, "alice-id", "live", store.WebAuthnEnrollment{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := code("alice-session", "code-live"); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

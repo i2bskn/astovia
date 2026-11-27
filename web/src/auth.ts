@@ -1,3 +1,9 @@
+// The import names the .ts file so that the test build, which compiles
+// the modules one by one, can resolve it (--rewriteRelativeImportExtensions).
+import { oidcLoginFlag } from './oidcLogin.ts';
+
+export { markOIDCLogin, oidcLoginPath, oidcReturnTo } from './oidcLogin.ts';
+
 export type Role = 'owner' | 'member';
 
 // PasswordResetNotice reports a password reset link the user completed in
@@ -261,11 +267,6 @@ async function restore(): Promise<void> {
   }
 }
 
-// oidcLoginFlag marks, in sessionStorage, a single sign-on (OIDC) sign-in
-// started from this tab. The page loaded after the sign-in tells the other
-// tabs, as a password login does.
-const oidcLoginFlag = 'astovia-oidc-login';
-
 // announceOIDCLogin runs after the first restore of a page load. When the
 // tab started a single sign-on sign-in and is now signed in, the other tabs
 // read the new session. The flag is removed either way.
@@ -278,28 +279,6 @@ function announceOIDCLogin(): void {
     return;
   }
   if (started && state.status === 'authenticated') channel?.postMessage('session-changed');
-}
-
-// oidcLoginPath is where the single sign-on (OIDC) sign-in form is posted.
-// It is a real form POST, not a fetch: the server answers with a redirect
-// to the provider, which the CSP form-action allows.
-export const oidcLoginPath = '/auth/oidc/login';
-
-// oidcReturnTo is the return_to field of the sign-in form: the screen at
-// pathname and search, which the server opens again after the sign-in.
-export function oidcReturnTo(pathname: string, search: string): string {
-  return pathname + search;
-}
-
-// markOIDCLogin is called when the sign-in form is submitted, from a
-// button: an automatic submission could loop on a failure.
-export function markOIDCLogin(): void {
-  try {
-    sessionStorage.setItem(oidcLoginFlag, '1');
-  } catch {
-    // Without storage the other tabs notice the session on their next
-    // request.
-  }
 }
 
 channel?.addEventListener('message', (event: MessageEvent<unknown>) => {

@@ -587,3 +587,58 @@ func TestSessionLifetime(t *testing.T) {
 		}
 	})
 }
+
+// TestSignInCookies checks the cookies a sign-in meets: a malformed session
+// cookie does not stop it, the session cookie it presents is replaced, and
+// the refresh cookie of earlier releases is expired on any /auth/ request.
+func TestSignInCookies(t *testing.T) {
+	mfaDrivers(t, func(t *testing.T, driver string) {
+		api := newUsersAPI(t, driver)
+		body := `{"email":"alice@example.com","password":"correct-password-123"}`
+		for _, bad := range []string{SessionCookieName + "=not-base64!", SessionCookieName + "=", SessionCookieName + "=" + strings.Repeat("A", 4096)} {
+			w := api.public("/auth/login", body, bad)
+			expect(t, w, 200, "")
+			expect(t, api.do("GET", "/api/v1/me", sessionCookie(t, w), ""), 200, "")
+		}
+
+		first := sessionCookie(t, api.public("/auth/login", body, ""))
+		w := api.public("/auth/login", body, first)
+		expect(t, w, 200, "")
+		second := sessionCookie(t, w)
+		if second == first {
+			t.Fatal("the sign-in kept the session it was given")
+		}
+		expect(t, api.do("GET", "/api/v1/me", first, ""), 401, "unauthorized")
+		expect(t, api.do("GET", "/api/v1/me", second, ""), 200, "")
+
+		legacy := func(w *httptest.ResponseRecorder) bool {
+			for _, c := range w.Result().Cookies() {
+				if c.Name == legacyRefreshCookie {
+					return c.Value == "" && c.MaxAge < 0 && c.Path == "/auth"
+				}
+			}
+			return false
+		}
+		for _, tc := range []struct {
+			path, body string
+			status     int
+		}{
+			{"/auth/login", body, 200},
+			{"/auth/login", `{"email":"alice@example.com","password":"wrong-password-123"}`, 401},
+			{"/auth/logout", "{}", 204},
+		} {
+			w := api.public(tc.path, tc.body, legacyRefreshCookie+"=old-refresh-token")
+			expect(t, w, tc.status, "")
+			if !legacy(w) {
+				t.Fatalf("%s: the refresh cookie is not expired: %v", tc.path, w.Header().Values("Set-Cookie"))
+			}
+		}
+		if w := api.public("/auth/logout", "{}", ""); legacy(w) {
+			t.Fatal("a refresh cookie was expired for a request without one")
+		}
+		// Outside /auth/ the browser does not send it.
+		if w := api.do("GET", "/api/v1/me", second+"; "+legacyRefreshCookie+"=old-refresh-token", ""); legacy(w) {
+			t.Fatal("the refresh cookie was expired outside /auth/")
+		}
+	})
+}

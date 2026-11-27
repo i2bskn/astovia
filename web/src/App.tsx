@@ -1,7 +1,8 @@
 import { useEffect, useId, useState, useSyncExternalStore } from 'react';
 import type { FormEvent } from 'react';
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useMatch, useNavigate, useParams } from 'react-router';
-import { auth, markOIDCLogin, oidcLoginPath, oidcReturnTo } from './auth';
+import { auth, oidcReturnTo } from './auth';
+import OIDCLoginForm from './OIDCLoginForm';
 import type { User } from './auth';
 import { authConfig, isSigninErrorPath, signinErrorMessage, signinReason } from './authConfig';
 import type { AuthConfig } from './authConfig';
@@ -81,17 +82,6 @@ function LoginForm() {
     </form>
     <p className="gate-help"><Phrased text="アカウントの作成やパスワードの再設定は、この Astovia のオーナーに連絡してください。" /></p>
   </section>;
-}
-
-// OIDCLoginForm starts the single sign-on (OIDC) sign-in with a form POST
-// to the server, which redirects to the provider; afterwards the server
-// opens returnTo. It is only submitted from its button: an automatic
-// submission could loop on a failure.
-function OIDCLoginForm({ returnTo, label }: { returnTo: string; label: string }) {
-  return <form method="post" action={oidcLoginPath} onSubmit={markOIDCLogin}>
-    <input type="hidden" name="return_to" value={returnTo} />
-    <button className="button primary block" type="submit">{label}</button>
-  </form>;
 }
 
 // OIDCLoginCard replaces the password form when single sign-on (OIDC) signs

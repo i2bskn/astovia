@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -548,5 +550,71 @@ func TestResetNoticeFailure(t *testing.T) {
 				t.Fatalf("me: %s", w.Body.String())
 			}
 		})
+	}
+}
+
+// argon2Bytes is the memory of one Argon2id derivation of authlume's
+// password package (19 MiB), which every derivation allocates anew.
+const argon2Bytes = 19_456 * 1024
+
+// derivations returns how many key derivations f performed, counted by the
+// memory it allocated: authlume exposes no hook to count them, and each
+// derivation allocates argon2Bytes while the rest of a sign-in allocates
+// far less.
+func derivations(f func()) int {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return int((after.TotalAlloc - before.TotalAlloc) / argon2Bytes)
+}
+
+// TestPasswordLookupDerivations checks that a sign-in derives one key
+// whoever it names: a user with a password, an unknown or malformed
+// address, a disabled user and a user without a password. The failures are
+// all the same error.
+func TestPasswordLookupDerivations(t *testing.T) {
+	a := newUsersAPI(t, "sqlite")
+	ctx := context.Background()
+	hash, err := auth.Password("dave-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []store.User{
+		{ID: "dave-id", Email: "dave@example.com", PasswordHash: hash, CreatedAt: 3, Role: store.RoleMember},
+		{ID: "erin-id", Email: "erin@example.com", PasswordHash: store.NoPasswordHash, CreatedAt: 4, Role: store.RoleMember},
+	} {
+		if err := a.store.CreateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.store.ChangeUser(ctx, "dave@example.com", "", true, a.now.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	// The count itself: one hash is one derivation, none is none.
+	if n := derivations(func() { _, _ = auth.Password("x-password-123") }); n != 1 {
+		t.Fatalf("a hash counts %d derivations", n)
+	}
+	if n := derivations(func() {}); n != 0 {
+		t.Fatalf("nothing counts %d derivations", n)
+	}
+	for _, tc := range []struct {
+		name, email, password string
+		ok                    bool
+	}{
+		{"correct", "alice@example.com", "correct-password-123", true},
+		{"wrong", "alice@example.com", "wrong-password-123", false},
+		{"unknown", "nobody@example.com", "correct-password-123", false},
+		{"malformed", "not an address", "correct-password-123", false},
+		{"disabled", "dave@example.com", "dave-password-123", false},
+		{"no password", "erin@example.com", "correct-password-123", false},
+	} {
+		var err error
+		if n := derivations(func() { _, err = a.srv.verifyPassword(ctx, tc.email, tc.password) }); n != 1 {
+			t.Errorf("%s: %d derivations", tc.name, n)
+		}
+		if tc.ok != (err == nil) || (!tc.ok && !errors.Is(err, store.ErrUnauthorized)) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
 	}
 }

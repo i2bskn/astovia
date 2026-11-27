@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -402,6 +403,18 @@ func TestMCPOAuthFlow(t *testing.T) {
 			next := a.tokens(a.refresh(clientID, tokens.RefreshToken))
 			expectMCP(t, a.handler, next.AccessToken, 200)
 			oauthError(t, a.refresh(clientID, "not-a-token"), 400, "invalid_grant")
+			// The old refresh token is spent: presenting it again is reuse,
+			// which ends the connection, so the new tokens stop working too.
+			logs := captureLog(t)
+			oauthError(t, a.refresh(clientID, tokens.RefreshToken), 400, "invalid_grant")
+			expectMCP(t, a.handler, next.AccessToken, 401)
+			oauthError(t, a.refresh(clientID, next.RefreshToken), 400, "invalid_grant")
+			if got := a.connections(alice); len(got) != 0 {
+				t.Fatalf("connections after the reuse: %+v", got)
+			}
+			if !strings.Contains(logs.String(), "reuse detected") {
+				t.Fatalf("reuse log: %s", logs.String())
+			}
 
 			// Revocation (RFC 7009) ends the connection.
 			w = a.form("/oauth/revoke", url.Values{"token": {next.RefreshToken}, "client_id": {clientID}})
@@ -574,5 +587,173 @@ func serveFakeDNS(conn net.Conn, records map[string]netip.Addr) {
 		if _, err := conn.Write(append(size[:], out...)); err != nil {
 			return
 		}
+	}
+}
+
+// TestMCPOAuthLifetimes checks the configured lifetimes over HTTP: the
+// access token lasts AccessTTL, a refresh token RefreshIdle from its
+// issue, and no refresh extends a connection past ConnectionAbsolute.
+func TestMCPOAuthLifetimes(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			a := newMCPOAuthAPI(t, driver)
+			lifetimes := config.MCPConfig{AccessTTL: 5 * time.Minute, RefreshIdle: time.Hour, ConnectionAbsolute: 24 * time.Hour}
+			a.srv.mcp = newMCPOAuth(config.Config{PublicURL: usersOrigin, MCP: lifetimes}, a.store, func() time.Time { return *a.now })
+			a.handler = a.srv.handler()
+			clientID := a.client("Tool")
+			connect := func() oauthTokens {
+				t.Helper()
+				alice, _ := a.login("alice@example.com", "correct-password-123")
+				return a.connect(alice, "alice-id", clientID)
+			}
+
+			// The access token.
+			tokens := connect()
+			if tokens.ExpiresIn != int64(lifetimes.AccessTTL/time.Second) {
+				t.Fatalf("expires_in: %d", tokens.ExpiresIn)
+			}
+			*a.now = a.now.Add(lifetimes.AccessTTL - time.Second)
+			expectMCP(t, a.handler, tokens.AccessToken, 200)
+			*a.now = a.now.Add(2 * time.Second)
+			expectMCP(t, a.handler, tokens.AccessToken, 401)
+			next := a.tokens(a.refresh(clientID, tokens.RefreshToken))
+			if next.ExpiresIn != int64(lifetimes.AccessTTL/time.Second) {
+				t.Fatalf("expires_in after a refresh: %d", next.ExpiresIn)
+			}
+			expectMCP(t, a.handler, next.AccessToken, 200)
+
+			// The refresh token is refused once idle past RefreshIdle.
+			*a.now = a.now.Add(lifetimes.RefreshIdle + time.Second)
+			oauthError(t, a.refresh(clientID, next.RefreshToken), 400, "invalid_grant")
+
+			// Refreshes within RefreshIdle keep a connection only up to
+			// ConnectionAbsolute.
+			tokens = connect()
+			start := *a.now
+			for a.now.Add(lifetimes.RefreshIdle - time.Minute).Before(start.Add(lifetimes.ConnectionAbsolute)) {
+				*a.now = a.now.Add(lifetimes.RefreshIdle - time.Minute)
+				tokens = a.tokens(a.refresh(clientID, tokens.RefreshToken))
+			}
+			*a.now = start.Add(lifetimes.ConnectionAbsolute + time.Second)
+			oauthError(t, a.refresh(clientID, tokens.RefreshToken), 400, "invalid_grant")
+			expectMCP(t, a.handler, tokens.AccessToken, 401)
+		})
+	}
+}
+
+// TestMCPOAuthScopeCeiling checks that no client gets a scope beyond mcp
+// and offline_access: a registration that asks for more is given none of
+// it, and an authorization or refresh that asks for more is refused. A
+// refresh token is issued without offline_access too, as mcpoauth does
+// (spec §8.1).
+func TestMCPOAuthScopeCeiling(t *testing.T) {
+	a := newMCPOAuthAPI(t, "sqlite")
+	alice, _ := a.login("alice@example.com", "correct-password-123")
+	w := a.register("", map[string]any{"client_name": "Tool", "redirect_uris": []string{toolRedirect}, "scope": "mcp admin"})
+	if w.Code != 201 || strings.Contains(w.Body.String(), "admin") {
+		t.Fatalf("register: %d %s", w.Code, w.Body.String())
+	}
+	var registered struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &registered); err != nil || registered.ClientID == "" {
+		t.Fatalf("register: %s", w.Body.String())
+	}
+	clientID := registered.ClientID
+
+	for _, scope := range []string{"mcp admin", "admin", "mcp offline_access admin"} {
+		query, _ := authorizeQuery(t, clientID, scope)
+		if got := decodeJSON[authorizeErrorResponse](t, a.consent(alice, query)); got.Error != "invalid_scope" {
+			t.Fatalf("%q: consent: %+v", scope, got)
+		}
+		if got := redirected(t, a.decideFor(alice, query, "approve", "alice-id", "Tool", nil)); got.Query().Get("error") != "invalid_scope" || got.Query().Get("code") != "" {
+			t.Fatalf("%q: decision: %s", scope, got)
+		}
+	}
+	if got := a.connections(alice); len(got) != 0 {
+		t.Fatalf("connections: %+v", got)
+	}
+
+	for _, scope := range []string{"mcp", "mcp offline_access"} {
+		query, verifier := authorizeQuery(t, clientID, scope)
+		code := redirected(t, a.decide(alice, query, "approve", "alice-id")).Query().Get("code")
+		tokens := a.tokens(a.exchange(clientID, code, verifier))
+		if tokens.Scope != scope {
+			t.Fatalf("%q: granted %q", scope, tokens.Scope)
+		}
+		// A refresh cannot widen the grant.
+		w := a.form("/oauth/token", url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "refresh_token": {tokens.RefreshToken}, "scope": {"mcp admin"}})
+		oauthError(t, w, 400, "invalid_scope")
+		if next := a.tokens(a.refresh(clientID, tokens.RefreshToken)); next.Scope != scope {
+			t.Fatalf("%q: refreshed %q", scope, next.Scope)
+		}
+	}
+}
+
+// TestAccountChangesRevokeAccess checks that the account changes that end
+// every session also end the MCP connections and the WebAuthn ceremonies in
+// progress: disabling from the user management API, the completion of a
+// password reset link, and a password changed by the CLI.
+func TestAccountChangesRevokeAccess(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			ctx := context.Background()
+			a := newMCPOAuthAPI(t, driver)
+			alice, _ := a.login("alice@example.com", "correct-password-123")
+			clientID := a.client("Tool")
+			password := "correct-password-123"
+			ceremonies := func() int {
+				t.Helper()
+				n, err := countRows(driver, a.dsn, "SELECT COUNT(*) FROM webauthn_ceremonies WHERE subject = 'carol-id'")
+				if err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+			for i, tc := range []struct {
+				name   string
+				change func()
+			}{
+				{"disable", func() {
+					expect(t, a.do("PATCH", "/api/v1/users/carol-id", alice, `{"disabled":true}`), 200, "")
+					expect(t, a.do("PATCH", "/api/v1/users/carol-id", alice, `{"disabled":false}`), 200, "")
+				}},
+				{"reset link", func() {
+					w := a.do("POST", "/api/v1/users/carol-id/password-resets", alice, "")
+					expect(t, w, 201, "")
+					token := fragmentToken(t, decodeJSON[createdPasswordResetResponse](t, w).URL, usersOrigin+"/reset-password#")
+					password = "carol-reset-password"
+					expect(t, a.public("/auth/password-resets/complete", `{"token":"`+token+`","password":"`+password+`"}`, ""), 200, "")
+				}},
+				{"password change", func() {
+					password = "carol-changed-password"
+					hash, err := auth.Password(password)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := a.store.ChangeUser(ctx, "carol@example.com", hash, false, a.now.Unix()); err != nil {
+						t.Fatal(err)
+					}
+				}},
+			} {
+				carol, _ := a.login("carol@example.com", password)
+				tokens := a.connect(carol, "carol-id", clientID)
+				expectMCP(t, a.handler, tokens.AccessToken, 200)
+				key := sha256.Sum256([]byte(fmt.Sprintf("ceremony-%d", i)))
+				if err := a.store.WebAuthnCeremonies(time.Now).Create(ctx, key, "carol-id", []byte("record"), time.Now().Add(5*time.Minute)); err != nil {
+					t.Fatal(err)
+				}
+				if n := ceremonies(); n != 1 {
+					t.Fatalf("%s: %d ceremonies before the change", tc.name, n)
+				}
+				tc.change()
+				expectMCP(t, a.handler, tokens.AccessToken, 401)
+				oauthError(t, a.refresh(clientID, tokens.RefreshToken), 400, "invalid_grant")
+				expect(t, a.do("GET", "/api/v1/me", carol, ""), 401, "unauthorized")
+				if n := ceremonies(); n != 0 {
+					t.Fatalf("%s: %d ceremonies left", tc.name, n)
+				}
+			}
+		})
 	}
 }

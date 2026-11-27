@@ -105,3 +105,39 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	return &buf
 }
+
+// TestSessionReadDoesNotTouch checks that a read other than GET
+// /api/v1/me leaves the idle limit of its session as it was, while a
+// state-changing request and GET /api/v1/me extend it.
+func TestSessionReadDoesNotTouch(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			a := newUsersAPI(t, driver)
+			for _, tc := range []struct {
+				method, path, body string
+				status             int
+				extends            bool
+			}{
+				{"GET", "/api/v1/action-items", "", 200, false},
+				{"GET", "/api/v1/users", "", 200, false},
+				{"GET", "/api/v1/me", "", 200, true},
+				{"POST", "/api/v1/action-items", `{"content":"reply"}`, 201, true},
+				{"DELETE", "/api/v1/invitations/unknown", "", 404, true},
+			} {
+				alice, _ := a.login("alice@example.com", "correct-password-123")
+				*a.now = a.now.Add(sessionIdle - time.Hour)
+				w := a.do(tc.method, tc.path, alice, tc.body)
+				if w.Code != tc.status {
+					t.Fatalf("%s %s: %d %s", tc.method, tc.path, w.Code, w.Body.String())
+				}
+				*a.now = a.now.Add(2 * time.Hour)
+				w = a.do("GET", "/api/v1/action-items", alice, "")
+				if tc.extends {
+					expect(t, w, 200, "")
+				} else {
+					expect(t, w, 401, "unauthorized")
+				}
+			}
+		})
+	}
+}

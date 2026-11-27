@@ -48,6 +48,8 @@ type fakeIdP struct {
 type idpGrant struct {
 	nonce, challenge string
 	claims           map[string]any
+	// forged signs the ID token with a key the provider does not publish.
+	forged bool
 }
 
 func newFakeIdP(t *testing.T) *fakeIdP {
@@ -118,7 +120,14 @@ func (idp *fakeIdP) idToken(g idpGrant) string {
 	header := b64(mustJSON(idp.t, map[string]string{"alg": "RS256", "kid": "key", "typ": "JWT"}))
 	signed := header + "." + b64(mustJSON(idp.t, claims))
 	digest := sha256.Sum256([]byte(signed))
-	signature, err := rsa.SignPKCS1v15(rand.Reader, idp.key, crypto.SHA256, digest[:])
+	key := idp.key
+	if g.forged {
+		var err error
+		if key, err = rsa.GenerateKey(rand.Reader, 2048); err != nil {
+			idp.t.Fatal(err)
+		}
+	}
+	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
 	if err != nil {
 		idp.t.Fatal(err)
 	}
@@ -140,6 +149,21 @@ func (idp *fakeIdP) grant(location *url.URL, claims map[string]any) string {
 	idp.mu.Unlock()
 	return url.Values{"code": {code}, "state": {q.Get("state")}}.Encode()
 }
+
+// forge makes the ID token of the callback query signed with another key.
+func (idp *fakeIdP) forge(query string) {
+	idp.t.Helper()
+	q, err := url.ParseQuery(query)
+	if err != nil {
+		idp.t.Fatal(err)
+	}
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	g := idp.grants[q.Get("code")]
+	g.forged = true
+	idp.grants[q.Get("code")] = g
+}
+
 func (idp *fakeIdP) setDown(down bool) {
 	idp.mu.Lock()
 	defer idp.mu.Unlock()
@@ -761,4 +785,67 @@ func TestPasswordEndpointsWithOIDC(t *testing.T) {
 			expect(t, o.public("/auth/login", `{"email":"carol@example.com","password":"correct-password-123"}`, ""), 200, "")
 		})
 	}
+}
+
+// TestOIDCIDTokenRejected checks that an ID token that fails verification
+// starts no session: a nonce of another sign-in, another audience, an
+// expired token and a signature of another key.
+func TestOIDCIDTokenRejected(t *testing.T) {
+	o := newOIDCAPI(t, "sqlite", nil)
+	if err := o.store.ApproveOIDCLink(context.Background(), "alice@example.com", o.now.Unix()+3600); err != nil {
+		t.Fatal(err)
+	}
+	with := func(extra map[string]any) map[string]any {
+		c := claims("alice@example.com", "alice-sub")
+		for k, v := range extra {
+			c[k] = v
+		}
+		return c
+	}
+	past := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name   string
+		claims map[string]any
+		forged bool
+	}{
+		{"nonce", with(map[string]any{"nonce": "another-nonce"}), false},
+		{"audience", with(map[string]any{"aud": "another-client"}), false},
+		{"expired", with(map[string]any{"iat": past.Add(-time.Hour).Unix(), "exp": past.Unix()}), false},
+		{"signature", with(nil), true},
+	} {
+		loc, cookie := o.start("")
+		query := o.idp.grant(loc, tc.claims)
+		if tc.forged {
+			o.idp.forge(query)
+		}
+		w := o.callback(query, cookie)
+		if w.Code != http.StatusSeeOther || w.Header().Get("Location") != signinErrorPath+"?reason="+reasonFailed || issuedCookie(w) {
+			t.Fatalf("%s: %d %v", tc.name, w.Code, w.Header())
+		}
+		if issuer, subject := o.linkedTo("alice@example.com"); issuer != "" || subject != "" {
+			t.Fatalf("%s: linked to %s %s", tc.name, issuer, subject)
+		}
+	}
+	// The same sign-in with a valid token goes through.
+	o.signedIn(o.signIn(claims("alice@example.com", "alice-sub"), "/settings"), "/settings")
+}
+
+// TestOIDCLoginExpired checks that a callback after its sign-in expired
+// fails and starts no session.
+func TestOIDCLoginExpired(t *testing.T) {
+	mfaDrivers(t, func(t *testing.T, driver string) {
+		o := newOIDCAPI(t, driver, nil)
+		if err := o.store.ApproveOIDCLink(context.Background(), "alice@example.com", o.now.Unix()+3600); err != nil {
+			t.Fatal(err)
+		}
+		loc, cookie := o.start("/settings")
+		query := o.idp.grant(loc, claims("alice@example.com", "alice-sub"))
+		// authlume keeps the sign-in until its expiry by the wall clock;
+		// move the expiry into the past instead of waiting for it.
+		rawExec(t, driver, o.dsn, fmt.Sprintf("UPDATE oidc_logins SET expires_at = %d", time.Now().Add(-time.Second).Unix()))
+		expectSigninError(t, o.callback(query, cookie), reasonFailed)
+		if issuer, _ := o.linkedTo("alice@example.com"); issuer != "" {
+			t.Fatal("linked after an expired sign-in")
+		}
+	})
 }

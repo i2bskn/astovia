@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/i2bskn/astovia/internal/auth"
 	"github.com/i2bskn/astovia/internal/store"
 	"github.com/i2bskn/astovia/internal/testutil"
+	"github.com/i2bskn/authlume/mcpoauth"
 	"github.com/i2bskn/authlume/password"
 	"github.com/i2bskn/authlume/session"
 	"github.com/i2bskn/authlume/webauthn"
@@ -73,7 +76,52 @@ func grant(t *testing.T, s *store.Store, userID string) (cookie, token string) {
 	if err = s.CreateAPIToken(ctx, store.APIToken{ID: userID + "-token", UserID: userID, Name: "cli", CreatedAt: time.Now().Unix()}, hash, sid, time.Now().Unix()); err != nil {
 		t.Fatal(err)
 	}
+	// An MCP authorization code, an MCP connection and a WebAuthn ceremony
+	// in progress.
+	grants++
+	key := func(kind string) [32]byte { return sha256.Sum256(fmt.Appendf(nil, "%s-%s-%d", kind, userID, grants)) }
+	now := time.Now().Truncate(time.Second)
+	m := s.MCPOAuth(time.Now)
+	code := mcpoauth.Code{ClientID: "client", RedirectURI: "https://client.example/callback", Subject: userID, Scopes: []string{"mcp"}, Challenge: "challenge", ExpiresAt: now.Add(time.Minute)}
+	if err = m.CreateCode(store.WithApprovalSession(ctx, sid, now), key("code"), code); err != nil {
+		t.Fatal(err)
+	}
+	conn := mcpoauth.Connection{
+		ID: fmt.Sprintf("connection-%s-%d", userID, grants), Selector: key("selector"), Subject: userID, ClientID: "client",
+		Scopes: []string{"mcp"}, CreatedAt: now, RefreshedAt: now,
+		Access: key("access"), AccessExpiry: now.Add(time.Hour), Refresh: key("refresh"), RefreshExpiry: now.Add(24 * time.Hour),
+	}
+	if err = m.Create(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.WebAuthnCeremonies(time.Now).Create(ctx, key("ceremony"), userID, []byte("record"), now.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	return cookie, raw
+}
+
+// grants numbers the calls of grant, so that each adds new rows.
+var grants int
+
+// mcpAccess returns how many MCP authorization codes, MCP connections and
+// WebAuthn ceremonies userID has in the database of dsn; grant adds one of
+// each.
+func mcpAccess(t *testing.T, driver, dsn, userID string) int {
+	t.Helper()
+	db, err := sql.Open(map[string]string{"sqlite": "sqlite", "postgres": "pgx"}[driver], dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	total := 0
+	for _, table := range []string{"mcp_oauth_codes", "mcp_oauth_connections", "webauthn_ceremonies"} {
+		var n int
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM "+table+" WHERE subject = $1", userID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		total += n
+	}
+	return total
 }
 
 // liveAPIToken reports whether the API token raw still authenticates.
@@ -357,7 +405,7 @@ func TestUsersNoPasswordAndUnlink(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
-			s, _ := testutil.Database(t, driver)
+			s, dsn := testutil.Database(t, driver)
 			var err error
 			call := func(args ...string) error {
 				t.Helper()
@@ -490,10 +538,10 @@ func TestUsersNoPasswordAndUnlink(t *testing.T) {
 			if u := user("alice@example.com"); u.Role != alice.Role || u.PasswordHash != alice.PasswordHash || u.Disabled != 0 || approved("alice@example.com") {
 				t.Fatalf("%+v", u)
 			}
-			if liveSession(t, s, aliceCookie) || liveAPIToken(t, s, aliceToken) {
-				t.Fatal("unlink kept the session or the API token")
+			if liveSession(t, s, aliceCookie) || liveAPIToken(t, s, aliceToken) || mcpAccess(t, driver, dsn, alice.ID) != 0 {
+				t.Fatal("unlink kept the session, the API token, the MCP access or the ceremony")
 			}
-			if !liveSession(t, s, bobCookie) || !liveAPIToken(t, s, bobToken) {
+			if !liveSession(t, s, bobCookie) || !liveAPIToken(t, s, bobToken) || mcpAccess(t, driver, dsn, bob.ID) != 3 {
 				t.Fatal("unlink of alice revoked bob")
 			}
 			// Without an approval the same email address is not linked again.
@@ -526,12 +574,15 @@ func TestUsersNoPasswordAndUnlink(t *testing.T) {
 					t.Fatal("unlink --all kept an API token")
 				}
 			}
+			if mcpAccess(t, driver, dsn, alice.ID) != 0 || mcpAccess(t, driver, dsn, bob.ID) != 0 {
+				t.Fatal("unlink --all kept the MCP access or a ceremony")
+			}
 			// A user that is not linked keeps its session.
 			unlinkedCookie, _ := grant(t, s, user("alice@example.com").ID)
 			if err = call("unlink", "--all"); err != nil {
 				t.Fatalf("unlink --all again: %v", err)
 			}
-			if !liveSession(t, s, unlinkedCookie) {
+			if !liveSession(t, s, unlinkedCookie) || mcpAccess(t, driver, dsn, alice.ID) != 3 {
 				t.Fatal("unlink --all revoked a user that was not linked")
 			}
 		})
@@ -542,7 +593,7 @@ func TestUsersResetMFA(t *testing.T) {
 	for _, driver := range []string{"sqlite", "postgres"} {
 		t.Run(driver, func(t *testing.T) {
 			ctx := context.Background()
-			s, _ := testutil.Database(t, driver)
+			s, dsn := testutil.Database(t, driver)
 			call := func(args ...string) error {
 				t.Helper()
 				return account(ctx, s, args, strings.NewReader(""))
@@ -619,8 +670,8 @@ func TestUsersResetMFA(t *testing.T) {
 			if enrolled("alice-id") || !enrolled("bob-id") {
 				t.Fatal("reset-mfa")
 			}
-			if liveSession(t, s, cookie) || liveAPIToken(t, s, token) {
-				t.Fatal("reset-mfa kept the session or the API token")
+			if liveSession(t, s, cookie) || liveAPIToken(t, s, token) || mcpAccess(t, driver, dsn, alice.ID) != 0 {
+				t.Fatal("reset-mfa kept the session, the API token, the MCP access or the ceremony")
 			}
 			if err = verifyPassword(ctx, s, "alice@example.com", "correct-password-123"); err != nil {
 				t.Fatalf("password after reset-mfa: %v", err)
