@@ -553,11 +553,16 @@ func TestOIDCFirstSignIn(t *testing.T) {
 			// The linked identity signs in whatever its address says now.
 			o.signedIn(o.signIn(map[string]any{"sub": "alice-sub", "email": "new@example.com", "email_verified": false}, ""), "/")
 
-			// Unlinking revokes the sessions and needs a new approval.
+			// Unlinking revokes the sessions and the API tokens and needs
+			// a new approval.
+			w := o.do("POST", "/api/v1/api-tokens", cookie, `{"name":"cli"}`)
+			expect(t, w, 201, "")
+			apiToken := decodeJSON[createdAPITokenResponse](t, w).Token
 			if err := o.store.UnlinkOIDC(ctx, "alice@example.com"); err != nil {
 				t.Fatal(err)
 			}
 			expect(t, o.do("GET", "/api/v1/me", cookie, ""), 401, "unauthorized")
+			expect(t, o.do("GET", "/api/v1/action-items", apiToken, ""), 401, "unauthorized")
 			expectSigninError(t, o.signIn(alice, ""), reasonNotAllowed)
 
 			// Disabling clears the approval.
@@ -575,7 +580,7 @@ func TestOIDCFirstSignIn(t *testing.T) {
 
 			// An invitation creates the user, without a password, and is
 			// used up.
-			w := o.do("POST", "/api/v1/invitations", o.ownerSession(), `{"email":"dave@example.com","role":"member"}`)
+			w = o.do("POST", "/api/v1/invitations", o.ownerSession(), `{"email":"dave@example.com","role":"member"}`)
 			expect(t, w, 201, "")
 			if strings.Contains(w.Body.String(), "/invite") {
 				t.Fatalf("invitation link with OIDC: %s", w.Body.String())
